@@ -2,6 +2,8 @@
 
 单进程、单端口的法律咨询 Agent：FastAPI 同时托管 React 页面、业务 API、SSE 对话与法律 RAG MCP Server。
 
+项目架构、开发准则、技术选型、验收基线与已知缺口见 [`ai-context/SPEC.md`](ai-context/SPEC.md)。后续涉及架构边界、API、数据模型、配置或安全规则的变更，应同步更新该 Spec。
+
 ## 首次安装
 
 项目统一使用 Conda 环境，Python、Node.js 和项目依赖都由 `environment.yml` 管理：
