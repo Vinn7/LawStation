@@ -1,17 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { consumeSse } from './sse';
+import { conversationKey, emptyRuntime, isActiveStage, type ConversationKey } from './chat/runtimeStore';
 import { ChatHeader } from './components/ChatHeader';
 import { Composer } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { Sidebar } from './components/Sidebar';
 import { StatusNotice } from './components/StatusNotice';
-import type { ChatMessage, Citation, Conversation, IndexStatus, SseEvent, ToolActivity, User } from './types';
+import type {
+  AgentActivity,
+  AgentName,
+  AgentStage,
+  ChatMessage,
+  Citation,
+  Conversation,
+  ConversationRuntime,
+  IndexStatus,
+  SseEvent,
+  ToolActivity,
+  User,
+} from './types';
 
 const initialIndex: IndexStatus = { status: 'checking', message: '正在检查法律索引', progress: 0 };
 
-interface ActiveRequest {
+interface ConversationBucket {
+  items: Conversation[];
+  loading: boolean;
+  error: string;
+}
+
+interface StreamSnapshot {
   token: number;
+  key: ConversationKey;
   userId: string;
   conversationId: string;
   assistantMessageId: string;
@@ -22,36 +42,49 @@ function errorMessage(error: unknown): string {
   return '发生未知错误，请稍后重试';
 }
 
+function runtimeActive(runtime?: ConversationRuntime): boolean {
+  return isActiveStage(runtime?.status);
+}
+
 export default function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [userId, setUserId] = useState('');
-  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState('');
+  const [conversationBuckets, setConversationBuckets] = useState<Record<string, ConversationBucket>>({});
+  const [runtimes, setRuntimes] = useState<Record<string, ConversationRuntime>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [index, setIndex] = useState<IndexStatus>(initialIndex);
   const [usersLoading, setUsersLoading] = useState(true);
-  const [conversationsLoading, setConversationsLoading] = useState(false);
-  const [messagesLoading, setMessagesLoading] = useState(false);
-  const [conversationError, setConversationError] = useState('');
-  const [chatError, setChatError] = useState('');
-  const [failedQuestion, setFailedQuestion] = useState('');
-  const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null);
-  const [memoryMessage, setMemoryMessage] = useState('');
-  const [streaming, setStreaming] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const streamController = useRef<AbortController | null>(null);
-  const activeRequest = useRef<ActiveRequest | null>(null);
+  const controllers = useRef(new Map<ConversationKey, AbortController>());
   const requestSequence = useRef(0);
-  const conversationLoadSequence = useRef(0);
-  const currentUserId = useRef('');
-  currentUserId.current = userId;
+  const loadSequences = useRef(new Map<ConversationKey, number>());
+  const runtimeRef = useRef(runtimes);
+  const currentSelection = useRef({ userId, conversationId });
+  runtimeRef.current = runtimes;
+  currentSelection.current = { userId, conversationId };
+
+  const bucket = conversationBuckets[userId] ?? { items: [], loading: false, error: '' };
+  const selectedKey = userId && conversationId ? conversationKey(userId, conversationId) : null;
+  const selectedRuntime = selectedKey ? runtimes[selectedKey] : undefined;
+  const draftKey = `${userId}:${conversationId || 'new'}`;
+  const draft = drafts[draftKey] ?? '';
+  const conversations = bucket.items;
+  const messages = selectedRuntime?.messages ?? [];
+  const streaming = runtimeActive(selectedRuntime);
 
   const currentConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === conversationId),
     [conversations, conversationId],
   );
+
+  const taskStatuses = useMemo(() => Object.fromEntries(
+    conversations.flatMap((conversation) => {
+      const runtime = runtimes[conversationKey(userId, conversation.id)];
+      return runtime ? [[conversation.id, { status: runtime.status, unread: runtime.unread }]] : [];
+    }),
+  ), [conversations, runtimes, userId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -62,7 +95,10 @@ export default function App() {
       })
       .catch((error) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
-        setConversationError(`无法加载用户：${errorMessage(error)}`);
+        setConversationBuckets((current) => ({
+          ...current,
+          '': { items: [], loading: false, error: `无法加载用户：${errorMessage(error)}` },
+        }));
       })
       .finally(() => setUsersLoading(false));
     return () => controller.abort();
@@ -88,122 +124,158 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    cancelActiveStream('context-change');
     setConversationId('');
-    setMessages([]);
-    setConversations([]);
-    setToolActivity(null);
-    setMemoryMessage('');
-    setChatError('');
-    setFailedQuestion('');
+    setSidebarOpen(false);
     if (!userId) return;
-
     const controller = new AbortController();
-    const sequence = ++conversationLoadSequence.current;
-    setConversationsLoading(true);
-    setConversationError('');
+    setConversationBuckets((current) => ({
+      ...current,
+      [userId]: { items: current[userId]?.items ?? [], loading: true, error: '' },
+    }));
     api.conversations(userId, controller.signal)
-      .then((data) => {
-        if (sequence === conversationLoadSequence.current) setConversations(data);
-      })
+      .then((items) => setConversationBuckets((current) => ({
+        ...current,
+        [userId]: { items, loading: false, error: '' },
+      })))
       .catch((error) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
-        if (sequence === conversationLoadSequence.current) setConversationError(errorMessage(error));
-      })
-      .finally(() => {
-        if (sequence === conversationLoadSequence.current) setConversationsLoading(false);
+        setConversationBuckets((current) => ({
+          ...current,
+          [userId]: { items: current[userId]?.items ?? [], loading: false, error: errorMessage(error) },
+        }));
       });
     return () => controller.abort();
   }, [userId]);
 
-  useEffect(() => () => cancelActiveStream('context-change'), []);
+  useEffect(() => () => {
+    for (const controller of controllers.current.values()) controller.abort('page-unload');
+    controllers.current.clear();
+  }, []);
 
-  function cancelActiveStream(reason: 'context-change' | 'user-stop') {
-    if (streamController.current) streamController.current.abort(reason);
-    streamController.current = null;
-    if (reason === 'context-change') {
-      activeRequest.current = null;
-      setStreaming(false);
-    }
+  function updateRuntime(
+    key: ConversationKey,
+    update: (runtime: ConversationRuntime) => ConversationRuntime,
+    owner?: { userId: string; conversationId: string },
+  ) {
+    const current = runtimeRef.current;
+    const base = current[key] ?? emptyRuntime(owner?.userId ?? '', owner?.conversationId ?? '');
+    const next = { ...current, [key]: update(base) };
+    runtimeRef.current = next;
+    setRuntimes(next);
   }
 
-  async function createConversation(): Promise<Conversation | null> {
-    if (!userId || streaming) return null;
-    setConversationError('');
+  async function createConversation(ownerId = userId): Promise<Conversation | null> {
+    if (!ownerId) return null;
     try {
-      const ownerId = userId;
       const conversation = await api.createConversation(ownerId);
-      if (ownerId !== currentUserId.current) return null;
-      setConversations((current) => [conversation, ...current]);
-      setConversationId(conversation.id);
-      setMessages([]);
-      setSidebarOpen(false);
+      setConversationBuckets((current) => ({
+        ...current,
+        [ownerId]: {
+          items: [conversation, ...(current[ownerId]?.items ?? [])],
+          loading: false,
+          error: '',
+        },
+      }));
+      if (currentSelection.current.userId === ownerId) {
+        setConversationId(conversation.id);
+        setSidebarOpen(false);
+      }
       return conversation;
     } catch (error) {
-      setConversationError(errorMessage(error));
+      setConversationBuckets((current) => ({
+        ...current,
+        [ownerId]: {
+          items: current[ownerId]?.items ?? [],
+          loading: false,
+          error: errorMessage(error),
+        },
+      }));
       return null;
     }
   }
 
   async function openConversation(id: string) {
-    if (id === conversationId && !messagesLoading) {
-      setSidebarOpen(false);
-      return;
-    }
-    cancelActiveStream('context-change');
     const ownerId = userId;
-    const sequence = ++conversationLoadSequence.current;
+    const key = conversationKey(ownerId, id);
     setConversationId(id);
-    setMessages([]);
-    setMessagesLoading(true);
-    setChatError('');
-    setToolActivity(null);
-    setMemoryMessage('');
     setSidebarOpen(false);
+    updateRuntime(key, (runtime) => ({ ...runtime, unread: false, updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
+    const cached = runtimeRef.current[key];
+    if (cached && (cached.messages.length > 0 || runtimeActive(cached))) return;
+
+    const sequence = (loadSequences.current.get(key) ?? 0) + 1;
+    loadSequences.current.set(key, sequence);
+    updateRuntime(key, (runtime) => ({ ...runtime, loading: true, error: '', updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     try {
       const data = await api.messages(ownerId, id);
-      if (sequence === conversationLoadSequence.current && ownerId === currentUserId.current) setMessages(data);
+      const latest = runtimeRef.current[key];
+      if (sequence !== loadSequences.current.get(key) || runtimeActive(latest)) return;
+      updateRuntime(key, (runtime) => ({ ...runtime, messages: data, loading: false, updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     } catch (error) {
-      if (sequence === conversationLoadSequence.current) setChatError(errorMessage(error));
-    } finally {
-      if (sequence === conversationLoadSequence.current) setMessagesLoading(false);
+      updateRuntime(key, (runtime) => ({ ...runtime, loading: false, error: errorMessage(error), updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     }
   }
 
-  function isCurrent(request: ActiveRequest): boolean {
-    const current = activeRequest.current;
-    return Boolean(current && current.token === request.token && current.userId === request.userId && current.conversationId === request.conversationId);
+  function isCurrentStream(snapshot: StreamSnapshot): boolean {
+    return runtimeRef.current[snapshot.key]?.requestToken === snapshot.token;
   }
 
-  function updateAssistant(request: ActiveRequest, update: (message: ChatMessage) => ChatMessage) {
-    if (!isCurrent(request)) return;
-    setMessages((current) => current.map((message) => (
-      message.id === request.assistantMessageId ? update(message) : message
-    )));
+  function updateAssistant(snapshot: StreamSnapshot, update: (message: ChatMessage) => ChatMessage) {
+    if (!isCurrentStream(snapshot)) return;
+    updateRuntime(snapshot.key, (runtime) => ({
+      ...runtime,
+      messages: runtime.messages.map((message) => (
+        message.id === snapshot.assistantMessageId ? update(message) : message
+      )),
+      updatedAt: Date.now(),
+    }), snapshot);
   }
 
-  function handleStreamEvent(request: ActiveRequest, item: SseEvent, streamFailure: { message: string }) {
-    if (!isCurrent(request)) return;
+  function handleStreamEvent(snapshot: StreamSnapshot, item: SseEvent, streamFailure: { message: string }) {
+    if (!isCurrentStream(snapshot)) return;
     if (item.event === 'token') {
       const token = typeof item.data === 'string' ? item.data : '';
-      updateAssistant(request, (message) => ({ ...message, content: message.content + token }));
+      updateAssistant(snapshot, (message) => ({ ...message, content: message.content + token }));
+    } else if (item.event === 'agent_status') {
+      const data = item.data as { agent?: AgentName; status?: AgentStage; message?: string };
+      updateRuntime(snapshot.key, (runtime) => ({
+        ...runtime,
+        status: data.status ?? runtime.status,
+        activeAgent: data.agent,
+        statusMessage: data.message,
+        toolActivity: undefined,
+        updatedAt: Date.now(),
+      }), snapshot);
     } else if (item.event === 'tool_call_start') {
       const data = item.data as { name?: string };
-      setToolActivity({ name: data.name ?? 'unknown', status: 'running' });
+      updateRuntime(snapshot.key, (runtime) => ({ ...runtime, toolActivity: { name: data.name ?? 'unknown', status: 'running' }, updatedAt: Date.now() }), snapshot);
     } else if (item.event === 'tool_call_result') {
       const data = item.data as { name?: string; status?: string };
-      const status = data.status === 'success' ? 'success' : data.status === 'timeout' ? 'timeout' : 'failed';
-      setToolActivity({ name: data.name ?? 'unknown', status });
+      const status: ToolActivity['status'] = data.status === 'success' ? 'success' : data.status === 'timeout' ? 'timeout' : 'failed';
+      updateRuntime(snapshot.key, (runtime) => ({
+        ...runtime,
+        toolActivity: status === 'success' ? undefined : { name: data.name ?? 'unknown', status },
+        updatedAt: Date.now(),
+      }), snapshot);
     } else if (item.event === 'memory_status') {
       const data = item.data as { compressed?: boolean };
-      setMemoryMessage(data.compressed ? '本轮对话已完成摘要与记忆整理' : '本轮对话已保存');
+      updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: data.compressed ? '本轮对话已完成摘要与记忆整理' : '本轮对话已保存', updatedAt: Date.now() }), snapshot);
     } else if (item.event === 'citations') {
       const raw = Array.isArray(item.data) ? item.data : [];
       const citations = raw.filter((citation): citation is Citation => Boolean(citation && typeof citation === 'object'));
-      updateAssistant(request, (message) => ({ ...message, citations }));
+      updateAssistant(snapshot, (message) => ({ ...message, citations }));
     } else if (item.event === 'message_end') {
-      updateAssistant(request, (message) => ({ ...message, status: 'complete' }));
-      setToolActivity(null);
+      updateAssistant(snapshot, (message) => ({ ...message, status: 'complete' }));
+      const visible = currentSelection.current.userId === snapshot.userId && currentSelection.current.conversationId === snapshot.conversationId;
+      updateRuntime(snapshot.key, (runtime) => ({
+        ...runtime,
+        status: 'completed',
+        activeAgent: undefined,
+        statusMessage: undefined,
+        toolActivity: undefined,
+        unread: !visible,
+        updatedAt: Date.now(),
+      }), snapshot);
     } else if (item.event === 'error') {
       const data = item.data as { message?: string };
       streamFailure.message = data.message || '回答生成失败';
@@ -211,67 +283,87 @@ export default function App() {
   }
 
   async function send(questionOverride?: string) {
+    const ownerId = userId;
     const question = (questionOverride ?? draft).trim();
-    if (!question || !userId || streaming || usersLoading) return;
+    if (!question || !ownerId || usersLoading) return;
     let targetConversationId = conversationId;
     if (!targetConversationId) {
-      const created = await createConversation();
+      const created = await createConversation(ownerId);
       if (!created) return;
       targetConversationId = created.id;
     }
+    const key = conversationKey(ownerId, targetConversationId);
+    if (runtimeActive(runtimeRef.current[key]) || controllers.current.has(key)) return;
 
     const token = ++requestSequence.current;
     const assistantMessageId = `assistant-${token}`;
-    const request: ActiveRequest = { token, userId, conversationId: targetConversationId, assistantMessageId };
+    const snapshot: StreamSnapshot = { token, key, userId: ownerId, conversationId: targetConversationId, assistantMessageId };
     const controller = new AbortController();
-    activeRequest.current = request;
-    streamController.current = controller;
-    setDraft('');
-    setFailedQuestion('');
-    setChatError('');
-    setToolActivity(null);
-    setMemoryMessage('');
-    setStreaming(true);
-    setMessages((current) => [
-      ...current,
-      { id: `user-${token}`, role: 'user', content: question, status: 'complete' },
-      { id: assistantMessageId, role: 'assistant', content: '', status: 'streaming' },
-    ]);
+    controllers.current.set(key, controller);
+    setDrafts((current) => ({ ...current, [draftKey]: '' }));
+    updateRuntime(key, (runtime) => ({
+      ...runtime,
+      messages: [
+        ...runtime.messages,
+        { id: `user-${token}`, role: 'user', content: question, status: 'complete' },
+        { id: assistantMessageId, role: 'assistant', content: '', status: 'streaming' },
+      ],
+      status: 'analyzing',
+      activeAgent: 'case_analyst',
+      statusMessage: '正在启动案情分析',
+      requestToken: token,
+      toolActivity: undefined,
+      memoryMessage: '',
+      error: '',
+      failedQuestion: '',
+      loading: false,
+      unread: false,
+      updatedAt: Date.now(),
+    }), snapshot);
 
     const streamFailure = { message: '' };
     try {
-      const response = await api.streamMessage(userId, targetConversationId, question, controller.signal);
-      await consumeSse(response, (item) => handleStreamEvent(request, item, streamFailure));
-      if (!isCurrent(request)) return;
+      const response = await api.streamMessage(ownerId, targetConversationId, question, controller.signal);
+      await consumeSse(response, (item) => handleStreamEvent(snapshot, item, streamFailure));
+      if (!isCurrentStream(snapshot)) return;
       if (streamFailure.message) throw new Error(streamFailure.message);
-      updateAssistant(request, (message) => ({ ...message, status: 'complete' }));
+      updateAssistant(snapshot, (message) => ({ ...message, status: 'complete' }));
+      const visible = currentSelection.current.userId === ownerId && currentSelection.current.conversationId === targetConversationId;
+      updateRuntime(key, (runtime) => ({
+        ...runtime,
+        status: 'completed',
+        activeAgent: undefined,
+        statusMessage: undefined,
+        toolActivity: undefined,
+        unread: !visible,
+        updatedAt: Date.now(),
+      }), snapshot);
     } catch (error) {
-      if (!isCurrent(request)) return;
-      const abortReason = controller.signal.reason;
-      if (controller.signal.aborted && abortReason === 'user-stop') {
-        updateAssistant(request, (message) => ({ ...message, status: 'interrupted' }));
-      } else if (!(controller.signal.aborted && abortReason === 'context-change')) {
-        setChatError(errorMessage(error));
-        setFailedQuestion(question);
-        setDraft(question);
-        updateAssistant(request, (message) => ({ ...message, status: 'error' }));
+      if (!isCurrentStream(snapshot)) return;
+      if (controller.signal.aborted) {
+        updateAssistant(snapshot, (message) => ({ ...message, status: 'interrupted' }));
+        updateRuntime(key, (runtime) => ({ ...runtime, status: 'interrupted', toolActivity: undefined, updatedAt: Date.now() }), snapshot);
+      } else {
+        updateAssistant(snapshot, (message) => ({ ...message, status: 'error' }));
+        updateRuntime(key, (runtime) => ({ ...runtime, status: 'failed', error: errorMessage(error), failedQuestion: question, toolActivity: undefined, updatedAt: Date.now() }), snapshot);
       }
     } finally {
-      if (isCurrent(request)) {
-        activeRequest.current = null;
-        streamController.current = null;
-        setStreaming(false);
-      }
+      if (controllers.current.get(key) === controller) controllers.current.delete(key);
     }
   }
 
-  function stopStream() {
-    cancelActiveStream('user-stop');
+  function stopCurrentStream() {
+    if (!selectedKey) return;
+    controllers.current.get(selectedKey)?.abort('user-stop');
   }
 
-  function chooseSuggestion(question: string) {
-    setDraft(question);
+  function setDraft(value: string) {
+    setDrafts((current) => ({ ...current, [draftKey]: value }));
   }
+
+  const agentActivity: AgentActivity | null = selectedRuntime?.activeAgent && selectedRuntime.statusMessage
+    ? { agent: selectedRuntime.activeAgent, status: selectedRuntime.status, message: selectedRuntime.statusMessage }
+    : null;
 
   return (
     <main className="app-shell">
@@ -281,9 +373,10 @@ export default function App() {
         conversations={conversations}
         activeConversationId={conversationId}
         open={sidebarOpen}
-        loading={conversationsLoading}
-        error={conversationError}
-        disabled={streaming}
+        loading={bucket.loading}
+        error={bucket.error || conversationBuckets['']?.error || ''}
+        disabled={usersLoading}
+        taskStatuses={taskStatuses}
         onUserChange={setUserId}
         onCreate={() => void createConversation()}
         onOpenConversation={(id) => void openConversation(id)}
@@ -297,27 +390,28 @@ export default function App() {
         />
         <MessageList
           messages={messages}
-          loading={messagesLoading}
+          loading={Boolean(selectedRuntime?.loading)}
           conversationSelected={Boolean(conversationId)}
-          onSuggestion={chooseSuggestion}
+          onSuggestion={setDraft}
         />
         <div className="bottom-dock">
           <StatusNotice
             index={index}
-            tool={toolActivity}
-            memoryMessage={memoryMessage}
-            error={chatError}
-            failedQuestion={failedQuestion}
-            onRetry={() => void send(failedQuestion)}
-            onDismissError={() => { setChatError(''); setFailedQuestion(''); }}
+            agent={agentActivity}
+            tool={selectedRuntime?.toolActivity ?? null}
+            memoryMessage={selectedRuntime?.memoryMessage ?? ''}
+            error={selectedRuntime?.error ?? ''}
+            failedQuestion={selectedRuntime?.failedQuestion ?? ''}
+            onRetry={() => void send(selectedRuntime?.failedQuestion)}
+            onDismissError={() => selectedKey && updateRuntime(selectedKey, (runtime) => ({ ...runtime, error: '', failedQuestion: '', updatedAt: Date.now() }))}
           />
           <Composer
             value={draft}
             streaming={streaming}
-            disabled={!userId || usersLoading || messagesLoading}
+            disabled={!userId || usersLoading || Boolean(selectedRuntime?.loading)}
             onChange={setDraft}
             onSend={() => void send()}
-            onStop={stopStream}
+            onStop={stopCurrentStream}
           />
         </div>
       </section>

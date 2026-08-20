@@ -1,47 +1,14 @@
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain.agents.middleware import (
-    ModelCallLimitMiddleware,
-    ToolCallLimitMiddleware,
-)
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage
 
-from backend.app.agent.middleware import ToolAuditMiddleware
+from backend.app.agent.graph import LegalConsultationGraph
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
+from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings, get_settings
-from backend.app.core.context import RequestUserContext
-
-SYSTEM_PROMPT = """你是一名谨慎的中国法律咨询助手。你可以自主决定是否调用法律检索工具以及工具参数。
-涉及具体法律规则、法条编号、权利义务或法律结论时，应优先使用 search_laws 或 get_law_article 核验；
-结果不足时可以修改查询再次调用。禁止虚构法条。工具不可用时要明确说明未能核验。
-回答不是正式法律意见。不得向工具传递或猜测用户身份；记忆已由系统按当前用户隔离注入。"""
-
-DEGRADED_PROMPT = """本轮法律检索工具不可用。不得声称已经完成法规核验，不得虚构具体法条编号；
-涉及具体法律结论时必须明确提示当前处于检索降级状态，并建议用户稍后重试或咨询专业律师。"""
-
-
-@dataclass
-class AgentInvocationContext:
-    user: RequestUserContext
-    conversation_id: str
-    tool_call_count: int = 0
-
-
-def _text_content(message: BaseMessage) -> str:
-    if isinstance(message.content, str):
-        return message.content
-    parts = []
-    for block in message.content if isinstance(message.content, list) else []:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
-            parts.append(str(block.get("text", "")))
-    return "".join(parts)
 
 
 class AgentRuntime:
@@ -55,43 +22,26 @@ class AgentRuntime:
         self.provider = provider
         self.settings = settings or get_settings()
         self._compile_lock = asyncio.Lock()
-        self._agent: Any = None
-        self._agent_key: tuple[int, tuple[str, ...]] | None = None
+        self._graph: LegalConsultationGraph | None = None
+        self._graph_key: tuple[int, tuple[str, ...]] | None = None
 
-    async def ensure_ready(self, context: AgentInvocationContext):
+    async def ensure_ready(self, context: AgentInvocationContext) -> LegalConsultationGraph:
         model = self.provider.get_chat_model()
-        audit_context = {
-            "request_id": context.user.request_id,
-            "tenant_id": context.user.tenant_id,
-            "user_id": context.user.user_id,
-            "conversation_id": context.conversation_id,
-        }
-        tools = await self.registry.get_tools(audit_context)
+        tools = await self.registry.get_tools(context.audit_fields)
         registry_status = self.registry.status()
         key = (registry_status.version, tuple(tool.name for tool in tools))
-        if self._agent is not None and self._agent_key == key:
-            return self._agent, bool(tools)
+        if self._graph is not None and self._graph_key == key:
+            return self._graph
         async with self._compile_lock:
-            if self._agent is None or self._agent_key != key:
-                self._agent = create_agent(
+            if self._graph is None or self._graph_key != key:
+                self._graph = LegalConsultationGraph(
                     model=model,
                     tools=tools,
-                    context_schema=AgentInvocationContext,
-                    middleware=[
-                        ToolCallLimitMiddleware(
-                            run_limit=self.settings.agent_max_tool_calls,
-                            exit_behavior="continue",
-                        ),
-                        ModelCallLimitMiddleware(
-                            run_limit=self.settings.agent_max_model_calls,
-                            exit_behavior="end",
-                        ),
-                        ToolAuditMiddleware(self.registry, self.settings),
-                    ],
-                    name="lawstation-legal-agent",
+                    registry=self.registry,
+                    settings=self.settings,
                 )
-                self._agent_key = key
-        return self._agent, bool(tools)
+                self._graph_key = key
+        return self._graph
 
     async def stream(
         self,
@@ -99,47 +49,59 @@ class AgentRuntime:
         messages: list[BaseMessage],
         memory_context: str,
     ) -> AsyncIterator[dict[str, Any]]:
-        agent, tools_available = await self.ensure_ready(context)
-        prompt = SYSTEM_PROMPT
-        if not tools_available:
-            prompt += "\n\n" + DEGRADED_PROMPT
-        if memory_context:
-            prompt += "\n\n" + memory_context
-        input_messages = [SystemMessage(content=prompt), *messages]
-        final_answer = ""
-        emitted_tokens: list[str] = []
-        async for part in agent.astream(
-            {"messages": input_messages},
+        graph = await self.ensure_ready(context)
+        state: LegalConsultationState = {
+            "messages": list(messages),
+            "memory_context": memory_context,
+            "case_analysis": None,
+            "evidence_packet": None,
+            "counsel_draft": None,
+            "review_result": None,
+            "retry_count": 0,
+            "revision_count": 0,
+            "final_answer": "",
+            "citations": [],
+            "errors": [],
+        }
+        final_state: dict[str, Any] = dict(state)
+        async for part in graph.compiled.astream(
+            state,
             context=context,
-            stream_mode=["messages", "updates", "custom"],
+            stream_mode=["updates", "custom"],
             version="v2",
         ):
             part_type = part.get("type")
             data = part.get("data")
             if part_type == "custom" and isinstance(data, dict) and "event" in data:
-                yield data
-                continue
-            if part_type == "messages" and isinstance(data, tuple):
-                message, _metadata = data
-                if isinstance(message, AIMessageChunk):
-                    text = _text_content(message)
-                    if text:
-                        emitted_tokens.append(text)
-                        yield {"event": "token", "data": text}
-                continue
-            if part_type == "updates" and isinstance(data, dict):
+                event_data = data.get("data")
+                if isinstance(event_data, dict):
+                    event_data = {
+                        **event_data,
+                        "request_id": context.identity.request_id,
+                        "user_id": context.identity.user_id,
+                        "conversation_id": context.identity.conversation_id,
+                    }
+                yield {"event": data["event"], "data": event_data}
+            elif part_type == "updates" and isinstance(data, dict):
                 for update in data.values():
-                    update_messages = update.get("messages", []) if isinstance(update, dict) else []
-                    if not update_messages:
-                        continue
-                    message = update_messages[-1]
-                    if isinstance(message, AIMessage) and not message.tool_calls:
-                        text = _text_content(message)
-                        if text:
-                            final_answer = text
-        if final_answer and not "".join(emitted_tokens).endswith(final_answer):
-            yield {"event": "token", "data": final_answer}
-        yield {"event": "agent_final", "data": final_answer or "".join(emitted_tokens)}
+                    if isinstance(update, dict):
+                        final_state.update(update)
+        citations = final_state.get("citations") or []
+        if citations:
+            yield {
+                "event": "citations",
+                "data": [
+                    item.model_dump() if hasattr(item, "model_dump") else item
+                    for item in citations
+                ],
+            }
+        final_answer = str(final_state.get("final_answer") or "")
+        # Draft tokens are withheld until review completes. Stream the approved
+        # answer in small chunks without exposing internal drafts or reasoning.
+        for start in range(0, len(final_answer), 24):
+            yield {"event": "token", "data": final_answer[start : start + 24]}
+            await asyncio.sleep(0)
+        yield {"event": "agent_final", "data": final_answer}
 
     async def close(self) -> None:
         await self.registry.close()

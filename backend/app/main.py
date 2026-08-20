@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.agent.concurrency import AgentConcurrencyManager
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     registry = MCPToolRegistry()
     app.state.mcp_tool_registry = registry
     app.state.agent_runtime = AgentRuntime(registry, LLMProvider())
+    app.state.agent_concurrency = AgentConcurrencyManager()
     async with mcp.session_manager.run():
         audit("application.started", status="ready")
         try:

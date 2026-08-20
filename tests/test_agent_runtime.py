@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,10 +11,19 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 
+from backend.app.agent.concurrency import (
+    AgentConcurrencyManager,
+    ConcurrencyIdentity,
+    ConversationBusyError,
+)
+from backend.app.agent.graph import _citation_errors, _no_match_violations
+from backend.app.agent.middleware import result_metadata
 from backend.app.agent.provider import AgentConfigurationError, LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
-from backend.app.agent.runtime import AgentInvocationContext, AgentRuntime
+from backend.app.agent.runtime import AgentRuntime
+from backend.app.agent.schemas import CounselDraft, EvidenceItem, EvidencePacket
 from backend.app.agent.service import AgentService
+from backend.app.agent.state import AgentInvocationContext, AgentInvocationIdentity
 from backend.app.core.config import Settings
 from backend.app.core.context import RequestUserContext
 
@@ -23,6 +33,7 @@ def settings(**changes):
         "deepseek_api_key": "test-key",
         "mcp_tool_timeout_seconds": 1,
         "mcp_tool_discovery_retry_seconds": 30,
+        "agent_max_model_calls": 8,
     }
     values.update(changes)
     return Settings(_env_file=None, **values)
@@ -31,7 +42,22 @@ def settings(**changes):
 def fake_tool():
     async def search_laws(query: str) -> str:
         """Search laws for a query."""
-        return query
+        return json.dumps([
+            {
+                "document_id": "law-1",
+                "law_name": "劳动合同法",
+                "article_number": "第八十二条",
+                "content": query,
+            }
+        ], ensure_ascii=False)
+
+    return StructuredTool.from_function(coroutine=search_laws)
+
+
+def empty_tool():
+    async def search_laws(query: str) -> str:
+        """Search laws for a query and return no candidates."""
+        return "[]"
 
     return StructuredTool.from_function(coroutine=search_laws)
 
@@ -39,6 +65,12 @@ def fake_tool():
 class ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self
+
+
+def invocation(user="user", conversation="conversation", request="request"):
+    return AgentInvocationContext(
+        AgentInvocationIdentity(request, "tenant", user, conversation)
+    )
 
 
 @pytest.mark.asyncio
@@ -67,38 +99,81 @@ async def test_registry_failure_obeys_retry_cooldown():
 
 
 @pytest.mark.asyncio
-async def test_runtime_streams_tokens_and_final_answer_without_tools():
+async def test_three_agent_graph_routes_casual_chat_without_research():
     registry = SimpleNamespace(
         get_tools=AsyncMock(return_value=[]),
         status=lambda: SimpleNamespace(version=0),
         close=AsyncMock(),
     )
+    analysis = {
+        "request_type": "casual_chat",
+        "case_summary": "问候",
+        "next_action": "direct_answer",
+        "direct_answer": "您好，请问有什么法律问题？",
+    }
     provider = SimpleNamespace(
-        get_chat_model=lambda: GenericFakeChatModel(messages=iter(["测试回答"]))
+        get_chat_model=lambda: GenericFakeChatModel(messages=iter([json.dumps(analysis, ensure_ascii=False)]))
     )
     runtime = AgentRuntime(registry, provider, settings())
-    context = AgentInvocationContext(
-        RequestUserContext("tenant", "user", "request"), "conversation"
-    )
+    context = invocation()
 
     events = [
         event
-        async for event in runtime.stream(
-            context,
-            [HumanMessage(content="问题")],
-            "用户记忆",
-        )
+        async for event in runtime.stream(context, [HumanMessage(content="你好")], "用户记忆")
     ]
 
-    assert events == [
-        {"event": "token", "data": "测试回答"},
-        {"event": "agent_final", "data": "测试回答"},
-    ]
+    assert any(event["event"] == "agent_status" and event["data"]["status"] == "analyzing" for event in events)
+    assert not any(event["event"] == "tool_call_start" for event in events)
+    assert events[-1] == {"event": "agent_final", "data": "您好，请问有什么法律问题？"}
+    assert context.metrics.model_call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_create_agent_executes_cached_mcp_tool_and_streams_safe_events(monkeypatch):
+async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch):
     monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
+    analysis = {
+        "request_type": "legal_consultation",
+        "case_summary": "未签劳动合同",
+        "legal_issues": ["未签合同责任"],
+        "research_tasks": [{"issue_id": "issue-1", "query": "未签劳动合同 二倍工资", "purpose": "核验责任"}],
+        "next_action": "research",
+    }
+    evidence = {
+        "research_tasks": analysis["research_tasks"],
+        "evidence_items": [{
+            "document_id": "law-1",
+            "law_name": "劳动合同法",
+            "article_number": "第八十二条",
+            "content": "用人单位未依法订立书面劳动合同，应当依法承担责任。",
+            "supports_issue_ids": ["issue-1"],
+            "retrieval_sources": ["bm25"],
+            "verification_status": "retrieved",
+            "data_version": "v1",
+        }],
+        "unresolved_issues": [],
+        "conflicts": [],
+        "research_summary": "已找到相关依据",
+    }
+    draft = {
+        "answer": "依据《劳动合同法》第八十二条，可以依法主张权利。",
+        "claims": [{"claim": "可以依法主张权利", "evidence_document_ids": ["law-1"]}],
+        "confidence": "high",
+        "limitations": [],
+        "follow_up_questions": [],
+    }
+    review = {"approved": True, "next_action": "finalize"}
+    model = ToolCallingFakeModel(responses=[
+        AIMessage(content=json.dumps(analysis, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_laws",
+            "args": {"query": "未签劳动合同 二倍工资"},
+            "id": "call-1",
+            "type": "tool_call",
+        }]),
+        AIMessage(content=json.dumps(evidence, ensure_ascii=False)),
+        AIMessage(content=json.dumps(draft, ensure_ascii=False)),
+        AIMessage(content=json.dumps(review, ensure_ascii=False)),
+    ])
     tool = fake_tool()
     registry = SimpleNamespace(
         get_tools=AsyncMock(return_value=[tool]),
@@ -106,111 +181,121 @@ async def test_create_agent_executes_cached_mcp_tool_and_streams_safe_events(mon
         close=AsyncMock(),
         invalidate=lambda *args: None,
     )
-    model = ToolCallingFakeModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "search_laws",
-                        "args": {"query": "劳动合同"},
-                        "id": "call-1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="最终回答"),
-        ]
-    )
-    runtime = AgentRuntime(
-        registry,
-        SimpleNamespace(get_chat_model=lambda: model),
-        settings(),
-    )
-    context = AgentInvocationContext(
-        RequestUserContext("tenant", "user", "request"), "conversation"
-    )
+    runtime = AgentRuntime(registry, SimpleNamespace(get_chat_model=lambda: model), settings())
+    context = invocation()
 
-    events = [
-        event
-        async for event in runtime.stream(
-            context,
-            [HumanMessage(content="问题")],
-            "",
-        )
-    ]
+    events = [event async for event in runtime.stream(context, [HumanMessage(content="问题")], "")]
 
-    assert {"event": "tool_call_start", "data": {"name": "search_laws", "status": "started"}} in events
-    assert {"event": "tool_call_result", "data": {"name": "search_laws", "status": "success"}} in events
-    assert events[-1] == {"event": "agent_final", "data": "最终回答"}
-    assert context.tool_call_count == 1
+    stages = [event["data"]["status"] for event in events if event["event"] == "agent_status"]
+    assert stages == ["analyzing", "researching", "drafting", "reviewing", "completed"]
+    assert any(event["event"] == "tool_call_start" for event in events)
+    citations = next(event["data"] for event in events if event["event"] == "citations")
+    assert citations[0]["document_id"] == "law-1"
+    assert events[-1]["data"] == draft["answer"]
+    assert context.metrics.tool_call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_tool_call_limit_counts_actual_executions(monkeypatch):
+async def test_no_match_is_successful_and_does_not_return_to_research(monkeypatch):
     monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
-    tool = fake_tool()
+    analysis = {
+        "request_type": "legal_consultation",
+        "case_summary": "借款到期未还",
+        "legal_issues": ["如何处理逾期借款"],
+        "research_tasks": [{"issue_id": 1, "query": "借款到期未还", "purpose": "查找依据"}],
+        "next_action": "research",
+    }
+    research = {
+        "retrieval_status": "matched",
+        "research_tasks": analysis["research_tasks"],
+        "evidence_items": [],
+        "unresolved_issues": [{"issue_id": 1, "description": "当前法规库没有可引用结果"}],
+        "research_summary": "检索正常完成，但未找到可引用法条。",
+    }
+    answer = (
+        "## 初步判断\n\n可以先整理借款约定、付款记录和催收记录，再结合完整事实选择处理方式。"
+        "\n\n## 检索说明\n\n本轮法规检索正常完成，但当前法规库中未检索到可引用法条。"
+        "以上属于一般性分析，不构成已经过法规核验的确定性法律结论。"
+    )
+    draft = {
+        "answer": answer,
+        "claims": [],
+        "confidence": "low",
+        "limitations": ["当前没有可引用法条"],
+        "follow_up_questions": [],
+    }
+    # The reviewer asks to research again, but no_match must terminate research
+    # and approve a boundary-compliant general answer instead.
+    review = {"approved": False, "next_action": "research_again"}
+    model = ToolCallingFakeModel(responses=[
+        AIMessage(content=json.dumps(analysis, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_laws",
+            "args": {"query": "借款到期未还"},
+            "id": "call-empty",
+            "type": "tool_call",
+        }]),
+        AIMessage(content=json.dumps(research, ensure_ascii=False)),
+        AIMessage(content=json.dumps(draft, ensure_ascii=False)),
+        AIMessage(content=json.dumps(review, ensure_ascii=False)),
+    ])
     registry = SimpleNamespace(
-        get_tools=AsyncMock(return_value=[tool]),
+        get_tools=AsyncMock(return_value=[empty_tool()]),
         status=lambda: SimpleNamespace(version=1),
         close=AsyncMock(),
         invalidate=lambda *args: None,
     )
-    model = ToolCallingFakeModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "search_laws",
-                        "args": {"query": "问题一"},
-                        "id": "call-1",
-                        "type": "tool_call",
-                    },
-                    {
-                        "name": "search_laws",
-                        "args": {"query": "问题二"},
-                        "id": "call-2",
-                        "type": "tool_call",
-                    },
-                ],
-            ),
-            AIMessage(content="基于已获得的结果回答"),
-        ]
-    )
-    runtime = AgentRuntime(
-        registry,
-        SimpleNamespace(get_chat_model=lambda: model),
-        settings(agent_max_tool_calls=1),
-    )
-    context = AgentInvocationContext(
-        RequestUserContext("tenant", "user", "request"), "conversation"
-    )
+    runtime = AgentRuntime(registry, SimpleNamespace(get_chat_model=lambda: model), settings())
+    context = invocation()
 
-    events = [
-        event
-        async for event in runtime.stream(
-            context,
-            [HumanMessage(content="问题")],
-            "",
-        )
-    ]
+    events = [event async for event in runtime.stream(context, [HumanMessage(content="问题")], "")]
 
-    starts = [event for event in events if event["event"] == "tool_call_start"]
-    assert len(starts) == 1
-    assert context.tool_call_count == 1
-    assert events[-1] == {"event": "agent_final", "data": "基于已获得的结果回答"}
+    stages = [event["data"]["status"] for event in events if event["event"] == "agent_status"]
+    assert stages == ["analyzing", "researching", "drafting", "reviewing", "completed"]
+    assert context.metrics.tool_call_count == 1
+    assert context.metrics.model_call_count == 5
+    assert not any(event["event"] == "citations" for event in events)
+    assert events[-1] == {"event": "agent_final", "data": answer}
+
+
+def test_no_match_boundary_detects_unverified_law_references():
+    safe = "当前法规库中未检索到可引用法条，以下仅为一般性分析。"
+    unsafe = "依据《民法典》第一百八十八条处理。当前法规库中未检索到可引用法条。"
+
+    assert _no_match_violations(safe) == []
+    assert _no_match_violations(unsafe) == ["无法条模式包含未经检索核验的法律名称或条号"]
+
+
+def test_tool_audit_parses_documents_nested_in_mcp_text_blocks():
+    nested = json.dumps([{
+        "type": "text",
+        "text": json.dumps([{
+            "document_id": "law-1",
+            "law_name": "示例法",
+            "article_number": "第一条",
+        }], ensure_ascii=False),
+    }], ensure_ascii=False)
+
+    metadata = result_metadata(nested)
+
+    assert metadata["result_count"] == 1
+    assert metadata["documents"] == [{
+        "document_id": "law-1",
+        "law_name": "示例法",
+        "article_number": "第一条",
+    }]
 
 
 @pytest.mark.asyncio
 async def test_agent_service_keeps_request_state_out_of_shared_runtime():
     class FakeRuntime:
         async def stream(self, context, messages, memory_context):
-            assert context.user.user_id == "user-a"
-            assert context.conversation_id == "conversation-a"
+            assert context.identity.user_id == "user-a"
+            assert context.identity.conversation_id == "conversation-a"
             assert memory_context == "memory-a"
             assert messages[-1].content == "question-a"
-            context.tool_call_count = 2
+            context.metrics.tool_call_count = 2
+            context.metrics.model_call_count = 4
             yield {"event": "token", "data": "streamed"}
             yield {"event": "agent_final", "data": "final"}
 
@@ -225,6 +310,25 @@ async def test_agent_service_keeps_request_state_out_of_shared_runtime():
     assert events == [{"event": "token", "data": "streamed"}]
     assert service.final_answer == "final"
     assert service.tool_call_count == 2
+    assert service.model_call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_concurrency_rejects_duplicate_conversation_and_limits_per_user():
+    manager = AgentConcurrencyManager(settings(agent_global_concurrency=2, agent_per_user_concurrency=1))
+    first = ConcurrencyIdentity("r1", "tenant", "user-a", "conversation-a")
+    duplicate = ConcurrencyIdentity("r2", "tenant", "user-a", "conversation-a")
+    second = ConcurrencyIdentity("r3", "tenant", "user-a", "conversation-b")
+    other_user = ConcurrencyIdentity("r4", "tenant", "user-b", "conversation-c")
+
+    await manager.reserve(first)
+    with pytest.raises(ConversationBusyError):
+        await manager.reserve(duplicate)
+    await manager.acquire(first)
+    assert await manager.would_queue(second)
+    assert not await manager.would_queue(other_user)
+    await manager.release(first)
+    await manager.release_reservation(first)
 
 
 def test_llm_provider_rejects_missing_api_key():
@@ -232,3 +336,21 @@ def test_llm_provider_rejects_missing_api_key():
 
     with pytest.raises(AgentConfigurationError):
         provider.get_chat_model()
+
+
+def test_deterministic_review_rejects_law_article_outside_evidence_packet():
+    packet = EvidencePacket(evidence_items=[EvidenceItem(
+        document_id="law-1",
+        law_name="中华人民共和国劳动合同法",
+        article_number="第八十二条",
+        content="已核验内容",
+    )])
+    draft = CounselDraft(
+        answer="依据《劳动合同法》第八十二条可以主张权利，但《民法典》第五百条另有规定。",
+        claims=[],
+    )
+
+    errors = _citation_errors(draft, packet)
+
+    assert not any("劳动合同法" in error for error in errors)
+    assert any("《民法典》第五百条" in error for error in errors)

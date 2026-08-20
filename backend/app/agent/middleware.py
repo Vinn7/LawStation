@@ -8,10 +8,28 @@ from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from backend.app.agent.registry import MCPToolRegistry
+from backend.app.agent.state import AgentInvocationContext
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit, redact, summary
 from backend.app.db.models import RetrievalTrace, ToolCallRecord
 from backend.app.db.session import SessionLocal
+
+
+class AgentModelLimitError(RuntimeError):
+    pass
+
+
+class InvocationModelLimitMiddleware(AgentMiddleware):
+    """Count model calls across the entire three-agent graph invocation."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+
+    async def abefore_model(self, state, runtime):
+        context = runtime.context
+        if context.metrics.model_call_count >= self.settings.agent_max_model_calls:
+            raise AgentModelLimitError("本轮模型调用次数已达到上限")
+        context.metrics.model_call_count += 1
 
 
 def result_metadata(result: str) -> dict[str, Any]:
@@ -20,8 +38,19 @@ def result_metadata(result: str) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {"result_chars": len(result)}
     documents: list[dict[str, Any]] = []
+    parsed_strings: set[str] = set()
 
     def visit(item: Any) -> None:
+        if isinstance(item, str):
+            candidate = item.strip()
+            if candidate in parsed_strings or not candidate.startswith(("{", "[")):
+                return
+            parsed_strings.add(candidate)
+            try:
+                visit(json.loads(candidate))
+            except json.JSONDecodeError:
+                pass
+            return
         if isinstance(item, dict):
             if "document_id" in item:
                 documents.append(
@@ -52,7 +81,7 @@ def _message_text(message: Any) -> str:
 
 
 def _persist_tool_audit(
-    context: Any,
+    context: AgentInvocationContext,
     name: str,
     args: dict[str, Any],
     result: str,
@@ -63,9 +92,9 @@ def _persist_tool_audit(
     with SessionLocal() as db:
         db.add(
             ToolCallRecord(
-                tenant_id=context.user.tenant_id,
-                user_id=context.user.user_id,
-                conversation_id=context.conversation_id,
+                tenant_id=context.identity.tenant_id,
+                user_id=context.identity.user_id,
+                conversation_id=context.identity.conversation_id,
                 tool_name=name,
                 arguments_json=json.dumps(
                     {"summary": summary(redact(args), 1000)}, ensure_ascii=False
@@ -78,9 +107,9 @@ def _persist_tool_audit(
         if name == "search_laws":
             db.add(
                 RetrievalTrace(
-                    tenant_id=context.user.tenant_id,
-                    user_id=context.user.user_id,
-                    conversation_id=context.conversation_id,
+                    tenant_id=context.identity.tenant_id,
+                    user_id=context.identity.user_id,
+                    conversation_id=context.identity.conversation_id,
                     query=summary(args.get("query", ""), 500),
                     results_json=json.dumps(metadata, ensure_ascii=False)[:12000],
                 )
@@ -102,13 +131,19 @@ class ToolAuditMiddleware(AgentMiddleware):
         call = request.tool_call
         name = call["name"]
         args = call.get("args", {})
-        context.tool_call_count += 1
-        fields = {
-            "request_id": context.user.request_id,
-            "tenant_id": context.user.tenant_id,
-            "user_id": context.user.user_id,
-            "conversation_id": context.conversation_id,
-        }
+        fields = context.audit_fields
+        if context.metrics.tool_call_count >= self.settings.agent_max_tool_calls:
+            result = "本轮工具调用次数已达到上限。"
+            request.runtime.stream_writer(
+                {"event": "tool_call_result", "data": {"name": name, "status": "failed"}}
+            )
+            return ToolMessage(
+                content=result,
+                tool_call_id=call["id"],
+                name=name,
+                status="error",
+            )
+        context.metrics.tool_call_count += 1
         request.runtime.stream_writer(
             {"event": "tool_call_start", "data": {"name": name, "status": "started"}}
         )

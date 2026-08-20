@@ -1,5 +1,5 @@
 import { BookOpenText, ChevronDown, MessageSquareText, Plus, Scale, X } from 'lucide-react';
-import type { Conversation, User } from '../types';
+import type { AgentStage, Conversation, User } from '../types';
 
 interface SidebarProps {
   users: User[];
@@ -10,6 +10,7 @@ interface SidebarProps {
   loading: boolean;
   error: string;
   disabled: boolean;
+  taskStatuses: Record<string, { status: AgentStage; unread?: boolean }>;
   onUserChange: (userId: string) => void;
   onCreate: () => void;
   onOpenConversation: (id: string) => void;
@@ -37,6 +38,7 @@ export function Sidebar({
   loading,
   error,
   disabled,
+  taskStatuses,
   onUserChange,
   onCreate,
   onOpenConversation,
@@ -118,8 +120,18 @@ export function Sidebar({
               onClick={() => onOpenConversation(conversation.id)}
               aria-current={activeConversationId === conversation.id ? 'page' : undefined}
             >
-              <span className="conversation-title">{conversation.title}</span>
-              <span className="conversation-meta">{formatDate(conversation.updated_at || conversation.created_at)}</span>
+              <span className="conversation-title-row">
+                <span className="conversation-title">{conversation.title}</span>
+                {taskStatuses[conversation.id]?.unread && <i className="unread-dot" aria-label="有新的回答" />}
+              </span>
+              <span className="conversation-meta">
+                {taskStatuses[conversation.id] && taskStatuses[conversation.id].status !== 'idle'
+                  ? ({
+                    queued: '排队中', analyzing: '分析中', researching: '检索中', drafting: '生成中',
+                    reviewing: '复核中', completed: '已完成', interrupted: '已停止', failed: '失败', idle: '',
+                  } as Record<AgentStage, string>)[taskStatuses[conversation.id].status]
+                  : formatDate(conversation.updated_at || conversation.created_at)}
+              </span>
             </button>
           ))}
         </nav>

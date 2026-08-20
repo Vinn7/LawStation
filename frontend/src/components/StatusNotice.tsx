@@ -1,9 +1,10 @@
 import { AlertCircle, BookOpenCheck, BrainCircuit, LoaderCircle, Search } from 'lucide-react';
-import type { IndexStatus, ToolActivity } from '../types';
+import type { AgentActivity, IndexStatus, ToolActivity } from '../types';
 
 interface StatusNoticeProps {
   index: IndexStatus;
   tool: ToolActivity | null;
+  agent?: AgentActivity | null;
   memoryMessage: string;
   error: string;
   failedQuestion: string;
@@ -26,6 +27,7 @@ function toolLabel(tool: ToolActivity): string {
 export function StatusNotice({
   index,
   tool,
+  agent = null,
   memoryMessage,
   error,
   failedQuestion,
@@ -33,7 +35,7 @@ export function StatusNotice({
   onDismissError,
 }: StatusNoticeProps) {
   const showIndex = index.status !== 'ready';
-  if (!showIndex && !tool && !memoryMessage && !error) return null;
+  if (!showIndex && !agent && !tool && !memoryMessage && !error) return null;
 
   return (
     <div className="status-stack" aria-live="polite">
@@ -49,6 +51,13 @@ export function StatusNotice({
         <div className={`status-notice tool-notice is-${tool.status}`}>
           {tool.status === 'running' ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}
           <span>{toolLabel(tool)}</span>
+        </div>
+      )}
+      {agent && !tool && (
+        <div className={`status-notice agent-notice is-${agent.status}`}>
+          {['queued', 'analyzing', 'researching', 'drafting', 'reviewing'].includes(agent.status)
+            ? <LoaderCircle className="spin" size={17} /> : <BrainCircuit size={17} />}
+          <span>{agent.message}</span>
         </div>
       )}
       {memoryMessage && (

@@ -8,11 +8,17 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.agent.concurrency import (
+    AgentConcurrencyManager,
+    AgentQueueTimeoutError,
+    ConcurrencyIdentity,
+    ConversationBusyError,
+)
 from backend.app.agent.service import AgentService
 from backend.app.core.context import RequestUserContext, get_user_context
 from backend.app.core.logging import audit, summary
 from backend.app.db.models import Conversation, Message, User
-from backend.app.db.session import get_db
+from backend.app.db.session import SessionLocal, get_db
 from backend.app.schemas import ChatRequest, ConversationCreate, MemoryUpdate
 from backend.app.services.memory import MemoryService
 from backend.app.services.repositories import OwnedRepository
@@ -92,64 +98,124 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _prepare_chat(ctx: RequestUserContext, conversation_id: str, content: str):
+    with SessionLocal() as db:
+        repo = OwnedRepository(db, ctx)
+        if not repo.conversation(conversation_id):
+            raise HTTPException(404, "会话不存在或无权访问")
+        user_message = Message(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            conversation_id=conversation_id,
+            role="user",
+            content=content,
+        )
+        db.add(user_message)
+        db.commit()
+        memory_context, history = MemoryService(db, ctx).context(conversation_id)
+        history = [message for message in history if message.id != user_message.id]
+        return memory_context, history
+
+
+def _save_assistant(
+    ctx: RequestUserContext,
+    conversation_id: str,
+    content: str,
+    status: str,
+) -> Message:
+    with SessionLocal() as db:
+        assistant = Message(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            status=status,
+        )
+        db.add(assistant)
+        db.commit()
+        return assistant
+
+
+def _consolidate_memory(ctx: RequestUserContext, conversation_id: str) -> bool:
+    with SessionLocal() as db:
+        return MemoryService(db, ctx).consolidate(conversation_id)
+
+
 @router.post("/conversations/{conversation_id}/messages/stream")
-def stream_message(
+async def stream_message(
     conversation_id: str,
     payload: ChatRequest,
     request: Request,
     ctx=Depends(get_user_context),
-    db=Depends(get_db),
 ):
     started = time.perf_counter()
-    repo = OwnedRepository(db, ctx)
-    conversation = repo.conversation(conversation_id)
-    if not conversation:
-        raise HTTPException(404, "会话不存在或无权访问")
-    audit("conversation.received", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="received", question_chars=len(payload.content), question_summary=summary(payload.content))
-    user_message = Message(
-        tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id,
-        role="user", content=payload.content,
+    concurrency: AgentConcurrencyManager = request.app.state.agent_concurrency
+    identity = ConcurrencyIdentity(
+        request_id=ctx.request_id,
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        conversation_id=conversation_id,
     )
-    db.add(user_message)
-    db.commit()
-    memory_context, history = MemoryService(db, ctx).context(conversation_id)
-    history = [m for m in history if m.id != user_message.id]
+    try:
+        await concurrency.reserve(identity)
+    except ConversationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit("conversation.received", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="received", question_chars=len(payload.content), question_summary=summary(payload.content))
+    try:
+        memory_context, history = await asyncio.to_thread(
+            _prepare_chat, ctx, conversation_id, payload.content
+        )
+    except Exception:
+        await concurrency.release_reservation(identity)
+        raise
     audit("conversation.started", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="started", history_count=len(history), memory_context_chars=len(memory_context))
 
     async def events():
         answer = []
         agent = AgentService(request.app.state.agent_runtime, ctx, conversation_id)
-        yield sse("message_start", {"request_id": ctx.request_id})
         try:
-            async for item in agent.run(memory_context, history, payload.content):
-                if item["event"] == "token":
-                    answer.append(item["data"])
-                yield sse(item["event"], item["data"])
+            yield sse("message_start", {"request_id": ctx.request_id})
+            if await concurrency.would_queue(identity):
+                yield sse("agent_status", {
+                    "request_id": ctx.request_id,
+                    "user_id": ctx.user_id,
+                    "conversation_id": conversation_id,
+                    "agent": "coordinator",
+                    "status": "queued",
+                    "message": "咨询任务正在排队",
+                })
+            async with concurrency.slot(identity):
+                async for item in agent.run(memory_context, history, payload.content):
+                    if item["event"] == "token":
+                        answer.append(item["data"])
+                    yield sse(item["event"], item["data"])
             persisted_answer = agent.final_answer or "".join(answer)
-            assistant = Message(
-                tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id,
-                role="assistant", content=persisted_answer, status="complete",
+            assistant = await asyncio.to_thread(
+                _save_assistant, ctx, conversation_id, persisted_answer, "complete"
             )
-            db.add(assistant)
-            db.commit()
-            compressed = MemoryService(db, ctx).consolidate(conversation_id)
-            audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_compressed=compressed, tool_call_count=agent.tool_call_count)
+            compressed = await asyncio.to_thread(_consolidate_memory, ctx, conversation_id)
+            audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_compressed=compressed, tool_call_count=agent.tool_call_count, model_call_count=agent.model_call_count)
             yield sse("memory_status", {"compressed": compressed})
             yield sse("message_end", {"message_id": assistant.id})
+        except AgentQueueTimeoutError as exc:
+            audit("conversation.failed", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="queue_timeout", duration_ms=int((time.perf_counter()-started)*1000))
+            yield sse("error", {"message": str(exc)})
         except asyncio.CancelledError:
             if answer:
-                db.add(Message(tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, role="assistant", content="".join(answer), status="interrupted"))
-                db.commit()
+                await asyncio.to_thread(
+                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted"
+                )
             audit("conversation.interrupted", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="interrupted", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len("".join(answer)))
             raise
         except Exception as exc:
             if answer:
-                db.add(Message(
-                    tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id,
-                    role="assistant", content="".join(answer), status="interrupted",
-                ))
-                db.commit()
+                await asyncio.to_thread(
+                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted"
+                )
             audit("conversation.failed", level=logging.ERROR, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="failed", duration_ms=int((time.perf_counter()-started)*1000), error_type=type(exc).__name__, error=summary(str(exc)))
             yield sse("error", {"message": str(exc)})
+        finally:
+            await concurrency.release_reservation(identity)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

@@ -82,6 +82,8 @@ button:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opaci
 .conversation-item.is-active { border-color: #e0bdc7; background: var(--accent-soft); }
 .conversation-title { overflow: hidden; font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-meta { color: var(--soft); font-size: 10px; }
+.conversation-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.unread-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .sidebar-state { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 28px 12px; color: var(--muted); text-align: center; font-size: 12px; }
 .sidebar-state svg { color: #baaeb2; }
 .sidebar-state small { color: var(--soft); }

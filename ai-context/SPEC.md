@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：1.2
+> 版本：1.5
 > 基线日期：2026-08-20  
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -40,7 +40,7 @@ flowchart LR
     UI["React + TypeScript 页面"] -->|"同源 REST / SSE<br/>X-User-ID"| API["FastAPI API"]
     API --> CTX["RequestUserContext"]
     API --> MEM["MemoryService / OwnedRepository"]
-    API --> AGENT["LangChain AgentService"]
+    API --> AGENT["LangGraph 三 Agent 工作流"]
     MEM --> DB["SQLite"]
     AGENT --> LLM["DeepSeek OpenAI-compatible API"]
     AGENT -->|"Streamable HTTP"| MCP["内嵌 Law RAG MCP Server"]
@@ -71,7 +71,7 @@ flowchart LR
 |---|---|---|
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
 | `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
-| `backend/app/agent/` | DeepSeek Provider、应用级 MCP 工具发现缓存、LangChain Agent Runtime、流式适配和工具审计 | `AgentRuntime`、`MCPToolRegistry`、`ToolAuditMiddleware`、`AgentService` |
+| `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `LegalConsultationGraph`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志和脱敏 | `Settings`、`RequestUserContext`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
@@ -86,7 +86,7 @@ flowchart LR
 | `data/runtime/` | SQLite 运行数据 | `lawstation.db` |
 | `data/logs/` | JSON Lines 审计日志 | `lawstation.log` 及轮转文件 |
 | `tests/` | 样本、索引幂等、隔离、日志脱敏和启动器测试 | `test_*.py` |
-| `tools/` | 历史参考工具，仅供阅读 | **不得导入、修改或重构** |
+| `tools/` | 既有法律业务工具与参考实现 | 可在明确需求范围内修改、导入或重构；必须遵守最小变更和测试要求 |
 | `ai-context/` | 面向后续开发和 Agent 的项目上下文文档 | 本 Spec |
 
 ## 5. 启动与生命周期
@@ -115,7 +115,7 @@ python run.py
 7. `initialize_engine` 同步加载法规和 BM25，验证 Dense 索引；必要时后台建库。
 8. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
 9. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
-10. 首个聊天请求 single-flight 发现 MCP 工具并编译 LangChain Agent，后续请求复用缓存。
+10. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
 11. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager。
 
 启动参数：`--rebuild`、`--no-build`、`--host`、`--port`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
@@ -136,17 +136,20 @@ python run.py
 1. `POST /api/conversations/{conversation_id}/messages/stream` 校验会话归属。
 2. 保存用户原始消息并记录 `conversation.received`、`conversation.started`。
 3. `MemoryService.context` 加载当前用户的长期记忆、当前会话摘要和近期消息。
-4. `AgentService.run` 调用共享 `AgentRuntime`；`MCPToolRegistry` 仅在首次请求或失效刷新时发现工具。
-5. `create_agent` 负责 DeepSeek 与 MCP Tool 的模型—工具循环；大模型自主选择工具及参数。
-6. `ToolCallLimitMiddleware` 和 `ModelCallLimitMiddleware` 分别实施单轮工具、模型调用上限。
-7. 工具调用结果以 `ToolMessage` 返回模型；`ToolAuditMiddleware` 使用独立数据库 Session 保存最小化审计记录。
-8. 模型 token 通过 SSE 逐步返回前端，工具事件只暴露名称和安全状态。
-9. 完成后以最终 `AIMessage` 保存助手消息，执行记忆压缩/沉淀并返回 `memory_status` 与 `message_end`。
-10. 流取消时保存已有部分回答为 `interrupted`；异常时发送 `error` 事件并写审计日志。
+4. `AgentConcurrencyManager` 执行会话唯一、单用户 2 个、全局 6 个任务的并发准入。
+5. `AgentService.run` 调用共享 `AgentRuntime`；每轮 Graph state、记忆和证据包均独立创建。
+6. `CaseAnalystAgent` 分类、拆解争议点并制定研究任务；闲聊和信息不足可提前结束。
+7. `LegalResearchAgent` 是唯一绑定 MCP Tool 的 Agent，负责检索并生成结构化 `EvidencePacket`；`matched`、`no_match`、`tool_unavailable`、`tool_error` 必须严格区分。
+8. `no_match` 是检索成功的正常结果：后续 LegalCounsel 继续生成低置信度、条件化的一般性分析，Reviewer 检查证据边界，不得仅因无法条而重复检索。
+9. `LegalCounselAgent` 根据案情和证据状态生成草稿，随后由 Case Analyst 复核；有部分证据且确有新查询目标时最多补检索一次，表达越界时最多修订一次。
+10. 通过复核的回答和 citations 才映射为 SSE；`no_match` 回答的 citations 必须为空，内部草稿和推理过程不输出。
+11. 工具审计使用独立短 Session；模型和 MCP 执行期间不持有数据库事务。
+12. 完成后用短事务保存助手消息并整理记忆；取消时保存已实际发送部分为 `interrupted`。
 
 SSE 事件契约：
 
 - `message_start`
+- `agent_status`
 - `tool_call_start`
 - `tool_call_result`
 - `token`
@@ -154,9 +157,18 @@ SSE 事件契约：
 - `message_end`
 - `error`
 
-`citations` 是既定扩展事件，**[待实现]**。
+- `citations` **[已实现]**：来源于本轮 `EvidencePacket`，不接受模型自由生成的外部编号。
 
-### 6.3 法规检索链路
+### 6.3 并发与页面切换
+
+- 同一进程最多运行 6 个 Graph，同一用户最多运行 2 个不同会话，同一会话最多 1 个任务。
+- 相同所有权会话重复发送返回 HTTP 409；超出用户或全局容量时通过 `agent_status=queued` 排队，默认最多等待 30 秒。
+- 前端以 `user_id:conversation_id` 保存独立 runtime；切换用户或会话不取消旧 SSE，原任务在页面存活期间继续。
+- 后台 token 只更新所属 runtime。返回原会话时恢复累计内容；主动停止只取消当前会话 controller。
+- 浏览器刷新、关闭或网络断开不保证任务恢复；首版不引入服务端持久任务队列。
+- SQLite 启用 WAL、5 秒 busy timeout 和外键；SSE 路由只使用短生命周期 Session。
+
+### 6.4 法规检索链路
 
 1. `LawSearchEngine.__init__` 读取 `LAW_DATA_PATH`，按法条加载并构建 BM25。
 2. 超过阈值的法条由 `split_text` 按段落/标点分块，默认 1,000 字、重叠 150 字。
@@ -165,6 +177,14 @@ SSE 事件契约：
 5. 索引无效时以 staging、文件锁、批次 checkpoint 和原子替换构建；旧有效索引不因失败而被覆盖。
 6. Dense 未就绪或无 DashScope 密钥时降级到 BM25。
 7. Dense 就绪时，BM25 与 FAISS 候选使用 RRF 合并并去重。
+
+Agent 对检索结果的业务语义：
+
+- `matched`：至少一条工具返回候选被确认为可引用证据，允许生成 citations。
+- `no_match`：工具正常完成但没有候选被确认为可引用证据；这是成功结果，继续生成一般性分析，不重复检索，不引用具体法律名称或条号。
+- `tool_unavailable`：MCP 工具未加载，回答必须披露检索能力不可用。
+- `tool_error`：工具超时、连接、协议或执行异常，不得冒充“没有相关法律”。
+- MCP 返回的法条字段必须由代码从 ToolMessage 组装；模型只能选择真实 `document_id`，不得自由生成证据。
 
 MCP 工具契约：
 
@@ -201,7 +221,7 @@ get_law_article(law_name: string, article_number: string)
 - `conversation_id` 必须归属于当前上下文用户。
 - 模型和 MCP 工具不得接收或推断记忆查询所用的 `user_id`。
 - 更新/删除其他用户 ID 时统一返回“不存在或无权访问”，不得泄露记录是否存在。
-- 流建立后必须固定使用创建该流时的 `RequestUserContext`；前端切换用户必须先中止旧流。
+- 流建立后必须固定使用创建该流时的 `RequestUserContext`；页面切换只能改变可见 runtime，不得改变或复用后台流的用户上下文。
 
 ## 8. 数据模型
 
@@ -243,7 +263,7 @@ get_law_article(law_name: string, article_number: string)
 |---|---|---|
 | Python 环境 | Conda，环境名 `LawStation` | 统一管理 Python 3.12、Node 22 和项目依赖 |
 | 后端 Web | FastAPI + Uvicorn | REST、SSE、生命周期和静态文件托管 |
-| AI 编排 | LangChain `create_agent` + LangGraph + LangChain OpenAI | DeepSeek、标准模型—工具循环、调用上限和流式状态 |
+| AI 编排 | LangGraph `StateGraph` + LangChain `create_agent` | 三 Agent 路由、研究工具循环、复核回流、调用上限和流式阶段状态 |
 | MCP 适配 | LangChain MCP Adapters | 首次发现并缓存 MCP Tool；实际调用保持短生命周期 MCP session |
 | 大模型 | DeepSeek，OpenAI-compatible API | 对话、工具决策和回答生成 |
 | MCP | MCP Python SDK，Streamable HTTP | 标准化暴露法规检索工具 |
@@ -293,6 +313,10 @@ MCP_TOOL_TIMEOUT_SECONDS
 MCP_TOOL_DISCOVERY_RETRY_SECONDS
 AGENT_MAX_TOOL_CALLS
 AGENT_MAX_MODEL_CALLS
+AGENT_GLOBAL_CONCURRENCY
+AGENT_PER_USER_CONCURRENCY
+AGENT_PER_CONVERSATION_CONCURRENCY
+AGENT_QUEUE_TIMEOUT_SECONDS
 LLM_REQUEST_TIMEOUT_SECONDS
 LLM_MAX_RETRIES
 LLM_TEMPERATURE
@@ -364,10 +388,14 @@ INDEX_BUILD_BATCH_SIZE
 ### 14.1 必须做的事
 
 - 修改前先从代码验证现状，不得只依据 README 或本 Spec 推断实现。
+- 所有代码和文档修改必须遵循最小变更原则：优先原地修改现有 symbol，只调整实现需求所必需的内容。
+- 能够原地修改的文件不得删除后重建；必须保留无关代码、格式、注释以及用户已有改动。
+- 只有现有结构无法合理承载需求时才允许新增、拆分或整体替换文件，并应在交付说明中说明必要性。
 - 任何用户域读写必须从 `RequestUserContext` 获取所有者，且在数据库语句内限定 `tenant_id + user_id`。
 - 新 API 必须定义输入模型、错误语义、权限边界和测试。
 - 新 MCP 工具必须有明确用途、JSON Schema、超时、调用次数限制和审计事件。
 - 涉及具体法律结论时，系统提示和 Agent 行为必须优先检索；无法核验时明确说明，不得虚构法条。
+- 检索成功但证据为空必须标记为 `no_match` 并继续一般性回答；不得将其作为异常、无限补检索或输出未经核验的具体法条。
 - 阻塞型 BM25、FAISS 和法规精确匹配必须在线程池执行，避免阻塞事件循环。
 - 修改索引格式或切分算法时必须改变指纹输入或 `CHUNKER_VERSION`。
 - 修改 SSE 事件时必须同步前端消费者、API 文档和回归测试。
@@ -379,7 +407,7 @@ INDEX_BUILD_BATCH_SIZE
 ### 14.2 不可以做的事
 
 - **[禁止]** 创建或恢复仓库内 `.venv`，或在文档/脚本中要求使用它。
-- **[禁止]** 修改、导入、复制嵌入或重构 `tools/*.py`；它们只作参考。
+- **[禁止]** 为了实现局部需求而无必要地删除、重建、整体改写文件或覆盖无关的既有实现。
 - **[禁止]** 让模型传入任意 `user_id` 访问记忆，或把用户记忆暴露为自由指定用户的 MCP 工具。
 - **[禁止]** 提供 `get_memory(memory_id)` 一类无所有者上下文的仓储接口。
 - **[禁止]** 仅凭 `memory_id`、`conversation_id` 查询后再在 Python 层判断归属。
@@ -401,21 +429,22 @@ INDEX_BUILD_BATCH_SIZE
 - `tests/test_audit_logging.py`：敏感信息脱敏和摘要长度。
 - `tests/test_run.py`：前端过期检测与 `--no-build` 失败语义。
 - `frontend/src/test/sse.test.ts`：分块 SSE、全部事件解析和 HTTP 错误语义。
-- `frontend/src/test/App.test.tsx`：切换用户时清除上一用户会话数据。
+- `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、引用边界、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
+- `frontend/src/test/App.test.tsx`：切换用户隔离显示、后台流继续、返回会话恢复进度和 no_match 工具状态清理。
 - `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
 
-截至本 Spec 基线：Conda 环境下后端 `pytest -q` 为 **10 passed**，前端 `npm test` 为 **9 passed**；前端生产构建、桌面端和 375px 响应式页面验证通过。
+截至本 Spec 基线：应以当前 CI/本地验证输出为准；后端、前端测试和生产构建必须同时通过。
 
 每次发布至少满足：
 
 1. 用户 A 无法读取、修改、删除用户 B 的记忆或使用其会话问答。
-2. 并发流不能跨用户串写，切换用户会中止旧流。
+2. 并发流不能跨用户串写；页面切换用户时旧流继续运行，但只能更新其所属会话 runtime。
 3. 服务重启后会话和记忆隔离仍有效。
 4. 有效索引启动时不会重新调用 Embedding。
 5. 缺少 Dense 密钥或索引构建失败时 BM25 仍可查询。
 6. Agent 能自主选择法律工具和参数，调用次数与超时受控。
 7. 日志可用 `request_id` 串联且不泄露敏感数据。
-8. `tools/*.py` 在开发前后哈希不变。
+8. 修改 `tools/*.py` 时必须有明确业务需求，变更范围最小，并通过对应回归测试。
 9. `.env` 未被 Git 跟踪，前端产物不含服务端密钥。
 10. `python run.py` 可从 Conda `LawStation` 环境启动完整程序。
 
@@ -432,7 +461,7 @@ INDEX_BUILD_BATCH_SIZE
 
 - 使用模型或结构化抽取实现长期记忆分类、合并、纠错和置信度。
 - 真正执行 `MEMORY_CONTEXT_TOKEN_LIMIT`，避免上下文无限增长。
-- 增加法规引用结构及 `citations` SSE 事件，前端展示法律名称、条号和来源。
+- 扩展 citations 展示和法规原文定位能力；当前已展示法律名称、条号并保存证据摘要。
 - 增加 RAG 评测集，衡量召回率、法条准确率和无依据回答率。
 
 ### P2：检索与部署演进
@@ -452,10 +481,10 @@ INDEX_BUILD_BATCH_SIZE
 4. `backend/app/core/context.py::RequestUserContext`：用户隔离信任边界。
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
 6. `backend/app/services/memory.py::MemoryService`：当前记忆装配与压缩实现。
-7. `backend/app/agent/runtime.py::AgentRuntime`：LangChain Agent 编译、复用与流式事件适配。
-8. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
-9. `mcp_servers/law_rag/engine.py::LawSearchEngine`：切分、索引、降级和混合检索。
-10. `backend/app/core/logging.py`：审计格式、轮转和脱敏边界。
+7. `backend/app/agent/graph.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
+8. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
+9. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
+10. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
 
 ## 18. Spec 维护规则
 
@@ -469,3 +498,6 @@ INDEX_BUILD_BATCH_SIZE
 - **1.0 / 2026-08-20**：依据当前仓库代码和既有需求历史建立首份完整 Spec。
 - **1.1 / 2026-08-20**：完成响应式法律咨询工作台重构，增加安全 Markdown、完整 SSE 状态、停止/重试、请求快照隔离和前端自动化测试。
 - **1.2 / 2026-08-20**：使用 LangChain `create_agent` 替换手写工具循环；增加应用级 MCP Tool Registry、首次发现缓存、失效冷却刷新、标准调用上限 middleware 和最小化数据库工具审计。
+- **1.3 / 2026-08-20**：升级为 Case Analyst、Legal Research、Legal Counsel 三 Agent LangGraph；增加复核回流、引用事件、三级并发准入、SQLite WAL 短事务和前端跨用户后台会话任务。
+- **1.4 / 2026-08-20**：将无法条定义为正常 `no_match` 结果；增加结构化研究状态、ToolMessage 权威证据组装、一般性回答边界、禁止无效补检索、最终确定性校验和前端工具状态清理。
+- **1.5 / 2026-08-20**：撤回 `tools/` 不可修改约束；确立最小变更、优先原地修改、禁止无必要删除重建及保护用户已有改动的开发原则。

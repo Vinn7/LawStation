@@ -47,8 +47,44 @@ export interface ToolActivity {
   status: 'running' | 'success' | 'failed' | 'timeout';
 }
 
+export type AgentName = 'coordinator' | 'case_analyst' | 'legal_researcher' | 'legal_counsel';
+export type AgentStage =
+  | 'idle'
+  | 'queued'
+  | 'analyzing'
+  | 'researching'
+  | 'drafting'
+  | 'reviewing'
+  | 'completed'
+  | 'interrupted'
+  | 'failed';
+
+export interface AgentActivity {
+  agent: AgentName;
+  status: AgentStage;
+  message: string;
+}
+
+export interface ConversationRuntime {
+  userId: string;
+  conversationId: string;
+  messages: ChatMessage[];
+  status: AgentStage;
+  activeAgent?: AgentName;
+  statusMessage?: string;
+  requestToken?: number;
+  toolActivity?: ToolActivity;
+  memoryMessage?: string;
+  error?: string;
+  failedQuestion?: string;
+  loading?: boolean;
+  unread?: boolean;
+  updatedAt: number;
+}
+
 export type SseEventName =
   | 'message_start'
+  | 'agent_status'
   | 'tool_call_start'
   | 'tool_call_result'
   | 'token'
