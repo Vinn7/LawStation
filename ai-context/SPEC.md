@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：1.0  
+> 版本：1.1
 > 基线日期：2026-08-20  
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -54,7 +54,7 @@ flowchart LR
 
 ### 3.1 运行边界
 
-- **浏览器进程**：用户切换、会话列表、聊天展示、SSE 消费和索引状态展示。
+- **浏览器进程**：响应式工作台、用户切换、会话列表、安全 Markdown、完整 SSE 状态消费和索引状态展示。
 - **唯一 Uvicorn 进程**：承载 `/api/*`、`/health`、`/docs`、`/mcp/` 和 React 静态文件。
 - **MCP 协议边界**：MCP Server 虽与 API 同进程，但 Agent 必须通过 `http://127.0.0.1:8000/mcp/` 调用，不得绕过协议直接调用检索函数。
 - **持久化边界**：SQLite 保存用户域数据；`data/indexes/law/` 保存 Dense 索引；`data/logs/` 保存审计日志。
@@ -77,7 +77,9 @@ flowchart LR
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
 | `backend/app/schemas.py` | API 输入校验模型 | `ConversationCreate`、`ChatRequest`、`MemoryUpdate` |
 | `mcp_servers/law_rag/` | 法规切分、BM25、Dense、索引生命周期和 MCP 工具 | `LawSearchEngine`、`search_laws`、`get_law_article` |
-| `frontend/src/` | React 单页应用、用户切换、会话、SSE 和索引状态展示 | `main.tsx::App` |
+| `frontend/src/` | React 响应式工作台、用户/会话隔离、Markdown 消息、完整 SSE 状态和索引状态展示 | `App.tsx::App`、`api.ts::api`、`sse.ts::consumeSse` |
+| `frontend/src/components/` | 侧栏、顶栏、消息、输入器和安全状态提示等展示组件 | `Sidebar`、`ChatHeader`、`MessageList`、`Composer`、`StatusNotice` |
+| `frontend/src/test/` | SSE、用户切换、输入器和状态展示测试 | `sse.test.ts`、`App.test.tsx`、`components.test.tsx` |
 | `scripts/` | 可复现样本生成与手工索引构建 | `create_sample`、`build` |
 | `data/knowledge/law/` | 原始法规与固定抽样法规 | `law.json`、`law_sample.json` |
 | `data/indexes/law/` | manifest、chunk、Embedding 与 FAISS 产物 | `manifest.json`、`chunks.jsonl`、`embeddings.npy`、`law.faiss` |
@@ -247,10 +249,11 @@ get_law_article(law_name: string, article_number: string)
 | 混合融合 | Reciprocal Rank Fusion | 合并 BM25 与 Dense 排名 |
 | 数据库 | SQLite + SQLAlchemy 2.x | 用户、会话、消息、记忆和审计数据 |
 | 配置 | pydantic-settings + 根目录 `.env` | 类型化读取全部应用环境变量 |
-| 前端 | React + TypeScript + Vite | 单页聊天界面和同源 API 消费 |
-| 前端网络层 | 原生 `fetch` + `ReadableStream` | 当前 REST/SSE 调用；尚未使用 TanStack Query |
+| 前端 | React + TypeScript + Vite | 响应式单页法律咨询工作台和同源 API 消费 |
+| 前端网络层 | 原生 `fetch` + `ReadableStream` | 类型化 REST 封装和完整 SSE 事件消费；不使用 TanStack Query |
+| 前端内容/图标 | react-markdown + remark-gfm + lucide-react | 禁止原始 HTML 的 Markdown 展示和一致的矢量图标 |
 | 日志 | Python logging + `RotatingFileHandler` | 控制台和 JSONL 文件审计 |
-| 测试/质量 | pytest、pytest-asyncio、ruff | 单元测试、异步测试和静态检查 |
+| 测试/质量 | pytest、pytest-asyncio、ruff、Vitest、Testing Library | 后端单元/异步测试及前端交互、SSE 测试 |
 | 容器 | Docker 多阶段构建 + Docker Compose | Node 构建前端、Python 运行单容器应用 |
 
 ### 10.1 明确延期的技术
@@ -360,7 +363,7 @@ INDEX_BUILD_BATCH_SIZE
 - 修改索引格式或切分算法时必须改变指纹输入或 `CHUNKER_VERSION`。
 - 修改 SSE 事件时必须同步前端消费者、API 文档和回归测试。
 - 新增环境变量时同步 `Settings`、`.env.example`、`.env` 和 Spec。
-- 后端变更至少运行 `pytest`；相关 Python 文件运行 `ruff check`；前端变更运行 `npm run build`。
+- 后端变更至少运行 `pytest`；相关 Python 文件运行 `ruff check`；前端变更运行 `npm test` 和 `npm run build`。
 - 涉及启动链路时，必须实际验证 `/`、`/health`、`/docs`、`/api/index/status` 和 MCP 初始化/工具调用。
 - 保持 `python run.py` 为常规运行的唯一启动入口。
 
@@ -388,8 +391,11 @@ INDEX_BUILD_BATCH_SIZE
 - `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建和稳定 chunk ID。
 - `tests/test_audit_logging.py`：敏感信息脱敏和摘要长度。
 - `tests/test_run.py`：前端过期检测与 `--no-build` 失败语义。
+- `frontend/src/test/sse.test.ts`：分块 SSE、全部事件解析和 HTTP 错误语义。
+- `frontend/src/test/App.test.tsx`：切换用户时清除上一用户会话数据。
+- `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
 
-截至本 Spec 基线：Conda 环境下 `pytest -q` 为 **10 passed**；前端生产构建和单入口运行验证通过。
+截至本 Spec 基线：Conda 环境下后端 `pytest -q` 为 **10 passed**，前端 `npm test` 为 **9 passed**；前端生产构建、桌面端和 375px 响应式页面验证通过。
 
 每次发布至少满足：
 
@@ -418,7 +424,6 @@ INDEX_BUILD_BATCH_SIZE
 - 使用模型或结构化抽取实现长期记忆分类、合并、纠错和置信度。
 - 真正执行 `MEMORY_CONTEXT_TOKEN_LIMIT`，避免上下文无限增长。
 - 增加法规引用结构及 `citations` SSE 事件，前端展示法律名称、条号和来源。
-- 前端完整处理 tool、memory、error、message_end 事件，并提供流式取消、失败重试和加载状态。
 - 增加 RAG 评测集，衡量召回率、法条准确率和无依据回答率。
 
 ### P2：检索与部署演进
@@ -453,3 +458,4 @@ INDEX_BUILD_BATCH_SIZE
 ### 变更记录
 
 - **1.0 / 2026-08-20**：依据当前仓库代码和既有需求历史建立首份完整 Spec。
+- **1.1 / 2026-08-20**：完成响应式法律咨询工作台重构，增加安全 Markdown、完整 SSE 状态、停止/重试、请求快照隔离和前端自动化测试。
