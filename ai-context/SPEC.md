@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：1.1
+> 版本：1.2
 > 基线日期：2026-08-20  
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -71,7 +71,7 @@ flowchart LR
 |---|---|---|
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
 | `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
-| `backend/app/agent/` | DeepSeek 接入、MCP 工具发现、模型工具循环、工具审计记录 | `service.py::AgentService`、`SYSTEM_PROMPT` |
+| `backend/app/agent/` | DeepSeek Provider、应用级 MCP 工具发现缓存、LangChain Agent Runtime、流式适配和工具审计 | `AgentRuntime`、`MCPToolRegistry`、`ToolAuditMiddleware`、`AgentService` |
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志和脱敏 | `Settings`、`RequestUserContext`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
@@ -113,8 +113,10 @@ python run.py
 5. 启动唯一 Uvicorn 进程。
 6. `backend.app.main::lifespan` 初始化日志、数据库和演示用户。
 7. `initialize_engine` 同步加载法规和 BM25，验证 Dense 索引；必要时后台建库。
-8. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
-9. 停止时取消后台索引任务、关闭检索引擎和 MCP session manager。
+8. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
+9. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
+10. 首个聊天请求 single-flight 发现 MCP 工具并编译 LangChain Agent，后续请求复用缓存。
+11. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager。
 
 启动参数：`--rebuild`、`--no-build`、`--host`、`--port`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
 
@@ -134,12 +136,13 @@ python run.py
 1. `POST /api/conversations/{conversation_id}/messages/stream` 校验会话归属。
 2. 保存用户原始消息并记录 `conversation.received`、`conversation.started`。
 3. `MemoryService.context` 加载当前用户的长期记忆、当前会话摘要和近期消息。
-4. `AgentService.run` 发现 MCP 工具并将工具 schema 绑定到 DeepSeek。
-5. 大模型自主判断是否调用工具、选择工具及参数；每轮最多调用 `AGENT_MAX_TOOL_CALLS` 次。
-6. 工具调用结果以 `ToolMessage` 返回模型，并保存 `ToolCallRecord`；法规查询同时保存 `RetrievalTrace`。
-7. 模型 token 通过 SSE 逐步返回前端。
-8. 完成后保存助手消息，执行记忆压缩/沉淀并返回 `memory_status` 与 `message_end`。
-9. 流取消时保存已有部分回答为 `interrupted`；异常时发送 `error` 事件并写审计日志。
+4. `AgentService.run` 调用共享 `AgentRuntime`；`MCPToolRegistry` 仅在首次请求或失效刷新时发现工具。
+5. `create_agent` 负责 DeepSeek 与 MCP Tool 的模型—工具循环；大模型自主选择工具及参数。
+6. `ToolCallLimitMiddleware` 和 `ModelCallLimitMiddleware` 分别实施单轮工具、模型调用上限。
+7. 工具调用结果以 `ToolMessage` 返回模型；`ToolAuditMiddleware` 使用独立数据库 Session 保存最小化审计记录。
+8. 模型 token 通过 SSE 逐步返回前端，工具事件只暴露名称和安全状态。
+9. 完成后以最终 `AIMessage` 保存助手消息，执行记忆压缩/沉淀并返回 `memory_status` 与 `message_end`。
+10. 流取消时保存已有部分回答为 `interrupted`；异常时发送 `error` 事件并写审计日志。
 
 SSE 事件契约：
 
@@ -240,7 +243,8 @@ get_law_article(law_name: string, article_number: string)
 |---|---|---|
 | Python 环境 | Conda，环境名 `LawStation` | 统一管理 Python 3.12、Node 22 和项目依赖 |
 | 后端 Web | FastAPI + Uvicorn | REST、SSE、生命周期和静态文件托管 |
-| AI 编排 | LangChain Core、LangChain OpenAI、LangChain MCP Adapters | DeepSeek 调用、工具绑定、MCP Client |
+| AI 编排 | LangChain `create_agent` + LangGraph + LangChain OpenAI | DeepSeek、标准模型—工具循环、调用上限和流式状态 |
+| MCP 适配 | LangChain MCP Adapters | 首次发现并缓存 MCP Tool；实际调用保持短生命周期 MCP session |
 | 大模型 | DeepSeek，OpenAI-compatible API | 对话、工具决策和回答生成 |
 | MCP | MCP Python SDK，Streamable HTTP | 标准化暴露法规检索工具 |
 | 词法检索 | jieba + rank-bm25 | 中文分词与 BM25 召回 |
@@ -286,7 +290,12 @@ MCP_LAW_SERVER_URL
 MCP_DEBUG_HOST
 MCP_DEBUG_PORT
 MCP_TOOL_TIMEOUT_SECONDS
+MCP_TOOL_DISCOVERY_RETRY_SECONDS
 AGENT_MAX_TOOL_CALLS
+AGENT_MAX_MODEL_CALLS
+LLM_REQUEST_TIMEOUT_SECONDS
+LLM_MAX_RETRIES
+LLM_TEMPERATURE
 MEMORY_CONTEXT_TOKEN_LIMIT
 MEMORY_COMPRESSION_THRESHOLD
 MEMORY_RECENT_MESSAGE_COUNT
@@ -348,7 +357,7 @@ INDEX_BUILD_BATCH_SIZE
 - 文件审计日志不得记录完整法条正文。
 - 工具结果日志只保留数量、document ID、法律名称、条号及耗时等元数据。
 
-**[部分实现]** 文件日志满足脱敏摘要要求；数据库 `ToolCallRecord.result_summary` 和 `RetrievalTrace.results_json` 当前仍保存较长的截断工具结果。后续进入真实用户数据测试前，必须制定数据库审计留存、正文最小化和清理策略。
+**[已实现]** 文件日志和数据库工具审计均执行正文最小化：参数只保存脱敏摘要，结果只保存数量、document ID、法律名称、条号和字符数。正式上线前仍须确定审计留存周期和清理策略。
 
 ## 14. 开发要求与准则
 
@@ -443,9 +452,9 @@ INDEX_BUILD_BATCH_SIZE
 4. `backend/app/core/context.py::RequestUserContext`：用户隔离信任边界。
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
 6. `backend/app/services/memory.py::MemoryService`：当前记忆装配与压缩实现。
-7. `backend/app/agent/service.py::AgentService`：LLM、MCP 与工具循环。
-8. `mcp_servers/law_rag/engine.py::LawSearchEngine`：切分、索引、降级和混合检索。
-9. `backend/app/db/models.py`：领域模型和复合外键约束。
+7. `backend/app/agent/runtime.py::AgentRuntime`：LangChain Agent 编译、复用与流式事件适配。
+8. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
+9. `mcp_servers/law_rag/engine.py::LawSearchEngine`：切分、索引、降级和混合检索。
 10. `backend/app/core/logging.py`：审计格式、轮转和脱敏边界。
 
 ## 18. Spec 维护规则
@@ -459,3 +468,4 @@ INDEX_BUILD_BATCH_SIZE
 
 - **1.0 / 2026-08-20**：依据当前仓库代码和既有需求历史建立首份完整 Spec。
 - **1.1 / 2026-08-20**：完成响应式法律咨询工作台重构，增加安全 Markdown、完整 SSE 状态、停止/重试、请求快照隔离和前端自动化测试。
+- **1.2 / 2026-08-20**：使用 LangChain `create_agent` 替换手写工具循环；增加应用级 MCP Tool Registry、首次发现缓存、失效冷却刷新、标准调用上限 middleware 和最小化数据库工具审计。

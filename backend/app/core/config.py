@@ -25,7 +25,12 @@ class Settings(BaseSettings):
     mcp_debug_host: str = "127.0.0.1"
     mcp_debug_port: int = 8100
     mcp_tool_timeout_seconds: int = 30
+    mcp_tool_discovery_retry_seconds: int = 30
     agent_max_tool_calls: int = 4
+    agent_max_model_calls: int = 6
+    llm_request_timeout_seconds: int = 60
+    llm_max_retries: int = 2
+    llm_temperature: float = 0.0
     memory_context_token_limit: int = 12000
     memory_compression_threshold: int = 9000
     memory_recent_message_count: int = 10

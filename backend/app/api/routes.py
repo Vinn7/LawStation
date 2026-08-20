@@ -3,7 +3,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -93,7 +93,13 @@ def sse(event: str, data) -> str:
 
 
 @router.post("/conversations/{conversation_id}/messages/stream")
-def stream_message(conversation_id: str, payload: ChatRequest, ctx=Depends(get_user_context), db=Depends(get_db)):
+def stream_message(
+    conversation_id: str,
+    payload: ChatRequest,
+    request: Request,
+    ctx=Depends(get_user_context),
+    db=Depends(get_db),
+):
     started = time.perf_counter()
     repo = OwnedRepository(db, ctx)
     conversation = repo.conversation(conversation_id)
@@ -112,16 +118,17 @@ def stream_message(conversation_id: str, payload: ChatRequest, ctx=Depends(get_u
 
     async def events():
         answer = []
-        agent = AgentService(db, ctx, conversation_id)
+        agent = AgentService(request.app.state.agent_runtime, ctx, conversation_id)
         yield sse("message_start", {"request_id": ctx.request_id})
         try:
             async for item in agent.run(memory_context, history, payload.content):
                 if item["event"] == "token":
                     answer.append(item["data"])
                 yield sse(item["event"], item["data"])
+            persisted_answer = agent.final_answer or "".join(answer)
             assistant = Message(
                 tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id,
-                role="assistant", content="".join(answer), status="complete",
+                role="assistant", content=persisted_answer, status="complete",
             )
             db.add(assistant)
             db.commit()
