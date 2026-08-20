@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+node_modules/
+frontend/dist/
+data/runtime/*
+!data/runtime/.gitkeep
+data/indexes/*
+!data/indexes/.gitkeep
+data/logs/
