@@ -16,15 +16,21 @@ conda activate LawStation
 
 环境已存在时使用 `conda env update -f environment.yml --prune` 同步依赖。应用配置和密钥全部放在根目录 `.env`，不使用 Conda 环境变量保存业务配置。
 
-在 `.env` 填写 `DEEPSEEK_API_KEY`；启用 Dense 检索时再填写 `DASHSCOPE_API_KEY`。默认法规数据源是固定抽样的 `data/knowledge/law/law_sample.json`。启动时会检查索引指纹：有效索引直接复用，缺失或过期时后台构建，构建期间自动使用 BM25。
+在 `.env` 填写 `DEEPSEEK_API_KEY`。Dense 检索默认使用本机 Ollama 的 `qwen3-embedding:0.6b`，请先安装 Ollama 并下载模型：
 
-重新生成相同的 100 条样本：
+```bash
+ollama pull qwen3-embedding:0.6b
+```
+
+无需手工执行 `ollama run` 或长期保持 `ollama serve`。统一启动器会复用已运行的 Ollama；不可达时自动执行 `ollama serve`、校验精确模型标签与 digest，并通过 `/api/embed` 预热 1024 维模型。Ollama、模型或预热不可用时启动会明确失败。默认法规数据源是全量 `data/knowledge/law/law.json`。启动时会检查索引指纹：有效索引直接复用，缺失或过期时后台构建，构建期间自动使用全量 BM25，完成后热切换为 BM25 + FAISS。
+
+如需测试或演示，可重新生成固定的 100 条样本：
 
 ```bash
 python scripts/create_law_sample.py --size 100 --seed 42
 ```
 
-恢复全量建库时，将 `.env` 的 `LAW_DATA_PATH` 改为 `./data/knowledge/law/law.json`。
+临时使用样本时，可将 `.env` 的 `LAW_DATA_PATH` 改为 `./data/knowledge/law/law_sample.json`；生产默认保持全量路径。
 
 ## 统一启动
 
@@ -33,7 +39,7 @@ conda activate LawStation
 python run.py
 ```
 
-启动器会在前端缺失或过期时自动安装/构建前端，然后启动唯一的 Uvicorn 进程。访问：
+启动器会在前端缺失或过期时自动安装/构建前端，确保 Ollama Embedding 可用，然后启动唯一的 Uvicorn 进程。由本次启动器创建的 Ollama 会随程序退出；启动前已存在的外部 Ollama 不受影响。访问：
 
 启动时会自动运行 Alembic 数据库迁移。首次升级分层记忆结构前，现有 SQLite 会备份为 `data/runtime/lawstation.db.pre-memory-v2.bak`。
 
@@ -59,7 +65,7 @@ python run.py --host 0.0.0.0 --port 8000
 docker compose up --build
 ```
 
-Compose 只启动一个 `lawstation` 容器并暴露 8000 端口。
+Compose 只启动一个 `lawstation` 容器并暴露 8000 端口。容器不负责启动 Ollama，而是通过 `host.docker.internal:11434` 使用宿主机 Ollama；运行 Compose 前须在宿主机启动 Ollama 并准备好模型。
 
 ## 索引与审计日志
 
@@ -69,6 +75,10 @@ Compose 只启动一个 `lawstation` 容器并暴露 8000 端口。
 python scripts/build_index.py
 python scripts/build_index.py --force
 ```
+
+全量建库默认按最多 8 条一批调用 Ollama `/api/embed`，不消耗 DashScope token。索引指纹包含 Ollama provider、模型标签、模型 digest、查询指令版本和数据/切分配置；仅同指纹批次可以恢复。已成功批次保存在指纹专属 staging 目录，遇到中断或可重试的限流、超时和服务错误时可在本次或下次启动继续；只有完整索引通过校验后才会原子替换当前 FAISS 索引。
+
+Ollama 进程输出追加到 `data/logs/ollama.log`。若模型不存在，请先执行 `ollama pull qwen3-embedding:0.6b`，启动器不会自动下载模型。
 
 控制台审计事件同时以 JSON Lines 追加到 `data/logs/lawstation.log`。默认单文件 20 MB、保留 10 个备份；日志只保存脱敏摘要和工具结果标识，不记录密钥或完整法条正文。
 

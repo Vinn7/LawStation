@@ -7,6 +7,8 @@ RUN npm run build
 
 FROM python:3.11-slim
 WORKDIR /app
+ENV OLLAMA_AUTO_START=false \
+    OLLAMA_BASE_URL=http://host.docker.internal:11434
 COPY pyproject.toml ./
 COPY backend ./backend
 COPY mcp_servers ./mcp_servers

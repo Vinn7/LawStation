@@ -35,5 +35,5 @@ def test_different_seed_changes_sample(tmp_path):
     assert digest(first) != digest(second)
 
 
-def test_default_source_is_sample():
-    assert get_settings().law_data_path.endswith("/law_sample.json")
+def test_default_source_is_full_law_data():
+    assert get_settings().law_data_path.endswith("/law.json")

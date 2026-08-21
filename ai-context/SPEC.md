@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：2.0
+> 版本：2.3
 > 基线日期：2026-08-21
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -45,7 +45,7 @@ flowchart LR
     AGENT --> LLM["DeepSeek OpenAI-compatible API"]
     AGENT -->|"Streamable HTTP"| MCP["内嵌 Law RAG MCP Server"]
     MCP --> BM25["jieba + BM25"]
-    MCP --> DENSE["DashScope Embedding + FAISS"]
+    MCP --> DENSE["Ollama qwen3-embedding:0.6b + FAISS"]
     BM25 --> LAW["law_sample.json / law.json"]
     DENSE --> LAW
     API --> LOG["JSONL 轮转审计日志"]
@@ -74,7 +74,7 @@ flowchart LR
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
 | `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
 | `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `LegalConsultationGraph`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
-| `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志和脱敏 | `Settings`、`RequestUserContext`、`audit`、`redact` |
+| `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
 | `backend/app/observability/` | LangSmith 客户端、采样、身份哈希、内容过滤和反馈同步 | `LangSmithObservability`、`TraceInvocation` |
@@ -114,13 +114,15 @@ python run.py
 2. `Settings` 从根目录 `.env` 加载配置。
 3. `frontend_is_stale` 判断前端构建是否缺失或过期。
 4. 需要构建时，优先以 `npm ci` 安装锁定依赖，然后执行 `npm run build`。
-5. 启动唯一 Uvicorn 进程。
-6. `backend.app.main::lifespan` 初始化日志、数据库和演示用户。
-7. `initialize_engine` 同步加载法规和 BM25，验证 Dense 索引；必要时后台建库。
-8. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
-9. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
-10. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
-11. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager。
+5. `OllamaProcessManager.ensure_ready` 探测外部 Ollama；不可达且允许自动启动时执行非交互式 `ollama serve`。
+6. 精确校验 `qwen3-embedding:0.6b` 标签和 digest，并调用 `/api/embed` 预热、验证 1024 维向量；任一步失败均阻止启动。
+7. 启动唯一 Uvicorn 进程。
+8. `backend.app.main::lifespan` 初始化日志、数据库和演示用户。
+9. `initialize_engine` 同步加载法规和 BM25，验证当前 provider/model digest 对应的 Dense 索引；必要时后台建库。
+10. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
+11. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
+12. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
+13. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager；仅关闭本次入口创建的 Ollama 进程组，不影响外部 Ollama。
 
 启动参数：`--rebuild`、`--no-build`、`--host`、`--port`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
 
@@ -176,10 +178,10 @@ SSE 事件契约：
 
 1. `LawSearchEngine.__init__` 读取 `LAW_DATA_PATH`，按法条加载并构建 BM25。
 2. 超过阈值的法条由 `split_text` 按段落/标点分块，默认 1,000 字、重叠 150 字。
-3. 指纹包含源文件 SHA256、切分版本/参数、Embedding 模型和维度。
+3. 指纹包含源文件 SHA256、切分版本/参数、Embedding provider、模型标签/digest、维度和查询指令版本。
 4. `_validate_and_load` 只有在 manifest、chunks、embeddings 和 FAISS 全部有效时才复用索引。
 5. 索引无效时以 staging、文件锁、批次 checkpoint 和原子替换构建；旧有效索引不因失败而被覆盖。
-6. Dense 未就绪或无 DashScope 密钥时降级到 BM25。
+6. Dense 未就绪时降级到 BM25；Dense 查询要求 Ollama Provider ready，且当前模型 digest 与 manifest 一致，不依赖 DashScope 密钥。
 7. Dense 就绪时，BM25 与 FAISS 候选使用 RRF 合并并去重。
 
 Agent 对检索结果的业务语义：
@@ -279,7 +281,7 @@ get_law_article(law_name: string, article_number: string)
 | 大模型 | DeepSeek，OpenAI-compatible API | 对话、工具决策和回答生成 |
 | MCP | MCP Python SDK，Streamable HTTP | 标准化暴露法规检索工具 |
 | 词法检索 | jieba + rank-bm25 | 中文分词与 BM25 召回 |
-| Dense Embedding | DashScope 兼容接口、`qwen3.7-text-embedding`、1024 维 | 文档及查询向量化 |
+| Dense Embedding | 本机 Ollama、`qwen3-embedding:0.6b`、1024 维 | 文档直接向量化；查询使用法律检索指令前缀；不消耗云端 Embedding token |
 | 向量索引 | FAISS `IndexFlatIP` | 归一化向量的内积/余弦近邻搜索 |
 | 混合融合 | Reciprocal Rank Fusion | 合并 BM25 与 Dense 排名 |
 | 数据库 | SQLite + SQLAlchemy 2.x + Alembic | 用户、会话、消息、分层记忆、后台任务、审计与版本化迁移 |
@@ -313,8 +315,19 @@ DEEPSEEK_BASE_URL
 DEEPSEEK_MODEL
 DASHSCOPE_API_KEY
 DASHSCOPE_BASE_URL
+EMBEDDING_PROVIDER
 EMBEDDING_MODEL
 EMBEDDING_DIMENSION
+OLLAMA_AUTO_START
+OLLAMA_COMMAND
+OLLAMA_BASE_URL
+OLLAMA_STARTUP_TIMEOUT_SECONDS
+OLLAMA_SHUTDOWN_TIMEOUT_SECONDS
+OLLAMA_REQUEST_TIMEOUT_SECONDS
+OLLAMA_KEEP_ALIVE
+OLLAMA_EMBEDDING_BATCH_SIZE
+OLLAMA_LOG_PATH
+OLLAMA_QUERY_INSTRUCTION
 DATABASE_URL
 LAW_DATA_PATH
 INDEX_DIR
@@ -353,6 +366,10 @@ INDEX_AUTO_BUILD
 INDEX_CHUNK_MAX_CHARS
 INDEX_CHUNK_OVERLAP_CHARS
 INDEX_BUILD_BATCH_SIZE
+INDEX_EMBEDDING_TIMEOUT_SECONDS
+INDEX_EMBEDDING_MAX_RETRIES
+INDEX_EMBEDDING_RETRY_BASE_SECONDS
+INDEX_EMBEDDING_RETRY_MAX_SECONDS
 ```
 
 强制规则：
@@ -368,18 +385,29 @@ INDEX_BUILD_BATCH_SIZE
 
 ### 12.1 数据源
 
-- 原始全集：`data/knowledge/law/law.json`，不得由运行时或抽样脚本修改。
-- 默认样本：`data/knowledge/law/law_sample.json`，固定 seed 42、无放回抽取 100 条、按原位置排序。
+- 默认生产数据源：`data/knowledge/law/law.json`，不得由运行时或抽样脚本修改。
+- 测试和演示样本：`data/knowledge/law/law_sample.json`，固定 seed 42、无放回抽取 100 条、按原位置排序；不得作为生产默认值。
 - 默认所有切分、BM25、Dense、指纹与查询必须统一读取 `LAW_DATA_PATH`。
-- 切回全量数据只允许修改 `.env` 中 `LAW_DATA_PATH`，不得在代码中另写路径分支。
+- 临时切换样本只允许修改 `.env` 中 `LAW_DATA_PATH`，不得在代码中另写路径分支。
 
 ### 12.2 幂等和可靠性
 
 - 只有 manifest 指纹、chunk 数、Embedding shape、FAISS 维度和 `ntotal` 全部一致时才能跳过建库。
 - `chunk_id` 必须由源法条标识、chunk 序号和内容哈希稳定生成。
 - 构建必须使用文件锁、staging 和原子切换；失败不得破坏旧有效索引。
-- 无 Dense 能力时服务必须继续提供 BM25，而不是阻止页面和 API 启动。
+- 默认 Ollama Embedding 每批最多 8 条；请求必须携带 `dimensions=1024`、`truncate=false` 和配置的 `keep_alive`，响应必须校验数量、顺序、维度和有限数值，可重试错误采用有上限的指数退避。
+- 全量向量必须通过 memmap 分批写入并增量加入 FAISS，禁止使用 `np.vstack` 形成全量重复内存副本。
+- 只有 provider、模型 digest、查询指令和数据指纹完全一致的 staging 批次允许在下次启动时恢复；损坏批次必须单独重建，`--force` 不得复用 staging 批次。未知或不兼容 staging 不得自动递归删除。
+- 统一入口的 Ollama 探测、模型校验或预热失败必须阻止 LawStation 启动；应用已经启动后若后台 Dense 建库失败，或独立 MCP 调试模式无法准备 Provider，则保留 BM25 降级能力。
 - 手工构建脚本必须复用 `LawSearchEngine`，不得维护第二套切分/建库实现。
+
+### 12.3 Ollama 运行边界
+
+- 正式本地入口使用 `ollama serve` 提供服务，使用 `/api/embed` 加载模型，禁止使用交互式 `ollama run`。
+- 启动器必须精确验证模型标签和 digest；模型缺失时提示用户手工执行 `ollama pull qwen3-embedding:0.6b`，不得自动下载。
+- 只允许关闭本次启动入口创建的 Ollama 独立进程组；外部已运行的 Ollama 不得关闭，也不得使用 `pkill` 等宽泛命令。
+- Ollama 子进程环境只传递基础系统变量和 `OLLAMA_*` 配置，不得传递 DeepSeek、DashScope、LangSmith 等密钥。
+- Docker 内禁止自动启动 Ollama，统一访问宿主 `host.docker.internal:11434`；不可达或模型缺失时阻止容器应用启动。
 
 ## 13. 审计、安全与隐私
 
@@ -446,6 +474,7 @@ INDEX_BUILD_BATCH_SIZE
 - **[禁止]** 将 `.env`、SQLite 运行库、索引文件、日志、`node_modules`、`frontend/dist` 提交到 Git。
 - **[禁止]** 在没有明确需求时接入 `case_tool`、`crime_tool`、`procedure_tool`、`template_tool`、`check_tool`、`plan_tool` 或 `memory_tool`。
 - **[禁止]** 默认开启 Uvicorn reload 或启动第二个生产 MCP 进程。
+- **[禁止]** 开发、测试或构建完成后自动执行 `python run.py`、`uvicorn`、`docker compose up` 等命令启动服务，或遗留任何常驻服务进程；仅当用户在当前任务中明确要求启动、运行或进行在线联调时，才允许启动服务。测试和生产构建本身不视为启动授权。
 - **[禁止]** Dense 建库失败时让整个应用不可访问。
 
 ## 15. 测试与验收基线
@@ -543,3 +572,6 @@ INDEX_BUILD_BATCH_SIZE
 - **1.8 / 2026-08-21**：新抽取记忆通过校验后直接生效，无需用户确认；同语义键冲突由新记录自动替换旧记录，历史待确认数据保持原状以避免批量误激活。
 - **1.9 / 2026-08-21**：最新事实冲突改为模型建议、服务端验证的原位替换；主表只保留最新事实，旧内容进入修订审计，三 Agent 明确优先采用本轮用户消息。
 - **2.0 / 2026-08-21**：接入集中式 LangSmith 追踪、HMAC 身份隔离和敏感字段过滤；增加 60 条合成基准、确定性/独立 Judge 评估、实验脚本、反馈持久化与前端赞踩闭环。
+- **2.1 / 2026-08-21**：补充开发、测试或构建完成后不得自动启动服务或遗留常驻服务进程的执行约束。
+- **2.2 / 2026-08-21**：默认法规源切换为全量 `law.json`；增加 Embedding 响应校验、有限重试、批次恢复、memmap/FAISS 增量装配和全量索引热切换约束。
+- **2.3 / 2026-08-21**：默认 Dense Provider 改为本机 Ollama `qwen3-embedding:0.6b`；统一入口负责探测、按需启动、模型校验和预热，索引指纹加入模型 digest 与查询指令，Docker 改为访问宿主 Ollama。

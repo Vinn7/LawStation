@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shutil
 from datetime import UTC, datetime
@@ -16,8 +17,11 @@ from rank_bm25 import BM25Okapi
 
 from backend.app.core.config import get_settings
 from backend.app.core.logging import audit
+from backend.app.core.ollama import ollama_runtime_status
+from mcp_servers.law_rag.embeddings import create_embedding_provider
 
 CHUNKER_VERSION = "law-article-v1"
+QUERY_INSTRUCTION_VERSION = "legal-query-v1"
 
 
 def tokens(text: str) -> list[str]:
@@ -81,7 +85,10 @@ class LawSearchEngine:
         self.faiss = None
         self._dense_lock = asyncio.Lock()
         self._build_task: asyncio.Task | None = None
+        self.embedding_provider = create_embedding_provider(self.settings)
+        self.embedding_descriptor = None
         self.fingerprint = self._fingerprint()
+        runtime = ollama_runtime_status()
         self._state = {
             "status": "checking",
             "source_file": self.path.name,
@@ -91,6 +98,11 @@ class LawSearchEngine:
             "total_chunks": len(self.docs),
             "progress": 0.0,
             "dense_enabled": False,
+            "embedding_provider": self.settings.embedding_provider,
+            "embedding_model": self.settings.embedding_model,
+            "embedding_model_digest": "",
+            "ollama_available": runtime["available"],
+            "ollama_managed": runtime["managed"],
             "message": "正在检查法律索引",
         }
 
@@ -100,8 +112,13 @@ class LawSearchEngine:
             "chunker_version": CHUNKER_VERSION,
             "max_chars": self.settings.index_chunk_max_chars,
             "overlap_chars": self.settings.index_chunk_overlap_chars,
+            "embedding_provider": self.settings.embedding_provider,
             "embedding_model": self.settings.embedding_model,
+            "embedding_model_digest": (
+                self.embedding_descriptor.digest if self.embedding_descriptor else "unprepared"
+            ),
             "embedding_dimension": self.settings.embedding_dimension,
+            "query_instruction_version": QUERY_INSTRUCTION_VERSION,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -111,18 +128,19 @@ class LawSearchEngine:
     def _set_state(self, **values) -> None:
         self._state.update(values)
 
-    def _validate_and_load(self) -> bool:
-        manifest_path = self.final_dir / "manifest.json"
-        chunks_path = self.final_dir / "chunks.jsonl"
-        embeddings_path = self.final_dir / "embeddings.npy"
-        faiss_path = self.final_dir / "law.faiss"
+    def _read_valid_index(self, directory: Path):
+        manifest_path = directory / "manifest.json"
+        chunks_path = directory / "chunks.jsonl"
+        embeddings_path = directory / "embeddings.npy"
+        faiss_path = directory / "law.faiss"
         if not all(path.is_file() for path in (manifest_path, chunks_path, embeddings_path, faiss_path)):
-            return False
+            return None
         try:
             import faiss
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            metadata_count = sum(1 for line in chunks_path.read_text(encoding="utf-8").splitlines() if line)
+            with chunks_path.open(encoding="utf-8") as chunk_file:
+                metadata_count = sum(1 for line in chunk_file if line.strip())
             embeddings = np.load(embeddings_path, mmap_mode="r")
             index = faiss.read_index(str(faiss_path))
             valid = (
@@ -133,13 +151,48 @@ class LawSearchEngine:
                 and index.d == self.settings.embedding_dimension
             )
             if not valid:
-                return False
-            self.faiss = index
-            return True
+                return None
+            return index
         except Exception:  # noqa: BLE001 - any corrupt artifact must trigger a safe rebuild
+            return None
+
+    def _validate_and_load(self) -> bool:
+        index = self._read_valid_index(self.final_dir)
+        if index is None:
             return False
+        self.faiss = index
+        return True
 
     async def initialize_index(self, wait: bool = False, force: bool = False) -> None:
+        try:
+            self.embedding_descriptor = await self.embedding_provider.prepare()
+        except Exception as exc:  # noqa: BLE001 - direct MCP/debug mode must retain BM25
+            runtime = ollama_runtime_status()
+            self._set_state(
+                status="degraded",
+                dense_enabled=False,
+                ollama_available=runtime["available"],
+                ollama_managed=runtime["managed"],
+                message=f"Embedding 服务不可用，当前仅使用 BM25：{exc}",
+            )
+            audit(
+                "index.build.failed",
+                level=logging.WARNING,
+                status="degraded",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+            return
+        self.fingerprint = self._fingerprint()
+        runtime = ollama_runtime_status()
+        self._set_state(
+            fingerprint=self.fingerprint,
+            embedding_provider=self.embedding_descriptor.provider,
+            embedding_model=self.embedding_descriptor.model,
+            embedding_model_digest=self.embedding_descriptor.digest,
+            ollama_available=(self.embedding_descriptor.provider == "ollama"),
+            ollama_managed=(runtime["managed"] if self.embedding_descriptor.provider == "ollama" else False),
+        )
         audit("index.check.started", fingerprint=self.fingerprint, source_file=self.path.name)
         valid = False if force else await asyncio.to_thread(self._validate_and_load)
         if valid:
@@ -150,11 +203,9 @@ class LawSearchEngine:
         if not self.settings.index_auto_build:
             self._set_state(status="degraded", message="自动建库已关闭，当前仅使用 BM25")
             return
-        if not self.settings.dashscope_api_key:
-            self._set_state(status="degraded", message="缺少 DASHSCOPE_API_KEY，当前仅使用 BM25")
-            audit("index.build.failed", level=logging.WARNING, status="degraded", error_type="MissingCredential", message="缺少 DASHSCOPE_API_KEY")
-            return
-        self._set_state(status="building", message="正在生成法律向量")
+        provider_name = "Ollama 本地" if self.embedding_descriptor.provider == "ollama" else "远程"
+        message = f"正在生成{provider_name}法律向量，当前使用 BM25"
+        self._set_state(status="building", message=message)
         if self._build_task is None or self._build_task.done():
             self._build_task = asyncio.create_task(self._build(force=force), name="law-index-build")
         if wait:
@@ -167,22 +218,72 @@ class LawSearchEngine:
                 await self._build_task
             except asyncio.CancelledError:
                 pass
+        await self.embedding_provider.close()
 
     async def _embed(self, texts: list[str]) -> np.ndarray:
+        return await self.embedding_provider.embed_documents(texts)
+
+    async def _embed_query(self, query: str) -> np.ndarray:
+        return await self.embedding_provider.embed_query(query)
+
+    async def _embed_batch(self, texts: list[str], batch_start: int) -> np.ndarray:
         import httpx
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                self.settings.dashscope_base_url + "/embeddings",
-                headers={"Authorization": f"Bearer {self.settings.dashscope_api_key}"},
-                json={
-                    "model": self.settings.embedding_model,
-                    "input": texts,
-                    "dimensions": self.settings.embedding_dimension,
-                },
+        retries = max(0, self.settings.index_embedding_max_retries)
+        for attempt in range(retries + 1):
+            try:
+                return await self._embed(texts)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                retryable = status_code in {408, 429} or status_code >= 500
+                if not retryable or attempt >= retries:
+                    raise
+                error_type = f"HTTP{status_code}"
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt >= retries:
+                    raise
+                error_type = type(exc).__name__
+            delay = min(
+                self.settings.index_embedding_retry_base_seconds * (2**attempt),
+                self.settings.index_embedding_retry_max_seconds,
             )
-            response.raise_for_status()
-            return np.asarray([item["embedding"] for item in response.json()["data"]], dtype="float32")
+            delay += random.uniform(0, min(1.0, delay * 0.25))
+            audit(
+                "index.embedding.retry",
+                level=logging.WARNING,
+                status="retrying",
+                batch_start=batch_start,
+                batch_size=len(texts),
+                attempt=attempt + 1,
+                error_type=error_type,
+                retry_delay_seconds=round(delay, 3),
+            )
+            await asyncio.sleep(delay)
+
+        raise RuntimeError("Embedding 重试流程异常结束")
+
+    def _load_batch(self, path: Path, expected_rows: int) -> np.ndarray | None:
+        try:
+            vectors = np.load(path, allow_pickle=False)
+            if vectors.dtype != np.float32:
+                return None
+            if vectors.shape != (expected_rows, self.settings.embedding_dimension):
+                return None
+            if not np.isfinite(vectors).all():
+                return None
+            return vectors
+        except Exception:  # noqa: BLE001 - a corrupt checkpoint batch must be regenerated
+            return None
+
+    def _chunks_file_is_valid(self, path: Path) -> bool:
+        try:
+            with path.open(encoding="utf-8") as chunk_file:
+                for expected, line in zip(self.docs, chunk_file, strict=True):
+                    if json.loads(line).get("chunk_id") != expected["chunk_id"]:
+                        return False
+            return True
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
 
     async def _build(self, force: bool = False) -> None:
         self.index_root.mkdir(parents=True, exist_ok=True)
@@ -208,47 +309,79 @@ class LawSearchEngine:
                 self._set_state(status="ready", processed_chunks=len(self.docs), progress=1.0, dense_enabled=True, message="法律向量索引已就绪")
                 audit("index.check.skipped", status="ready", fingerprint=self.fingerprint)
                 return
+            if force and staging.exists():
+                await asyncio.to_thread(shutil.rmtree, staging)
             staging.mkdir(parents=True, exist_ok=True)
             chunks_path = staging / "chunks.jsonl"
-            if not chunks_path.exists():
-                chunks_path.write_text("".join(json.dumps(doc, ensure_ascii=False) + "\n" for doc in self.docs), encoding="utf-8")
-            batch_size = max(1, min(self.settings.index_build_batch_size, 20))
-            batches = []
+            if not await asyncio.to_thread(self._chunks_file_is_valid, chunks_path):
+                chunks_tmp = staging / f".chunks-{uuid4().hex}.tmp"
+                chunks_tmp.write_text("".join(json.dumps(doc, ensure_ascii=False) + "\n" for doc in self.docs), encoding="utf-8")
+                os.replace(chunks_tmp, chunks_path)
+            provider_limit = (
+                self.settings.ollama_embedding_batch_size
+                if self.embedding_descriptor.provider == "ollama"
+                else 20
+            )
+            batch_size = max(1, min(self.settings.index_build_batch_size, provider_limit, 20))
             processed = 0
+            resumed = 0
+            last_logged_percent = -5
             audit("index.build.started", fingerprint=self.fingerprint, chunk_count=len(self.docs))
             for start in range(0, len(self.docs), batch_size):
                 batch_path = staging / f"batch-{start:08d}.npy"
-                if batch_path.is_file():
-                    vector_batch = np.load(batch_path)
-                    expected = min(batch_size, len(self.docs) - start)
-                    if vector_batch.shape != (expected, self.settings.embedding_dimension):
-                        batch_path.unlink()
-                        vector_batch = None
-                    else:
-                        audit("index.build.resumed", processed_chunks=start + len(vector_batch), total_chunks=len(self.docs))
-                else:
-                    vector_batch = None
+                expected = min(batch_size, len(self.docs) - start)
+                vector_batch = self._load_batch(batch_path, expected) if batch_path.is_file() else None
+                if vector_batch is None and batch_path.exists():
+                    batch_path.unlink()
                 if vector_batch is None:
-                    vector_batch = await self._embed([doc["text"] for doc in self.docs[start : start + batch_size]])
+                    vector_batch = await self._embed_batch(
+                        [doc["text"] for doc in self.docs[start : start + batch_size]],
+                        batch_start=start,
+                    )
                     temporary = staging / f".{batch_path.name}-{uuid4().hex}.tmp.npy"
                     np.save(temporary, vector_batch)
                     os.replace(temporary, batch_path)
-                batches.append(vector_batch)
+                else:
+                    resumed += len(vector_batch)
+                    if resumed == len(vector_batch):
+                        audit(
+                            "index.build.resumed",
+                            status="resumed",
+                            processed_chunks=start + len(vector_batch),
+                            total_chunks=len(self.docs),
+                        )
                 processed += len(vector_batch)
                 progress = processed / len(self.docs)
                 self._set_state(processed_chunks=processed, progress=progress)
                 checkpoint_tmp = staging / ".checkpoint.tmp"
                 checkpoint_tmp.write_text(json.dumps({"fingerprint": self.fingerprint, "processed_chunks": processed}), encoding="utf-8")
                 os.replace(checkpoint_tmp, staging / "checkpoint.json")
-                if processed == len(self.docs) or processed % max(5, len(self.docs) // 20 or 1) < batch_size:
+                progress_percent = int(progress * 100)
+                if processed == len(self.docs) or progress_percent >= last_logged_percent + 5:
                     audit("index.build.progress", status="building", processed_chunks=processed, total_chunks=len(self.docs), progress=round(progress, 4))
-            embeddings = np.vstack(batches).astype("float32")
+                    last_logged_percent = progress_percent
             import faiss
 
-            faiss.normalize_L2(embeddings)
             index = faiss.IndexFlatIP(self.settings.embedding_dimension)
-            index.add(embeddings)
-            np.save(staging / "embeddings.npy", embeddings)
+            embeddings_path = staging / "embeddings.npy"
+            embeddings = np.lib.format.open_memmap(
+                embeddings_path,
+                mode="w+",
+                dtype="float32",
+                shape=(len(self.docs), self.settings.embedding_dimension),
+            )
+            for start in range(0, len(self.docs), batch_size):
+                expected = min(batch_size, len(self.docs) - start)
+                batch_path = staging / f"batch-{start:08d}.npy"
+                vector_batch = self._load_batch(batch_path, expected)
+                if vector_batch is None:
+                    raise ValueError(f"Embedding 批次校验失败: {start}")
+                normalized = vector_batch.copy()
+                faiss.normalize_L2(normalized)
+                embeddings[start : start + expected] = normalized
+                index.add(normalized)
+            embeddings.flush()
+            del embeddings
             faiss.write_index(index, str(staging / "law.faiss"))
             manifest = {
                 "fingerprint": self.fingerprint,
@@ -257,13 +390,19 @@ class LawSearchEngine:
                 "max_chars": self.settings.index_chunk_max_chars,
                 "overlap_chars": self.settings.index_chunk_overlap_chars,
                 "embedding_model": self.settings.embedding_model,
+                "embedding_provider": self.embedding_descriptor.provider,
+                "embedding_model_digest": self.embedding_descriptor.digest,
                 "embedding_dimension": self.settings.embedding_dimension,
+                "query_instruction_version": QUERY_INSTRUCTION_VERSION,
                 "source_document_count": self._state["source_documents"],
                 "chunk_count": len(self.docs),
                 "built_at": datetime.now(UTC).isoformat(),
                 "status": "ready",
             }
             (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            validated_index = await asyncio.to_thread(self._read_valid_index, staging)
+            if validated_index is None:
+                raise ValueError("生成的法律向量索引未通过完整性校验")
             for path in staging.glob("batch-*.npy"):
                 path.unlink()
             (staging / "checkpoint.json").unlink(missing_ok=True)
@@ -281,7 +420,7 @@ class LawSearchEngine:
             if backup.exists():
                 shutil.rmtree(backup)
             async with self._dense_lock:
-                self.faiss = index
+                self.faiss = validated_index
             self._set_state(status="ready", processed_chunks=len(self.docs), progress=1.0, dense_enabled=True, message="法律向量索引已就绪")
             self._record_manifest()
             audit("index.build.completed", status="ready", fingerprint=self.fingerprint, chunk_count=len(self.docs))
@@ -324,8 +463,8 @@ class LawSearchEngine:
         for rank, index in enumerate(await asyncio.to_thread(self._lexical, query, pool)):
             ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
             sources.setdefault(index, []).append("bm25")
-        if self.faiss is not None and self.settings.dashscope_api_key:
-            vector = await self._embed([query])
+        if self.faiss is not None and self.embedding_descriptor is not None:
+            vector = await self._embed_query(query)
             import faiss
 
             faiss.normalize_L2(vector)

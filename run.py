@@ -52,6 +52,8 @@ def parse_args(settings):
 def main() -> None:
     os.chdir(ROOT)
     from backend.app.core.config import get_settings
+    from backend.app.core.ollama import OllamaProcessManager
+
     settings = get_settings()
     args = parse_args(settings)
     build_frontend(args.rebuild, args.no_build)
@@ -59,8 +61,20 @@ def main() -> None:
         import uvicorn
     except ImportError as exc:
         raise SystemExit("缺少 Python 依赖，请先执行 `conda env update -f environment.yml --prune`") from exc
-    print(f"LawStation 正在启动：http://127.0.0.1:{args.port}（配置来源：.env）")
-    uvicorn.run("backend.app.main:app", host=args.host, port=args.port, reload=False)
+    ollama = OllamaProcessManager(settings) if settings.embedding_provider == "ollama" else None
+    try:
+        if ollama is not None:
+            try:
+                runtime = ollama.ensure_ready()
+            except Exception as exc:
+                raise SystemExit(f"Ollama 启动检查失败：{exc}") from exc
+            ownership = "由 LawStation 管理" if runtime.managed else "复用已有服务"
+            print(f"Ollama 已就绪：{runtime.model}（{ownership}）")
+        print(f"LawStation 正在启动：http://127.0.0.1:{args.port}（配置来源：.env）")
+        uvicorn.run("backend.app.main:app", host=args.host, port=args.port, reload=False)
+    finally:
+        if ollama is not None:
+            ollama.close()
 
 
 if __name__ == "__main__":
