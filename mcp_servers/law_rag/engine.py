@@ -28,6 +28,15 @@ def tokens(text: str) -> list[str]:
     return [item for item in jieba.lcut(text.lower()) if item.strip()]
 
 
+def normalize_law_name(value: str) -> str:
+    normalized = re.sub(r"[\s《》]", "", value or "").lower()
+    return normalized.removeprefix("中华人民共和国")
+
+
+def normalize_article_number(value: str) -> str:
+    return re.sub(r"\s+", "", value or "")
+
+
 def split_text(text: str, maximum: int, overlap: int) -> list[str]:
     if len(text) <= maximum:
         return [text]
@@ -81,6 +90,13 @@ class LawSearchEngine:
             self.settings.index_chunk_max_chars,
             self.settings.index_chunk_overlap_chars,
         )
+        self._law_name_indices: dict[str, list[int]] = {}
+        self._article_map: dict[tuple[str, str], list[dict]] = {}
+        for index, document in enumerate(self.docs):
+            normalized_name = normalize_law_name(document["law_name"])
+            self._law_name_indices.setdefault(normalized_name, []).append(index)
+            article_key = (normalized_name, normalize_article_number(document["article_number"]))
+            self._article_map.setdefault(article_key, []).append(document)
         self.bm25 = BM25Okapi([tokens(document["text"]) for document in self.docs])
         self.faiss = None
         self._dense_lock = asyncio.Lock()
@@ -452,46 +468,125 @@ class LawSearchEngine:
         except Exception as exc:  # noqa: BLE001 - audit persistence cannot invalidate a built index
             audit("index.manifest.persist_failed", status="failed", error_type=type(exc).__name__, message=str(exc))
 
-    def _lexical(self, query: str, pool: int) -> list[int]:
+    def _filtered_indices(self, filters: dict | None) -> list[int] | None:
+        if filters is None:
+            return None
+        if not isinstance(filters, dict):
+            raise TypeError("filters 必须是对象")
+        unknown = set(filters) - {"law_name"}
+        if unknown:
+            raise ValueError(f"不支持的过滤字段：{', '.join(sorted(unknown))}")
+        law_name = filters.get("law_name")
+        if law_name in (None, ""):
+            return None
+        if not isinstance(law_name, str):
+            raise TypeError("law_name 过滤条件必须是字符串")
+        normalized = normalize_law_name(law_name)
+        if not normalized:
+            return None
+        return [
+            index
+            for stored_name, indexes in self._law_name_indices.items()
+            if normalized in stored_name or stored_name in normalized
+            for index in indexes
+        ]
+
+    def _lexical(
+        self, query: str, pool: int, eligible_indices: list[int] | None = None
+    ) -> list[tuple[int, float]]:
         scores = self.bm25.get_scores(tokens(query))
-        return [int(index) for index in np.argsort(scores)[-pool:][::-1]]
+        candidates = eligible_indices if eligible_indices is not None else range(len(self.docs))
+        ranked = sorted(
+            ((int(index), float(scores[index])) for index in candidates),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        minimum = float(getattr(self.settings, "rag_bm25_min_score", 0.01))
+        return [item for item in ranked[:pool] if item[1] >= minimum]
 
     async def search(self, query, top_k=8, filters=None):
         top_k = max(1, min(int(top_k), 20))
-        pool = min(len(self.docs), max(30, top_k * 4))
-        ranks, sources = {}, {}
-        for rank, index in enumerate(await asyncio.to_thread(self._lexical, query, pool)):
+        eligible_indices = self._filtered_indices(filters)
+        if eligible_indices == []:
+            return []
+        eligible = set(eligible_indices) if eligible_indices is not None else None
+        candidate_count = len(eligible_indices) if eligible_indices is not None else len(self.docs)
+        pool = min(candidate_count, max(30, top_k * 4))
+        ranks: dict[int, float] = {}
+        sources: dict[int, list[str]] = {}
+        raw_scores: dict[int, dict[str, float]] = {}
+        lexical = await asyncio.to_thread(self._lexical, query, pool, eligible_indices)
+        for rank, (index, score) in enumerate(lexical):
             ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
             sources.setdefault(index, []).append("bm25")
+            raw_scores.setdefault(index, {})["bm25"] = score
         if self.faiss is not None and self.embedding_descriptor is not None:
             vector = await self._embed_query(query)
             import faiss
 
             faiss.normalize_L2(vector)
+            dense_pool = len(self.docs) if eligible is not None else pool
             async with self._dense_lock:
-                _, dense = await asyncio.to_thread(self.faiss.search, vector, pool)
-            for rank, index in enumerate(dense[0]):
-                if index >= 0:
-                    index = int(index)
-                    ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
-                    sources.setdefault(index, []).append("dense")
-        law_filter = (filters or {}).get("law_name") if isinstance(filters, dict) else None
+                dense_scores, dense = await asyncio.to_thread(
+                    self.faiss.search, vector, dense_pool
+                )
+            minimum_dense = float(getattr(self.settings, "rag_dense_min_score", 0.20))
+            accepted_rank = 0
+            for index, score in zip(dense[0], dense_scores[0], strict=True):
+                if index < 0:
+                    continue
+                index = int(index)
+                score = float(score)
+                if eligible is not None and index not in eligible:
+                    continue
+                if score < minimum_dense:
+                    continue
+                ranks[index] = ranks.get(index, 0) + 1 / (61 + accepted_rank)
+                sources.setdefault(index, []).append("dense")
+                raw_scores.setdefault(index, {})["dense"] = score
+                accepted_rank += 1
+                if accepted_rank >= pool:
+                    break
+        minimum_rrf = float(getattr(self.settings, "rag_rrf_min_score", 0.01))
         ordered = [
             index for index, _ in sorted(ranks.items(), key=lambda item: item[1], reverse=True)
-            if not law_filter or law_filter in self.docs[index]["law_name"]
+            if ranks[index] >= minimum_rrf
         ][:top_k]
         state = self.status()
         return [{
             **{key: value for key, value in self.docs[index].items() if key != "text"},
             "retrieval_sources": sources[index],
             "rank": rank + 1,
+            "retrieval_scores": {
+                **raw_scores.get(index, {}),
+                "rrf": round(ranks[index], 8),
+            },
             "data_version": self.fingerprint,
             "dense_enabled": state["dense_enabled"],
             "index_status": state["status"],
         } for rank, index in enumerate(ordered)]
 
     def get(self, law_name, article_number):
-        for document in self.docs:
-            if law_name in document["law_name"] and article_number in document["article_number"]:
-                return {key: value for key, value in document.items() if key != "text"}
+        normalized_name = normalize_law_name(law_name)
+        normalized_article = normalize_article_number(article_number)
+        matches = self._article_map.get((normalized_name, normalized_article), [])
+        if not matches:
+            matches = [
+                document
+                for (stored_name, stored_article), documents in self._article_map.items()
+                if normalized_article == stored_article
+                and (normalized_name in stored_name or stored_name in normalized_name)
+                for document in documents
+            ]
+        if len(matches) == 1:
+            return {key: value for key, value in matches[0].items() if key != "text"}
+        if matches:
+            return {
+                "law_name": matches[0]["law_name"],
+                "article_number": matches[0]["article_number"],
+                "chunks": [
+                    {key: value for key, value in document.items() if key != "text"}
+                    for document in matches
+                ],
+            }
         return None

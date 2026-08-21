@@ -20,6 +20,9 @@ def settings(source, index_dir):
         index_embedding_max_retries=2,
         index_embedding_retry_base_seconds=0,
         index_embedding_retry_max_seconds=0,
+        rag_bm25_min_score=0.01,
+        rag_dense_min_score=0.20,
+        rag_rrf_min_score=0.01,
     )
 
 
@@ -306,3 +309,55 @@ async def test_ollama_build_caps_batches_at_configured_eight(tmp_path, monkeypat
 
 async def _completed():
     return None
+
+
+@pytest.mark.asyncio
+async def test_irrelevant_lexical_query_returns_normal_empty_result(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"劳动法第一条":"劳动权益内容"}', encoding="utf-8")
+    monkeypatch.setattr(engine_module, "get_settings", lambda: settings(source, tmp_path / "indexes"))
+    engine = engine_module.LawSearchEngine()
+
+    result = await engine.search("量子天体物理")
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_law_name_filter_is_applied_before_ranking(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    records = {f"普通法第{i}条": f"普通内容{i}" for i in range(40)}
+    records["中华人民共和国目标法第一条"] = "特殊救济目标"
+    source.write_text(engine_module.json.dumps(records, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(engine_module, "get_settings", lambda: settings(source, tmp_path / "indexes"))
+    engine = engine_module.LawSearchEngine()
+
+    result = await engine.search("特殊救济", filters={"law_name": "目标法"})
+
+    assert len(result) == 1
+    assert result[0]["law_name"] == "中华人民共和国目标法"
+    assert result[0]["retrieval_scores"]["bm25"] > 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_filter_is_rejected(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"测试法第一条":"内容"}', encoding="utf-8")
+    monkeypatch.setattr(engine_module, "get_settings", lambda: settings(source, tmp_path / "indexes"))
+    engine = engine_module.LawSearchEngine()
+
+    with pytest.raises(ValueError, match="不支持的过滤字段"):
+        await engine.search("内容", filters={"region": "北京"})
+
+
+def test_exact_article_lookup_uses_map_and_returns_all_chunks(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"中华人民共和国测试法第一条":"' + "甲" * 1200 + '"}', encoding="utf-8")
+    monkeypatch.setattr(engine_module, "get_settings", lambda: settings(source, tmp_path / "indexes"))
+    engine = engine_module.LawSearchEngine()
+
+    result = engine.get("测试法", "第一条")
+
+    assert result["law_name"] == "中华人民共和国测试法"
+    assert len(result["chunks"]) == 2
+    assert all(item["chunk_id"] for item in result["chunks"])

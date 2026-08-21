@@ -78,6 +78,8 @@ python scripts/build_index.py --force
 
 全量建库默认按最多 8 条一批调用 Ollama `/api/embed`，不消耗 DashScope token。索引指纹包含 Ollama provider、模型标签、模型 digest、查询指令版本和数据/切分配置；仅同指纹批次可以恢复。已成功批次保存在指纹专属 staging 目录，遇到中断或可重试的限流、超时和服务错误时可在本次或下次启动继续；只有完整索引通过校验后才会原子替换当前 FAISS 索引。
 
+查询阶段会先应用 `law_name` 过滤，再执行 BM25 与 Dense 排序，并通过 `RAG_BM25_MIN_SCORE`、`RAG_DENSE_MIN_SCORE` 和 `RAG_RRF_MIN_SCORE` 排除无效候选。引用以 `chunk_id` 为证据边界，最终只展示回答实际使用的法条片段。完全没有有效候选时正常进入 `no_match`，不会被当作工具失败。
+
 Ollama 进程输出追加到 `data/logs/ollama.log`。若模型不存在，请先执行 `ollama pull qwen3-embedding:0.6b`，启动器不会自动下载模型。
 
 控制台审计事件同时以 JSON Lines 追加到 `data/logs/lawstation.log`。默认单文件 20 MB、保留 10 个备份；日志只保存脱敏摘要和工具结果标识，不记录密钥或完整法条正文。
@@ -116,6 +118,9 @@ python scripts/run_langsmith_eval.py --compare baseline-experiment current-exper
 - 页面左侧“管理我的记忆”可修正或删除已生效记忆；升级前已有的待确认记录仍可确认或拒绝。
 - 回答完成后由 SQLite 持久后台任务整理记忆和增量摘要，不阻塞主回答；服务重启会恢复未完成任务。
 - 记忆整理使用独立的非 Thinking JSON Output 调用，不绑定或调用 MCP 工具；简单问候等没有可沉淀内容的消息会正常完成且不创建记忆。
+- `MemoryTaskManager.enqueue()` 是唯一记忆整理入口；旧 `MemoryService.consolidate()` 已禁用，不能再将用户长消息原文直接沉淀为事实。
+
+咨询 SSE 每 15 秒发送一次不可见 heartbeat，避免长模型调用期间连接被代理关闭。低风险且没有可引用法条的回答通过确定性证据边界校验后可跳过 LLM Reviewer；中高风险、存在法规依据或检索异常时仍执行完整模型复核。
 
 ## 测试
 

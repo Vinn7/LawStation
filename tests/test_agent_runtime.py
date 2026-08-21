@@ -20,6 +20,7 @@ from backend.app.agent.graph import (
     ANALYST_PROMPT,
     COUNSEL_PROMPT,
     REVIEW_PROMPT,
+    _authoritative_evidence,
     _citation_errors,
     _no_match_violations,
 )
@@ -78,6 +79,7 @@ def fake_tool():
         return json.dumps([
             {
                 "document_id": "law-1",
+                "chunk_id": "chunk-1",
                 "law_name": "劳动合同法",
                 "article_number": "第八十二条",
                 "content": query,
@@ -175,6 +177,7 @@ async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch
         "research_tasks": analysis["research_tasks"],
         "evidence_items": [{
             "document_id": "law-1",
+            "chunk_id": "chunk-1",
             "law_name": "劳动合同法",
             "article_number": "第八十二条",
             "content": "用人单位未依法订立书面劳动合同，应当依法承担责任。",
@@ -189,7 +192,7 @@ async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch
     }
     draft = {
         "answer": "依据《劳动合同法》第八十二条，可以依法主张权利。",
-        "claims": [{"claim": "可以依法主张权利", "evidence_document_ids": ["law-1"]}],
+        "claims": [{"claim": "可以依法主张权利", "evidence_chunk_ids": ["chunk-1"]}],
         "confidence": "high",
         "limitations": [],
         "follow_up_questions": [],
@@ -224,6 +227,7 @@ async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch
     assert any(event["event"] == "tool_call_start" for event in events)
     citations = next(event["data"] for event in events if event["event"] == "citations")
     assert citations[0]["document_id"] == "law-1"
+    assert citations[0]["chunk_id"] == "chunk-1"
     assert events[-1]["data"] == draft["answer"]
     assert context.metrics.tool_call_count == 1
 
@@ -297,6 +301,73 @@ def test_no_match_boundary_detects_unverified_law_references():
 
     assert _no_match_violations(safe) == []
     assert _no_match_violations(unsafe) == ["无法条模式包含未经检索核验的法律名称或条号"]
+
+
+def test_authoritative_evidence_uses_exact_chunk_and_rejects_ambiguous_document_id():
+    candidates = [
+        {"document_id": "law-1", "chunk_id": "chunk-1", "content": "前半段"},
+        {"document_id": "law-1", "chunk_id": "chunk-2", "content": "后半段"},
+    ]
+    selected = EvidencePacket(evidence_items=[EvidenceItem(
+        document_id="law-1", chunk_id="chunk-2", supports_issue_ids=["issue-1"]
+    )])
+    legacy_ambiguous = EvidencePacket(evidence_items=[EvidenceItem(document_id="law-1")])
+
+    accepted = _authoritative_evidence(selected, candidates)
+
+    assert len(accepted) == 1
+    assert accepted[0].chunk_id == "chunk-2"
+    assert accepted[0].content == "后半段"
+    assert _authoritative_evidence(legacy_ambiguous, candidates) == []
+
+
+@pytest.mark.asyncio
+async def test_low_risk_no_match_uses_deterministic_review_fast_path(monkeypatch):
+    monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
+    analysis = {
+        "request_type": "legal_consultation",
+        "case_summary": "一般咨询",
+        "legal_issues": ["一般处理建议"],
+        "research_tasks": [{"issue_id": "issue-1", "query": "一般咨询", "purpose": "查找依据"}],
+        "risk_level": "low",
+        "next_action": "research",
+    }
+    research = {
+        "retrieval_status": "no_match",
+        "research_tasks": analysis["research_tasks"],
+        "evidence_items": [],
+        "unresolved_issues": [{"issue_id": "issue-1", "description": "没有可引用结果"}],
+        "research_summary": "检索完成但没有匹配。",
+    }
+    answer = (
+        "可以先保存资料并补充事实。\n\n本轮法规检索正常完成，但当前法规库中"
+        "未检索到可引用法条。以上属于一般性分析，不构成已经过法规核验的确定性法律结论。"
+    )
+    draft = {"answer": answer, "claims": [], "confidence": "low"}
+    model = ToolCallingFakeModel(responses=[
+        AIMessage(content=json.dumps(analysis, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_laws", "args": {"query": "一般咨询"},
+            "id": "call-empty-fast", "type": "tool_call",
+        }]),
+        AIMessage(content=json.dumps(research, ensure_ascii=False)),
+        AIMessage(content=json.dumps(draft, ensure_ascii=False)),
+    ])
+    registry = SimpleNamespace(
+        get_tools=AsyncMock(return_value=[empty_tool()]),
+        status=lambda: SimpleNamespace(version=1),
+        close=AsyncMock(),
+        invalidate=lambda *args: None,
+    )
+    runtime = AgentRuntime(registry, SimpleNamespace(get_chat_model=lambda: model), settings())
+    context = invocation()
+
+    events = [event async for event in runtime.stream(context, [HumanMessage(content="问题")], "")]
+
+    stages = [event["data"]["status"] for event in events if event["event"] == "agent_status"]
+    assert stages == ["analyzing", "researching", "drafting", "completed"]
+    assert context.metrics.model_call_count == 4
+    assert events[-1] == {"event": "agent_final", "data": answer}
 
 
 def test_tool_audit_parses_documents_nested_in_mcp_text_blocks():

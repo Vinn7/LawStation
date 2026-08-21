@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：2.3
+> 版本：2.4
 > 基线日期：2026-08-21
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -173,6 +173,7 @@ SSE 事件契约：
 - 后台 token 只更新所属 runtime。返回原会话时恢复累计内容；主动停止只取消当前会话 controller。
 - 浏览器刷新、关闭或网络断开不保证任务恢复；首版不引入服务端持久任务队列。
 - SQLite 启用 WAL、5 秒 busy timeout 和外键；SSE 路由只使用短生命周期 Session。
+- SSE 在 Agent 长时间无业务事件时每 15 秒发送 comment heartbeat；反向代理不得缓冲 SSE。审计分别记录排队、首状态、首文本和总耗时。
 
 ### 6.4 法规检索链路
 
@@ -182,7 +183,8 @@ SSE 事件契约：
 4. `_validate_and_load` 只有在 manifest、chunks、embeddings 和 FAISS 全部有效时才复用索引。
 5. 索引无效时以 staging、文件锁、批次 checkpoint 和原子替换构建；旧有效索引不因失败而被覆盖。
 6. Dense 未就绪时降级到 BM25；Dense 查询要求 Ollama Provider ready，且当前模型 digest 与 manifest 一致，不依赖 DashScope 密钥。
-7. Dense 就绪时，BM25 与 FAISS 候选使用 RRF 合并并去重。
+7. Dense 就绪时，BM25 与 FAISS 候选使用 RRF 合并并去重；BM25、Dense 和 RRF 均执行可配置最低分过滤。
+8. `law_name` 必须在排序前限定候选范围；未知过滤字段必须拒绝，不得静默忽略。精确法条查询使用启动时建立的内存映射。
 
 Agent 对检索结果的业务语义：
 
@@ -190,7 +192,9 @@ Agent 对检索结果的业务语义：
 - `no_match`：工具正常完成但没有候选被确认为可引用证据；这是成功结果，继续生成一般性分析，不重复检索，不引用具体法律名称或条号。
 - `tool_unavailable`：MCP 工具未加载，回答必须披露检索能力不可用。
 - `tool_error`：工具超时、连接、协议或执行异常，不得冒充“没有相关法律”。
-- MCP 返回的法条字段必须由代码从 ToolMessage 组装；模型只能选择真实 `document_id`，不得自由生成证据。
+- MCP 返回的法条字段必须由代码从 ToolMessage 组装；`document_id` 表示原始法条，`chunk_id` 是引用证据的唯一标识。模型只能选择真实 `chunk_id`，不得自由生成证据。旧模型只返回 `document_id` 时，仅在该法条只有一个候选 chunk 的情况下兼容。
+- 最终 citations 只能来自 `CounselDraft.claims` 实际引用且存在于 EvidencePacket 的 chunk，不得把所有检索候选自动作为引用输出。
+- 低风险 `no_match` 回答通过确定性边界校验后可以跳过 LLM Reviewer；中高风险、matched、工具异常、修订草稿或校验失败时必须执行 LLM Reviewer。
 
 MCP 工具契约：
 
@@ -215,6 +219,8 @@ get_law_article(law_name: string, article_number: string)
 `MemoryService.context` 使用中英文保守 token 估算，将 `MEMORY_CONTEXT_TOKEN_LIMIT` 分配给当前问题、近期消息、当前案件 active 记忆、用户级 active 偏好和结构化摘要。案件事实只允许在来源会话使用；跨会话只加载 `profile_preference` 和 `identity_background`。
 
 `MemoryTaskManager` 在主回答保存后创建 SQLite 持久任务。后台 worker 只从本轮用户消息抽取结构化候选；通过 Schema 和作用域校验的用户偏好、身份背景及案件事实均直接写为 `active`，无需用户再次确认。提取模型同时读取当前用户级 active 记忆和当前会话 active 记忆，可通过 `replaces_memory_id` 建议冲突目标；服务端必须使用所有者、作用域、会话、状态和版本号复核。合法冲突在原记忆行上更新，新事实沿用原 `memory_id/canonical_key`，旧正文仅写入 `memory_revisions(action=auto_replace)`。达到压缩阈值时，worker 使用旧摘要和新增覆盖区间生成结构化增量摘要。
+
+`MemoryTaskManager.enqueue()` 是唯一允许的记忆整理入口。旧 `MemoryService.consolidate()` 已封存并必须抛出弃用错误，不得重新启用截断拼接或把用户长消息原文直接写成 active 记忆。
 
 记忆抽取和摘要使用 `LLMProvider.get_memory_model` 提供的独立非流式、非 Thinking 模型配置，通过 DeepSeek JSON Output 返回 JSON 并由 Pydantic 校验。该链路不得绑定、发现或调用 MCP/业务工具，也不得发送 `tools` 或 `tool_choice`。没有可沉淀内容时 `memories=[]` 是成功结果；确定性配置或兼容错误不得反复重试，主回答保存不受后台记忆失败影响。
 
@@ -370,6 +376,10 @@ INDEX_EMBEDDING_TIMEOUT_SECONDS
 INDEX_EMBEDDING_MAX_RETRIES
 INDEX_EMBEDDING_RETRY_BASE_SECONDS
 INDEX_EMBEDDING_RETRY_MAX_SECONDS
+RAG_BM25_MIN_SCORE
+RAG_DENSE_MIN_SCORE
+RAG_RRF_MIN_SCORE
+SSE_HEARTBEAT_SECONDS
 ```
 
 强制规则：
@@ -426,7 +436,7 @@ INDEX_EMBEDDING_RETRY_MAX_SECONDS
 - 手机号、身份证号、银行卡号、邮箱必须脱敏。
 - 不得记录 API Key、Authorization header、`.env` 内容或模型内部推理过程。
 - 文件审计日志不得记录完整法条正文。
-- 工具结果日志只保留数量、document ID、法律名称、条号及耗时等元数据。
+- 工具结果日志只保留数量、document ID、chunk ID、法律名称、条号及耗时等元数据。
 
 **[已实现]** 文件日志和数据库工具审计均执行正文最小化：参数只保存脱敏摘要，结果只保存数量、document ID、法律名称、条号和字符数。正式上线前仍须确定审计留存周期和清理策略。
 
@@ -485,13 +495,13 @@ INDEX_EMBEDDING_RETRY_MAX_SECONDS
 - `tests/test_memory.py`：案件/用户作用域、上下文预算、模型建议与 canonical key 原位替换、越权拒绝、结构化抽取和后台任务。
 - `tests/test_migrations.py`：旧 SQLite 自动备份、字段升级和 Alembic 版本。
 - `tests/test_law_sample.py`：样本数量、来源一致性、可复现性和默认路径。
-- `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建和稳定 chunk ID。
+- `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建、稳定 chunk ID、检索阈值、前置法律过滤和精确法条映射。
 - `tests/test_audit_logging.py`：敏感信息脱敏和摘要长度。
 - `tests/test_langsmith_observability.py`：trace 内容过滤、稳定采样/哈希和关键 evaluator。
 - `tests/test_feedback.py`：消息反馈所有权和本地优先持久化。
 - `tests/test_run.py`：前端过期检测与 `--no-build` 失败语义。
 - `frontend/src/test/sse.test.ts`：分块 SSE、全部事件解析和 HTTP 错误语义。
-- `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、引用边界、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
+- `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、chunk 级引用边界、确定性复核快速路径、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
 - `frontend/src/test/App.test.tsx`：切换用户隔离显示、后台流继续、返回会话恢复进度和 no_match 工具状态清理。
 - `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
 - `frontend/src/test/MemoryPanel.test.tsx`：记忆面板用户限定加载、仅展示 active 最新事实和记忆治理。

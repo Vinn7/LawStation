@@ -53,12 +53,13 @@ def result_metadata(result: str) -> dict[str, Any]:
             return
         if isinstance(item, dict):
             if "document_id" in item:
-                documents.append(
-                    {
-                        key: item.get(key)
-                        for key in ("document_id", "law_name", "article_number")
-                    }
-                )
+                document = {
+                    key: item.get(key)
+                    for key in ("document_id", "law_name", "article_number")
+                }
+                if item.get("chunk_id"):
+                    document["chunk_id"] = item["chunk_id"]
+                documents.append(document)
             for nested in item.values():
                 visit(nested)
         elif isinstance(item, list):

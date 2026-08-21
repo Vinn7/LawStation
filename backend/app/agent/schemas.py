@@ -31,6 +31,7 @@ class CaseAnalysis(BaseModel):
 
 class EvidenceItem(BaseModel):
     document_id: str
+    chunk_id: str = ""
     law_name: str = ""
     article_number: str = ""
     content: str = ""
@@ -86,6 +87,9 @@ class EvidencePacket(BaseModel):
 
 class CounselClaim(BaseModel):
     claim: str
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+    # Backward-compatible input for older prompts/evaluation fixtures. New
+    # generations must use evidence_chunk_ids.
     evidence_document_ids: list[str] = Field(default_factory=list)
 
 
@@ -109,6 +113,7 @@ class ReviewResult(BaseModel):
 
 class Citation(BaseModel):
     document_id: str
+    chunk_id: str = ""
     law_name: str = ""
     article_number: str = ""
     quoted_excerpt: str = ""

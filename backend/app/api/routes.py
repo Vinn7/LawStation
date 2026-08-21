@@ -15,6 +15,7 @@ from backend.app.agent.concurrency import (
     ConversationBusyError,
 )
 from backend.app.agent.service import AgentService
+from backend.app.core.config import get_settings
 from backend.app.core.context import RequestUserContext, get_user_context
 from backend.app.core.logging import audit, summary
 from backend.app.db.models import Conversation, MemoryJob, Message, MessageFeedback, User
@@ -168,6 +169,35 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def with_sse_heartbeat(source, interval_seconds: float):
+    """Keep an SSE connection alive without turning heartbeats into app events."""
+    iterator = source.__aiter__()
+    pending: asyncio.Task | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(anext(iterator))
+            done, _ = await asyncio.wait(
+                {pending}, timeout=max(0.01, interval_seconds)
+            )
+            if not done:
+                yield ": heartbeat\n\n"
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                break
+            pending = None
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
+
+
 def _validate_conversation(ctx: RequestUserContext, conversation_id: str) -> None:
     with SessionLocal() as db:
         if not OwnedRepository(db, ctx).conversation(conversation_id):
@@ -314,9 +344,14 @@ async def stream_message(
     async def events():
         answer = []
         agent = AgentService(request.app.state.agent_runtime, ctx, conversation_id)
+        queue_started = time.perf_counter()
+        queue_duration_ms = 0
+        first_status_duration_ms: int | None = None
+        first_text_token_duration_ms: int | None = None
         try:
             yield sse("message_start", {"request_id": ctx.request_id})
             if await concurrency.would_queue(identity):
+                first_status_duration_ms = int((time.perf_counter() - started) * 1000)
                 yield sse("agent_status", {
                     "request_id": ctx.request_id,
                     "user_id": ctx.user_id,
@@ -326,12 +361,18 @@ async def stream_message(
                     "message": "咨询任务正在排队",
                 })
             async with concurrency.slot(identity):
+                queue_duration_ms = int((time.perf_counter() - queue_started) * 1000)
                 user_message_id, memory_context, history = await asyncio.to_thread(
                     _prepare_chat, ctx, conversation_id, payload.content
                 )
                 audit("conversation.started", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="started", history_count=len(history), memory_context_chars=len(memory_context))
                 async for item in agent.run(memory_context, history, payload.content):
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    if item["event"] == "agent_status" and first_status_duration_ms is None:
+                        first_status_duration_ms = elapsed_ms
                     if item["event"] == "token":
+                        if first_text_token_duration_ms is None:
+                            first_text_token_duration_ms = elapsed_ms
                         answer.append(item["data"])
                     yield sse(item["event"], item["data"])
             persisted_answer = agent.final_answer or "".join(answer)
@@ -345,11 +386,13 @@ async def stream_message(
                 conversation_id,
                 user_message_id,
             )
-            audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_job_id=job.id, tool_call_count=agent.tool_call_count, model_call_count=agent.model_call_count)
+            total_duration_ms = int((time.perf_counter() - started) * 1000)
+            audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=total_duration_ms, total_duration_ms=total_duration_ms, queue_duration_ms=queue_duration_ms, first_status_duration_ms=first_status_duration_ms, first_text_token_duration_ms=first_text_token_duration_ms, answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_job_id=job.id, tool_call_count=agent.tool_call_count, model_call_count=agent.model_call_count)
             yield sse("memory_status", {"status": "pending", "job_id": job.id})
             yield sse("message_end", {"message_id": assistant.id, "trace_available": bool(agent.langsmith_trace_id)})
         except AgentQueueTimeoutError as exc:
-            audit("conversation.failed", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="queue_timeout", duration_ms=int((time.perf_counter()-started)*1000))
+            total_duration_ms = int((time.perf_counter() - started) * 1000)
+            audit("conversation.failed", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="queue_timeout", duration_ms=total_duration_ms, total_duration_ms=total_duration_ms, queue_duration_ms=total_duration_ms, first_status_duration_ms=first_status_duration_ms, first_text_token_duration_ms=None)
             yield sse("error", {"message": str(exc)})
         except asyncio.CancelledError:
             if answer:
@@ -357,7 +400,8 @@ async def stream_message(
                     _save_assistant, ctx, conversation_id, "".join(answer), "interrupted",
                     agent.langsmith_trace_id,
                 )
-            audit("conversation.interrupted", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="interrupted", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len("".join(answer)))
+            total_duration_ms = int((time.perf_counter() - started) * 1000)
+            audit("conversation.interrupted", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="interrupted", duration_ms=total_duration_ms, total_duration_ms=total_duration_ms, queue_duration_ms=queue_duration_ms, first_status_duration_ms=first_status_duration_ms, first_text_token_duration_ms=first_text_token_duration_ms, answer_chars=len("".join(answer)))
             raise
         except Exception as exc:
             if answer:
@@ -365,9 +409,19 @@ async def stream_message(
                     _save_assistant, ctx, conversation_id, "".join(answer), "interrupted",
                     agent.langsmith_trace_id,
                 )
-            audit("conversation.failed", level=logging.ERROR, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="failed", duration_ms=int((time.perf_counter()-started)*1000), error_type=type(exc).__name__, error=summary(str(exc)))
+            total_duration_ms = int((time.perf_counter() - started) * 1000)
+            audit("conversation.failed", level=logging.ERROR, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="failed", duration_ms=total_duration_ms, total_duration_ms=total_duration_ms, queue_duration_ms=queue_duration_ms, first_status_duration_ms=first_status_duration_ms, first_text_token_duration_ms=first_text_token_duration_ms, error_type=type(exc).__name__, error=summary(str(exc)))
             yield sse("error", {"message": str(exc)})
         finally:
             await concurrency.release_reservation(identity)
 
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    settings = get_settings()
+    return StreamingResponse(
+        with_sse_heartbeat(events(), settings.sse_heartbeat_seconds),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

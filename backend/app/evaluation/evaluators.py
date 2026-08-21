@@ -55,6 +55,15 @@ def _ranked_documents(run: Any) -> list[str]:
     return [str(item.get("document_id")) for item in evidence if isinstance(item, dict) and item.get("document_id")]
 
 
+def _evidence_keys(run: Any) -> set[str]:
+    evidence = _mapping(_outputs(run).get("evidence_packet")).get("evidence_items", [])
+    return {
+        str(item.get("chunk_id") or item.get("document_id"))
+        for item in evidence
+        if isinstance(item, dict) and (item.get("chunk_id") or item.get("document_id"))
+    }
+
+
 def retrieval_recall_at_k(run: Any, example: Any) -> dict[str, Any]:
     expected = {str(item) for item in _reference(example).get("expected_document_ids", [])}
     if not expected:
@@ -75,11 +84,11 @@ def retrieval_mrr(run: Any, example: Any) -> dict[str, Any]:
 
 def citation_grounding(run: Any, example: Any) -> dict[str, Any]:
     output = _outputs(run)
-    evidence_ids = set(_ranked_documents(run))
+    evidence_ids = _evidence_keys(run)
     citations = output.get("citations", [])
     citation_ids = {
-        str(item.get("document_id")) for item in citations
-        if isinstance(item, dict) and item.get("document_id")
+        str(item.get("chunk_id") or item.get("document_id")) for item in citations
+        if isinstance(item, dict) and (item.get("chunk_id") or item.get("document_id"))
     }
     valid = citation_ids <= evidence_ids
     return _feedback("citation_grounding", valid, f"unknown={sorted(citation_ids - evidence_ids)}")
@@ -87,11 +96,14 @@ def citation_grounding(run: Any, example: Any) -> dict[str, Any]:
 
 def citation_precision(run: Any, example: Any) -> dict[str, Any]:
     output = _outputs(run)
-    evidence_ids = set(_ranked_documents(run))
+    evidence_ids = _evidence_keys(run)
     citations = [item for item in output.get("citations", []) if isinstance(item, dict)]
     if not citations:
         return _feedback("citation_precision", 1.0 if not evidence_ids else 0.0)
-    valid = sum(1 for item in citations if str(item.get("document_id")) in evidence_ids)
+    valid = sum(
+        1 for item in citations
+        if str(item.get("chunk_id") or item.get("document_id")) in evidence_ids
+    )
     return _feedback("citation_precision", valid / len(citations))
 
 

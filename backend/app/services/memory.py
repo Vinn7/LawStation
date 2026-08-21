@@ -147,56 +147,7 @@ class MemoryService:
         return context, history
 
     def consolidate(self, conversation_id: str) -> bool:
-        messages = self.repo.messages(conversation_id)
-        approx_tokens = sum(estimate_tokens(m.content) for m in messages)
-        if approx_tokens < self.settings.memory_compression_threshold:
-            return False
-        keep = self.settings.memory_recent_message_count
-        old = messages[:-keep] if len(messages) > keep else []
-        if not old:
-            return False
-        digest = "\n".join(f"{m.role}: {m.content[:600]}" for m in old)[-12000:]
-        summary = self.db.scalar(
-            select(ConversationSummary).where(
-                ConversationSummary.tenant_id == self.ctx.tenant_id,
-                ConversationSummary.user_id == self.ctx.user_id,
-                ConversationSummary.conversation_id == conversation_id,
-            )
+        raise RuntimeError(
+            "MemoryService.consolidate() 已弃用；记忆整理必须通过 "
+            "MemoryTaskManager.enqueue() 执行。"
         )
-        if summary:
-            summary.content = digest
-            summary.covered_until_message_id = old[-1].id
-            summary.version += 1
-        else:
-            self.db.add(
-                ConversationSummary(
-                    tenant_id=self.ctx.tenant_id,
-                    user_id=self.ctx.user_id,
-                    conversation_id=conversation_id,
-                    content=digest,
-                    covered_until_message_id=old[-1].id,
-                )
-            )
-        # MVP: persist substantive user statements as durable, owner-scoped facts.
-        for message in old:
-            if message.role != "user" or len(message.content.strip()) < 20:
-                continue
-            exists = self.db.scalar(
-                select(UserMemory.id).where(
-                    UserMemory.tenant_id == self.ctx.tenant_id,
-                    UserMemory.user_id == self.ctx.user_id,
-                    UserMemory.source_message_id == message.id,
-                )
-            )
-            if not exists:
-                self.db.add(
-                    UserMemory(
-                        tenant_id=self.ctx.tenant_id,
-                        user_id=self.ctx.user_id,
-                        conversation_id=conversation_id,
-                        content=message.content[:2000],
-                        source_message_id=message.id,
-                    )
-                )
-        self.db.commit()
-        return True

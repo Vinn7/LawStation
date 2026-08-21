@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     index_embedding_max_retries: int = 5
     index_embedding_retry_base_seconds: float = 2.0
     index_embedding_retry_max_seconds: float = 30.0
+    rag_bm25_min_score: float = 0.01
+    rag_dense_min_score: float = 0.20
+    rag_rrf_min_score: float = 0.01
+    sse_heartbeat_seconds: float = 15.0
     langsmith_enabled: bool = False
     langsmith_api_key: str = ""
     langsmith_endpoint: str = "https://api.smith.langchain.com"

@@ -41,10 +41,11 @@ risk_level(low|medium|high), next_action(direct_answer|ask_clarification|researc
 clarification_questions[]。普通闲聊填写 direct_answer；关键事实不足时给出简洁澄清问题。"""
 
 RESEARCH_PROMPT = """你是法律研究 Agent，也是唯一可以调用法律检索工具的角色。针对每个 research task，
-先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实返回结果。
-最终只返回严格 JSON：research_tasks[], evidence_items[{document_id,supports_issue_ids,
-verification_status}], unresolved_issues[{issue_id,description}], conflicts[], research_summary。
-evidence_items 只能选择工具结果中真实存在的 document_id；找不到依据时返回空 evidence_items，
+    先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实返回结果。
+    最终只返回严格 JSON：research_tasks[], evidence_items[{document_id,chunk_id,supports_issue_ids,
+    verification_status}], unresolved_issues[{issue_id,description}], conflicts[], research_summary。
+    evidence_items 必须使用工具结果中真实存在的 chunk_id；document_id 仅表示原始法条，不能代替 chunk_id。
+    找不到依据时返回空 evidence_items，
 并在 unresolved_issues 说明，这属于正常检索结果，不得凭常识补造法条。"""
 
 COUNSEL_PROMPT = """你是面向用户的法律顾问 Agent。依据案情分析和 EvidencePacket 形成法律意见。
@@ -54,7 +55,7 @@ retrieval_status=no_match 时仍要提供有帮助的一般性、条件化分析
 不得输出具体法律名称、司法解释名称或条号，不得声称已经完成法规核验，并必须明确说明当前法规库
 未检索到可引用法条。tool_unavailable/tool_error 时应明确说明检索服务状态，不得冒充 no_match。
 区分已知事实、条件性推论、法律依据和行动建议。
-返回严格 JSON：answer, claims[{claim,evidence_document_ids}], confidence(low|medium|high),
+    返回严格 JSON：answer, claims[{claim,evidence_chunk_ids}], confidence(low|medium|high),
 limitations[], follow_up_questions[]。answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
 
 REVIEW_PROMPT = """你是 Case Analyst 的复核阶段。检查草稿是否覆盖争议点、是否存在无证据法条、
@@ -118,18 +119,32 @@ def _tool_documents(message: ToolMessage) -> list[dict[str, Any]]:
 
 
 def _authoritative_evidence(packet: EvidencePacket, candidates: list[dict[str, Any]]) -> list[EvidenceItem]:
-    by_document: dict[str, dict[str, Any]] = {}
+    by_chunk: dict[str, dict[str, Any]] = {}
+    by_document: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
-        by_document.setdefault(str(candidate.get("document_id", "")), candidate)
+        document_id = str(candidate.get("document_id", ""))
+        chunk_id = str(candidate.get("chunk_id", ""))
+        if chunk_id:
+            by_chunk.setdefault(chunk_id, candidate)
+        if document_id:
+            by_document.setdefault(document_id, []).append(candidate)
     accepted: list[EvidenceItem] = []
     seen: set[str] = set()
     for selected in packet.evidence_items:
-        source = by_document.get(selected.document_id)
-        if source is None or selected.document_id in seen:
+        source = by_chunk.get(selected.chunk_id) if selected.chunk_id else None
+        if source is None and not selected.chunk_id:
+            legacy_matches = by_document.get(selected.document_id, [])
+            if len(legacy_matches) == 1:
+                source = legacy_matches[0]
+        if source is None:
             continue
-        seen.add(selected.document_id)
+        source_chunk_id = str(source.get("chunk_id") or source.get("document_id") or "")
+        if not source_chunk_id or source_chunk_id in seen:
+            continue
+        seen.add(source_chunk_id)
         accepted.append(EvidenceItem(
-            document_id=selected.document_id,
+            document_id=str(source.get("document_id", "")),
+            chunk_id=source_chunk_id,
             law_name=str(source.get("law_name", "")),
             article_number=str(source.get("article_number", "")),
             content=str(source.get("content", "")),
@@ -175,12 +190,18 @@ def _citation_errors(draft: CounselDraft | None, packet: EvidencePacket | None) 
     if draft is None:
         return ["缺少法律意见草稿"]
     evidence = packet.evidence_items if packet else []
-    known_ids = {item.document_id for item in evidence}
+    known_chunk_ids = {item.chunk_id for item in evidence if item.chunk_id}
+    document_counts: dict[str, int] = {}
+    for item in evidence:
+        document_counts[item.document_id] = document_counts.get(item.document_id, 0) + 1
+    legacy_document_ids = {
+        document_id for document_id, count in document_counts.items() if count == 1
+    }
     errors = [
-        f"论证引用了未知证据 {document_id}"
+        f"论证引用了未知证据 {evidence_id}"
         for claim in draft.claims
-        for document_id in claim.evidence_document_ids
-        if document_id not in known_ids
+        for evidence_id in [*claim.evidence_chunk_ids, *claim.evidence_document_ids]
+        if evidence_id not in known_chunk_ids and evidence_id not in legacy_document_ids
     ]
     for law_name, article_number in re.findall(
         r"《([^》]+)》\s*(第[零一二三四五六七八九十百千万0-9]+条)", draft.answer
@@ -234,12 +255,16 @@ class LegalConsultationGraph:
         graph.add_node("case_analyst", self.case_analyst)
         graph.add_node("legal_researcher", self.legal_researcher)
         graph.add_node("legal_counsel", self.legal_counsel)
+        graph.add_node("review_gate", self.review_gate)
         graph.add_node("reviewer", self.reviewer)
         graph.add_node("finalize", self.finalize)
         graph.add_edge(START, "case_analyst")
         graph.add_conditional_edges("case_analyst", self.after_analysis, {"finish": "finalize", "research": "legal_researcher"})
         graph.add_edge("legal_researcher", "legal_counsel")
-        graph.add_edge("legal_counsel", "reviewer")
+        graph.add_edge("legal_counsel", "review_gate")
+        graph.add_conditional_edges(
+            "review_gate", self.after_review_gate, {"review": "reviewer", "finish": "finalize"}
+        )
         graph.add_conditional_edges(
             "reviewer",
             self.after_review,
@@ -423,6 +448,51 @@ class LegalConsultationGraph:
                 review.next_action = "finalize"
         return {"review_result": review}
 
+    async def review_gate(
+        self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]
+    ) -> dict[str, Any]:
+        analysis = state["case_analysis"]
+        packet = state["evidence_packet"]
+        draft = state["counsel_draft"]
+        skip_reason = ""
+        if state["review_result"] is not None:
+            skip_reason = "修订后的草稿必须再次复核"
+        elif not analysis or analysis.risk_level != "low":
+            skip_reason = "中高风险问题必须进行模型复核"
+        elif not packet or packet.retrieval_status != "no_match":
+            skip_reason = "存在法规依据或检索异常，必须进行模型复核"
+        elif not draft or draft.confidence != "low":
+            skip_reason = "无法条回答的置信度边界未满足"
+        elif _no_match_violations(draft.answer):
+            skip_reason = "无法条回答未通过确定性边界校验"
+        elif any(claim.evidence_chunk_ids or claim.evidence_document_ids for claim in draft.claims):
+            skip_reason = "无法条回答包含证据引用"
+
+        if skip_reason:
+            audit(
+                "agent.review.selected",
+                status="selected",
+                review_mode="llm",
+                review_skip_reason=skip_reason,
+                **runtime.context.audit_fields,
+            )
+            return {}
+        audit(
+            "agent.review.skipped",
+            status="success",
+            review_mode="deterministic",
+            review_skip_reason="低风险无法条回答已通过确定性边界校验",
+            **runtime.context.audit_fields,
+        )
+        return {
+            "review_result": ReviewResult(approved=True, next_action="finalize")
+        }
+
+    @staticmethod
+    def after_review_gate(state: LegalConsultationState) -> str:
+        review = state["review_result"]
+        return "finish" if review and review.approved else "review"
+
     def after_review(self, state: LegalConsultationState) -> str:
         review = state["review_result"]
         packet = state["evidence_packet"]
@@ -462,10 +532,22 @@ class LegalConsultationGraph:
             )
         citations: list[Citation] = []
         seen_documents: set[str] = set()
+        referenced_ids = {
+            evidence_id
+            for claim in (state["counsel_draft"].claims if state["counsel_draft"] else [])
+            for evidence_id in [*claim.evidence_chunk_ids, *claim.evidence_document_ids]
+        }
+        document_counts: dict[str, int] = {}
+        for item in packet.evidence_items if packet else []:
+            document_counts[item.document_id] = document_counts.get(item.document_id, 0) + 1
         for item in packet.evidence_items if packet and packet.retrieval_status == "matched" else []:
-            if item.document_id in seen_documents:
+            legacy_match = item.document_id in referenced_ids and document_counts[item.document_id] == 1
+            if item.chunk_id not in referenced_ids and not legacy_match:
                 continue
-            seen_documents.add(item.document_id)
-            citations.append(Citation(document_id=item.document_id, law_name=item.law_name, article_number=item.article_number, quoted_excerpt=item.content[:240], data_version=item.data_version))
+            evidence_key = item.chunk_id or item.document_id
+            if evidence_key in seen_documents:
+                continue
+            seen_documents.add(evidence_key)
+            citations.append(Citation(document_id=item.document_id, chunk_id=item.chunk_id, law_name=item.law_name, article_number=item.article_number, quoted_excerpt=item.content[:240], data_version=item.data_version))
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "completed", "message": "分析已完成"}})
         return {"final_answer": answer, "citations": citations}

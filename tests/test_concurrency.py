@@ -1,6 +1,9 @@
+import asyncio
+
 import pytest
 
 from backend.app.agent.concurrency import AgentConcurrencyManager, ConcurrencyIdentity
+from backend.app.api.routes import with_sse_heartbeat
 from backend.app.core.config import Settings
 from backend.app.db.session import engine
 
@@ -53,3 +56,15 @@ def test_sqlite_uses_wal_foreign_keys_and_busy_timeout():
     assert journal_mode.lower() == "wal"
     assert foreign_keys == 1
     assert busy_timeout == 5000
+
+
+@pytest.mark.asyncio
+async def test_sse_heartbeat_is_emitted_while_agent_is_silent():
+    async def slow_source():
+        await asyncio.sleep(0.03)
+        yield 'event: token\ndata: "完成"\n\n'
+
+    chunks = [chunk async for chunk in with_sse_heartbeat(slow_source(), 0.005)]
+
+    assert ": heartbeat\n\n" in chunks
+    assert chunks[-1] == 'event: token\ndata: "完成"\n\n'
