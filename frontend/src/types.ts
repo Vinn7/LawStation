@@ -47,6 +47,33 @@ export interface ToolActivity {
   status: 'running' | 'success' | 'failed' | 'timeout';
 }
 
+export type MemoryScope = 'user' | 'conversation';
+export type MemoryStatus = 'pending' | 'active' | 'superseded' | 'rejected' | 'expired';
+
+export interface UserMemory {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  conversation_id: string;
+  memory_type: string;
+  scope: MemoryScope;
+  status: MemoryStatus;
+  content: string;
+  source_excerpt: string;
+  confidence: number;
+  importance: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryJob {
+  id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  candidate_count: number;
+  summary_updated: boolean;
+}
+
 export type AgentName = 'coordinator' | 'case_analyst' | 'legal_researcher' | 'legal_counsel';
 export type AgentStage =
   | 'idle'

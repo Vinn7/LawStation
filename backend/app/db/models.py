@@ -1,7 +1,18 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.session import Base
@@ -12,7 +23,7 @@ def uid() -> str:
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Tenant(Base):
@@ -80,8 +91,11 @@ class ConversationSummary(Base):
     user_id: Mapped[str] = mapped_column(String(36))
     conversation_id: Mapped[str] = mapped_column(String(36))
     content: Mapped[str] = mapped_column(Text)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
     covered_until_message_id: Mapped[str] = mapped_column(String(36))
     version: Mapped[int] = mapped_column(Integer, default=1)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    generated_at: Mapped[datetime] = mapped_column(default=now)
     updated_at: Mapped[datetime] = mapped_column(default=now, onupdate=now)
 
 
@@ -94,15 +108,72 @@ class UserMemory(Base):
             ondelete="CASCADE",
         ),
         Index("ix_memory_owner", "tenant_id", "user_id", "created_at"),
+        Index("ix_memory_context", "tenant_id", "user_id", "scope", "status", "conversation_id"),
+        UniqueConstraint(
+            "tenant_id", "user_id", "source_message_id", "canonical_key",
+            name="uq_memory_source_canonical",
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id: Mapped[str] = mapped_column(String(36))
     user_id: Mapped[str] = mapped_column(String(36))
     conversation_id: Mapped[str] = mapped_column(String(36))
     memory_type: Mapped[str] = mapped_column(String(30), default="case_fact")
+    scope: Mapped[str] = mapped_column(String(20), default="conversation")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    canonical_key: Mapped[str] = mapped_column(String(160), default="")
     content: Mapped[str] = mapped_column(Text)
     source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_excerpt: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    importance: Mapped[int] = mapped_column(Integer, default=50)
+    superseded_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("user_memories.id", ondelete="SET NULL"), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    updated_at: Mapped[datetime] = mapped_column(default=now, onupdate=now)
+
+
+class MemoryRevision(Base):
+    __tablename__ = "memory_revisions"
+    __table_args__ = (Index("ix_memory_revision_owner", "tenant_id", "user_id", "memory_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    memory_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_memories.id", ondelete="CASCADE")
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36))
+    user_id: Mapped[str] = mapped_column(String(36))
+    conversation_id: Mapped[str] = mapped_column(String(36))
+    action: Mapped[str] = mapped_column(String(30))
+    previous_content: Mapped[str] = mapped_column(Text, default="")
+    new_content: Mapped[str] = mapped_column(Text, default="")
+    previous_status: Mapped[str] = mapped_column(String(20), default="")
+    new_status: Mapped[str] = mapped_column(String(20), default="")
+    created_at: Mapped[datetime] = mapped_column(default=now)
+
+
+class MemoryJob(Base):
+    __tablename__ = "memory_jobs"
+    __table_args__ = (
+        Index("ix_memory_job_status", "status", "created_at"),
+        UniqueConstraint(
+            "tenant_id", "user_id", "source_message_id", name="uq_memory_job_source"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    tenant_id: Mapped[str] = mapped_column(String(36))
+    user_id: Mapped[str] = mapped_column(String(36))
+    conversation_id: Mapped[str] = mapped_column(String(36))
+    source_message_id: Mapped[str] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    summary_updated: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=now)
     updated_at: Mapped[datetime] = mapped_column(default=now, onupdate=now)
 

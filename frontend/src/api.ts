@@ -1,4 +1,4 @@
-import type { ChatMessage, Conversation, IndexStatus, User } from './types';
+import type { ChatMessage, Conversation, IndexStatus, MemoryJob, User, UserMemory } from './types';
 
 const API = '/api';
 
@@ -23,6 +23,7 @@ async function request<T>(path: string, userId?: string, init: RequestInit = {})
     }
     throw new ApiError(message, response.status);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -40,6 +41,24 @@ export const api = {
     }),
   messages: (userId: string, conversationId: string, signal?: AbortSignal) =>
     request<ChatMessage[]>(`/conversations/${conversationId}/messages`, userId, { signal }),
+  memories: (userId: string, query = '', signal?: AbortSignal) =>
+    request<UserMemory[]>(`/memories${query ? `?${query}` : ''}`, userId, { signal }),
+  confirmMemory: (userId: string, memoryId: string, version: number) =>
+    request<{ ok: boolean }>(`/memories/${memoryId}/confirm`, userId, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version }),
+    }),
+  rejectMemory: (userId: string, memoryId: string, version: number) =>
+    request<{ ok: boolean }>(`/memories/${memoryId}/reject`, userId, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version }),
+    }),
+  updateMemory: (userId: string, memoryId: string, content: string, version: number) =>
+    request<{ ok: boolean }>(`/memories/${memoryId}`, userId, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, version }),
+    }),
+  deleteMemory: (userId: string, memoryId: string) =>
+    request<void>(`/memories/${memoryId}`, userId, { method: 'DELETE' }),
+  memoryJob: (userId: string, jobId: string, signal?: AbortSignal) =>
+    request<MemoryJob>(`/memory-jobs/${jobId}`, userId, { signal }),
   streamMessage: (userId: string, conversationId: string, content: string, signal: AbortSignal) =>
     fetch(`${API}/conversations/${conversationId}/messages/stream`, {
       method: 'POST',

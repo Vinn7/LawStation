@@ -11,4 +11,8 @@ class ChatRequest(BaseModel):
 
 class MemoryUpdate(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
+    version: int = Field(ge=1)
 
+
+class MemoryVersionRequest(BaseModel):
+    version: int = Field(ge=1)

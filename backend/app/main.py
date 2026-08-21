@@ -11,8 +11,10 @@ from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
 from backend.app.api.routes import router
 from backend.app.core.logging import audit, setup_logging
+from backend.app.db.migrations import upgrade_database
 from backend.app.db.models import Tenant, User
 from backend.app.db.session import Base, SessionLocal, engine
+from backend.app.services.memory_tasks import MemoryTaskManager
 from mcp_servers.law_rag.server import (
     close_engine,
     get_index_status,
@@ -27,6 +29,7 @@ FRONTEND_DIST = ROOT / "frontend" / "dist"
 
 def initialize_database() -> None:
     (ROOT / "data" / "runtime").mkdir(parents=True, exist_ok=True)
+    upgrade_database()
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
         if db.query(Tenant).count() == 0:
@@ -46,14 +49,18 @@ async def lifespan(app: FastAPI):
     initialize_database()
     await initialize_engine()
     registry = MCPToolRegistry()
+    provider = LLMProvider()
     app.state.mcp_tool_registry = registry
-    app.state.agent_runtime = AgentRuntime(registry, LLMProvider())
+    app.state.agent_runtime = AgentRuntime(registry, provider)
     app.state.agent_concurrency = AgentConcurrencyManager()
+    app.state.memory_tasks = MemoryTaskManager(provider)
+    await app.state.memory_tasks.start()
     async with mcp.session_manager.run():
         audit("application.started", status="ready")
         try:
             yield
         finally:
+            await app.state.memory_tasks.close()
             await app.state.agent_runtime.close()
             await close_engine()
             audit("application.stopped", status="stopped")

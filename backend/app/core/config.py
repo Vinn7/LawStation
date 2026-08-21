@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     memory_context_token_limit: int = 12000
     memory_compression_threshold: int = 9000
     memory_recent_message_count: int = 10
+    memory_worker_poll_seconds: float = 1.0
+    memory_job_max_attempts: int = 3
+    memory_llm_model: str = ""
+    memory_llm_thinking: bool = False
+    memory_llm_temperature: float = 0.0
+    memory_llm_max_tokens: int = 4096
+    memory_llm_json_retry_count: int = 1
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     log_level: str = "INFO"

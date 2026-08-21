@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：1.5
-> 基线日期：2026-08-20  
+> 版本：1.8
+> 基线日期：2026-08-21
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -197,22 +197,22 @@ get_law_article(law_name: string, article_number: string)
 
 ## 7. 记忆系统
 
-### 7.1 三层记忆
+### 7.1 四层分层记忆
 
 - **原始消息 [已实现]**：`messages` 完整保存用户、助手消息及状态。
-- **工作记忆 [已实现]**：当前会话的 `conversation_summaries` 加最近若干消息。
-- **长期记忆 [部分实现]**：`user_memories` 保存从旧用户消息沉淀的事实。
+- **近期对话 [已实现]**：按上下文预算选取当前会话最近消息。
+- **工作记忆 [已实现]**：`conversation_summaries` 保存当前会话的结构化滚动摘要。
+- **长期记忆 [已实现]**：`user_memories` 区分用户级偏好与会话级案件事实，并具有生效、替换、拒绝和过期状态。
 
-### 7.2 当前压缩算法
+### 7.2 当前上下文、摘要与提取算法
 
-`MemoryService.consolidate` 以字符数除以 2 粗略估算 token；达到 `MEMORY_COMPRESSION_THRESHOLD` 后保留最近 `MEMORY_RECENT_MESSAGE_COUNT` 条，将旧消息拼接成摘要，并把长度不少于 20 字的旧用户消息作为长期记忆保存。
+`MemoryService.context` 使用中英文保守 token 估算，将 `MEMORY_CONTEXT_TOKEN_LIMIT` 分配给当前问题、近期消息、当前案件 active 记忆、用户级 active 偏好和结构化摘要。案件事实只允许在来源会话使用；跨会话只加载 `profile_preference` 和 `identity_background`。
 
-当前限制：
+`MemoryTaskManager` 在主回答保存后创建 SQLite 持久任务。后台 worker 只从本轮用户消息抽取结构化候选；通过 Schema 和作用域校验的用户偏好、身份背景及案件事实均直接写为 `active`，无需用户再次确认。同一用户、作用域和 `canonical_key` 下出现不同内容时，新记忆立即生效，旧记忆自动转为 `superseded` 并保留修订记录。达到压缩阈值时，worker 使用旧摘要和新增覆盖区间生成结构化增量摘要。
 
-- **[部分实现]** 摘要是截断拼接，不是大模型语义摘要。
-- **[部分实现]** 长期记忆提取没有事实分类、冲突合并、置信度和过期策略。
-- **[待实现]** `MEMORY_CONTEXT_TOKEN_LIMIT` 已配置，但尚未用于严格上下文预算。
-- **[待实现]** 记忆来源和修订历史的完整可追溯机制。
+记忆抽取和摘要使用 `LLMProvider.get_memory_model` 提供的独立非流式、非 Thinking 模型配置，通过 DeepSeek JSON Output 返回 JSON 并由 Pydantic 校验。该链路不得绑定、发现或调用 MCP/业务工具，也不得发送 `tools` 或 `tool_choice`。没有可沉淀内容时 `memories=[]` 是成功结果；确定性配置或兼容错误不得反复重试，主回答保存不受后台记忆失败影响。
+
+记忆状态为 `pending | active | superseded | rejected | expired`；作用域为 `user | conversation`。`pending` 只用于兼容升级前已有记录，新抽取记录不再进入该状态。会话级冲突只能替换同一案件内的旧事实，用户级冲突可以在该用户范围内替换。`memory_revisions` 保存自动替换和人工修订轨迹，`memory_jobs` 支持服务重启后恢复未完成整理任务。
 
 ### 7.3 强制隔离规则
 
@@ -233,6 +233,8 @@ get_law_article(law_name: string, article_number: string)
 | `messages` | 原始消息 | 复合外键指向所属用户会话 |
 | `conversation_summaries` | 滚动摘要 | 每个所属用户会话一条当前摘要 |
 | `user_memories` | 长期记忆 | 复合外键指向来源用户会话；所有操作必须限定所有者 |
+| `memory_revisions` | 记忆修订历史 | 按 `tenant_id + user_id + memory_id` 追溯自动替换、历史确认、拒绝和修改 |
+| `memory_jobs` | 后台记忆整理任务 | 来源消息幂等；`pending/running/completed/failed` 可恢复 |
 | `tool_call_records` | 工具调用数据库审计 | 保存用户、会话、参数、结果摘要、状态和耗时 |
 | `retrieval_traces` | 法规检索追踪 | 保存用户、会话、查询及截断结果 |
 | `index_manifests` | 已构建索引版本记录 | `data_version` 唯一 |
@@ -253,8 +255,11 @@ get_law_article(law_name: string, article_number: string)
 | `POST /api/conversations/{id}/messages/stream` | SSE 问答 | 必须 |
 | `GET /api/memories` | 当前用户记忆，可按会话过滤 | 必须 |
 | `PATCH /api/memories/{id}` | 修改当前用户记忆 | 必须 |
+| `POST /api/memories/{id}/confirm` | 兼容处理升级前已有待确认记忆并应用冲突替换 | 必须 |
+| `POST /api/memories/{id}/reject` | 拒绝待处理记忆 | 必须 |
 | `DELETE /api/memories/{id}` | 删除当前用户单条记忆 | 必须 |
 | `DELETE /api/memories` | 清空当前用户全部或指定会话记忆 | 必须 |
+| `GET /api/memory-jobs/{id}` | 查询当前用户的后台记忆整理状态 | 必须 |
 | `/mcp/` | Streamable HTTP MCP | Agent 内部使用 |
 
 ## 10. 技术选型
@@ -271,7 +276,7 @@ get_law_article(law_name: string, article_number: string)
 | Dense Embedding | DashScope 兼容接口、`qwen3.7-text-embedding`、1024 维 | 文档及查询向量化 |
 | 向量索引 | FAISS `IndexFlatIP` | 归一化向量的内积/余弦近邻搜索 |
 | 混合融合 | Reciprocal Rank Fusion | 合并 BM25 与 Dense 排名 |
-| 数据库 | SQLite + SQLAlchemy 2.x | 用户、会话、消息、记忆和审计数据 |
+| 数据库 | SQLite + SQLAlchemy 2.x + Alembic | 用户、会话、消息、分层记忆、后台任务、审计与版本化迁移 |
 | 配置 | pydantic-settings + 根目录 `.env` | 类型化读取全部应用环境变量 |
 | 前端 | React + TypeScript + Vite | 响应式单页法律咨询工作台和同源 API 消费 |
 | 前端网络层 | 原生 `fetch` + `ReadableStream` | 类型化 REST 封装和完整 SSE 事件消费；不使用 TanStack Query |
@@ -323,6 +328,13 @@ LLM_TEMPERATURE
 MEMORY_CONTEXT_TOKEN_LIMIT
 MEMORY_COMPRESSION_THRESHOLD
 MEMORY_RECENT_MESSAGE_COUNT
+MEMORY_WORKER_POLL_SECONDS
+MEMORY_JOB_MAX_ATTEMPTS
+MEMORY_LLM_MODEL
+MEMORY_LLM_THINKING
+MEMORY_LLM_TEMPERATURE
+MEMORY_LLM_MAX_TOKENS
+MEMORY_LLM_JSON_RETRY_COUNT
 APP_HOST
 APP_PORT
 LOG_LEVEL
@@ -424,6 +436,8 @@ INDEX_BUILD_BATCH_SIZE
 当前自动化测试覆盖：
 
 - `tests/test_isolation.py`：其他用户无法列出、修改或删除记忆。
+- `tests/test_memory.py`：案件/用户作用域、上下文预算、自动生效与冲突替换、结构化抽取和后台任务。
+- `tests/test_migrations.py`：旧 SQLite 自动备份、字段升级和 Alembic 版本。
 - `tests/test_law_sample.py`：样本数量、来源一致性、可复现性和默认路径。
 - `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建和稳定 chunk ID。
 - `tests/test_audit_logging.py`：敏感信息脱敏和摘要长度。
@@ -432,6 +446,7 @@ INDEX_BUILD_BATCH_SIZE
 - `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、引用边界、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
 - `frontend/src/test/App.test.tsx`：切换用户隔离显示、后台流继续、返回会话恢复进度和 no_match 工具状态清理。
 - `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
+- `frontend/src/test/MemoryPanel.test.tsx`：记忆面板用户限定加载、历史待确认记录兼容操作和记忆治理。
 
 截至本 Spec 基线：应以当前 CI/本地验证输出为准；后端、前端测试和生产构建必须同时通过。
 
@@ -459,8 +474,8 @@ INDEX_BUILD_BATCH_SIZE
 
 ### P1：核心体验与质量
 
-- 使用模型或结构化抽取实现长期记忆分类、合并、纠错和置信度。
-- 真正执行 `MEMORY_CONTEXT_TOKEN_LIMIT`，避免上下文无限增长。
+- 增加记忆来源消息跳转、自动替换提示和冲突历史并排对比。
+- 建立记忆抽取与摘要质量评测集，监控错误沉淀率和摘要事实保持率。
 - 扩展 citations 展示和法规原文定位能力；当前已展示法律名称、条号并保存证据摘要。
 - 增加 RAG 评测集，衡量召回率、法条准确率和无依据回答率。
 
@@ -469,7 +484,7 @@ INDEX_BUILD_BATCH_SIZE
 - 接入 Cross-Encoder 精排并保留可关闭配置。
 - 支持更多法规元数据过滤和法条版本/效力状态。
 - 评估多进程部署下索引构建协调、SQLite 并发限制和迁移方案。
-- 引入数据库 schema migration 工具；当前 `create_all` 不承担正式迁移能力。
+- 多进程部署前将 SQLite 后台任务抢占升级为数据库原子租约，避免多个 worker 重复处理。
 
 ## 17. 关键代码导航
 
@@ -480,11 +495,12 @@ INDEX_BUILD_BATCH_SIZE
 3. `backend/app/api/routes.py::stream_message`：完整对话主链路。
 4. `backend/app/core/context.py::RequestUserContext`：用户隔离信任边界。
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
-6. `backend/app/services/memory.py::MemoryService`：当前记忆装配与压缩实现。
-7. `backend/app/agent/graph.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
-8. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
-9. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
-10. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
+6. `backend/app/services/memory.py::MemoryService`：分层作用域、预算和安全上下文装配。
+7. `backend/app/services/memory_tasks.py::MemoryTaskManager`：持久后台抽取与增量摘要。
+8. `backend/app/agent/graph.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
+9. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
+10. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
+11. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
 
 ## 18. Spec 维护规则
 
@@ -501,3 +517,6 @@ INDEX_BUILD_BATCH_SIZE
 - **1.3 / 2026-08-20**：升级为 Case Analyst、Legal Research、Legal Counsel 三 Agent LangGraph；增加复核回流、引用事件、三级并发准入、SQLite WAL 短事务和前端跨用户后台会话任务。
 - **1.4 / 2026-08-20**：将无法条定义为正常 `no_match` 结果；增加结构化研究状态、ToolMessage 权威证据组装、一般性回答边界、禁止无效补检索、最终确定性校验和前端工具状态清理。
 - **1.5 / 2026-08-20**：撤回 `tools/` 不可修改约束；确立最小变更、优先原地修改、禁止无必要删除重建及保护用户已有改动的开发原则。
+- **1.6 / 2026-08-20**：实现用户/案件分层记忆、确认生命周期、上下文预算、结构化增量摘要、持久后台抽取任务、Alembic 迁移和前端记忆治理面板。
+- **1.7 / 2026-08-21**：将记忆抽取和摘要从 Function Calling 改为独立非 Thinking JSON Output；空记忆正常完成，增加错误分类、有限重试和历史兼容失败任务恢复。
+- **1.8 / 2026-08-21**：新抽取记忆通过校验后直接生效，无需用户确认；同语义键冲突由新记录自动替换旧记录，历史待确认数据保持原状以避免批量误激活。

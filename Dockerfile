@@ -10,6 +10,8 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY backend ./backend
 COPY mcp_servers ./mcp_servers
+COPY alembic.ini ./
+COPY alembic ./alembic
 RUN pip install --no-cache-dir .
 COPY run.py .
 COPY data ./data

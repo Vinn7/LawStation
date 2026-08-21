@@ -5,6 +5,7 @@ import { conversationKey, emptyRuntime, isActiveStage, type ConversationKey } fr
 import { ChatHeader } from './components/ChatHeader';
 import { Composer } from './components/Composer';
 import { MessageList } from './components/MessageList';
+import { MemoryPanel } from './components/MemoryPanel';
 import { Sidebar } from './components/Sidebar';
 import { StatusNotice } from './components/StatusNotice';
 import type {
@@ -56,6 +57,7 @@ export default function App() {
   const [index, setIndex] = useState<IndexStatus>(initialIndex);
   const [usersLoading, setUsersLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
 
   const controllers = useRef(new Map<ConversationKey, AbortController>());
   const requestSequence = useRef(0);
@@ -126,6 +128,7 @@ export default function App() {
   useEffect(() => {
     setConversationId('');
     setSidebarOpen(false);
+    setMemoryOpen(false);
     if (!userId) return;
     const controller = new AbortController();
     setConversationBuckets((current) => ({
@@ -258,8 +261,9 @@ export default function App() {
         updatedAt: Date.now(),
       }), snapshot);
     } else if (item.event === 'memory_status') {
-      const data = item.data as { compressed?: boolean };
-      updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: data.compressed ? '本轮对话已完成摘要与记忆整理' : '本轮对话已保存', updatedAt: Date.now() }), snapshot);
+      const data = item.data as { status?: string; job_id?: string; compressed?: boolean };
+      updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: data.status === 'pending' ? '本轮对话已保存，正在后台整理记忆' : data.compressed ? '本轮对话已完成摘要与记忆整理' : '本轮对话已保存', updatedAt: Date.now() }), snapshot);
+      if (data.job_id) void pollMemoryJob(snapshot, data.job_id);
     } else if (item.event === 'citations') {
       const raw = Array.isArray(item.data) ? item.data : [];
       const citations = raw.filter((citation): citation is Citation => Boolean(citation && typeof citation === 'object'));
@@ -279,6 +283,29 @@ export default function App() {
     } else if (item.event === 'error') {
       const data = item.data as { message?: string };
       streamFailure.message = data.message || '回答生成失败';
+    }
+  }
+
+  async function pollMemoryJob(snapshot: StreamSnapshot, jobId: string) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      if (!isCurrentStream(snapshot)) return;
+      try {
+        const job = await api.memoryJob(snapshot.userId, jobId);
+        if (job.status === 'completed') {
+          const message = job.candidate_count > 0
+            ? `本轮记忆整理已完成，新增 ${job.candidate_count} 条记忆并已生效`
+            : '本轮无需新增记忆';
+          updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: message, updatedAt: Date.now() }), snapshot);
+          return;
+        }
+        if (job.status === 'failed') {
+          updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: '回答已保存，但本轮记忆整理失败', updatedAt: Date.now() }), snapshot);
+          return;
+        }
+      } catch {
+        return;
+      }
     }
   }
 
@@ -381,6 +408,7 @@ export default function App() {
         onCreate={() => void createConversation()}
         onOpenConversation={(id) => void openConversation(id)}
         onClose={() => setSidebarOpen(false)}
+        onOpenMemories={() => { setMemoryOpen(true); setSidebarOpen(false); }}
       />
       <section className="chat-workspace">
         <ChatHeader
@@ -415,6 +443,12 @@ export default function App() {
           />
         </div>
       </section>
+      <MemoryPanel
+        open={memoryOpen}
+        userId={userId}
+        conversationId={conversationId}
+        onClose={() => setMemoryOpen(false)}
+      />
     </main>
   );
 }

@@ -39,6 +39,27 @@ def settings(**changes):
     return Settings(_env_file=None, **values)
 
 
+def test_memory_model_is_non_streaming_non_thinking_and_separate(monkeypatch):
+    created = []
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    monkeypatch.setattr("backend.app.agent.provider.ChatOpenAI", FakeChatOpenAI)
+    provider = LLMProvider(settings(deepseek_model="deepseek-v4-flash"))
+
+    agent_model = provider.get_chat_model()
+    memory_model = provider.get_memory_model()
+
+    assert agent_model is not memory_model
+    assert created[0]["streaming"] is True
+    assert "extra_body" not in created[0]
+    assert created[1]["streaming"] is False
+    assert created[1]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert created[1]["max_tokens"] == 4096
+
+
 def fake_tool():
     async def search_laws(query: str) -> str:
         """Search laws for a query."""

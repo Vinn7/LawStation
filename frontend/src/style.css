@@ -73,6 +73,8 @@ button:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opaci
 .radio-dot { width: 15px; height: 15px; border: 4px solid var(--surface); border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1px #c98799; }
 
 .new-chat-button { justify-content: center; gap: 7px; width: 100%; min-height: 44px; margin: 14px 0 19px; border: 1px solid var(--line-strong); border-radius: 12px; color: var(--accent-strong); background: var(--surface); font-weight: 700; cursor: pointer; box-shadow: var(--shadow-sm); transition: border-color .16s,transform .16s,box-shadow .16s; }
+.memory-manage-button { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; min-height:38px; margin:-10px 0 18px; border:0; border-radius:10px; color:var(--muted); background:transparent; font-weight:650; cursor:pointer; }
+.memory-manage-button:hover:not(:disabled) { color:var(--accent); background:var(--accent-soft); }
 .new-chat-button:hover:not(:disabled) { border-color: #c997a5; transform: translateY(-1px); box-shadow: 0 6px 17px rgba(107,50,66,.09); }
 .conversation-section-heading { justify-content: space-between; padding: 0 4px 8px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .conversation-section-heading span:last-child { display: grid; place-items: center; min-width: 21px; height: 21px; border-radius: 10px; background: #eee9ea; font-size: 10px; }
@@ -165,6 +167,30 @@ button:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opaci
 .error-notice span { flex: 1; }
 .error-notice button { padding: 4px 8px; border: 0; border-radius: 6px; color: var(--accent-strong); background: var(--accent-soft); font-size: 11px; font-weight: 700; cursor: pointer; }
 .error-notice .notice-dismiss { color: var(--muted); background: transparent; font-size: 17px; }
+.memory-panel-backdrop { position:fixed; z-index:50; inset:0; display:flex; justify-content:flex-end; background:rgba(38,28,31,.34); opacity:0; pointer-events:none; transition:opacity .18s; }
+.memory-panel-backdrop.is-open { opacity:1; pointer-events:auto; }
+.memory-panel { display:flex; flex-direction:column; width:min(460px,100%); height:100%; padding:20px; background:var(--surface); box-shadow:-16px 0 45px rgba(57,39,45,.14); transform:translateX(100%); transition:transform .2s; }
+.memory-panel-backdrop.is-open .memory-panel { transform:translateX(0); }
+.memory-panel header,.memory-panel header>div,.memory-panel-toolbar,.memory-card-meta,.memory-card-actions { display:flex; align-items:center; }
+.memory-panel header { justify-content:space-between; padding-bottom:16px; border-bottom:1px solid var(--line); }
+.memory-panel header>div { gap:10px; color:var(--accent); }
+.memory-panel header div div { display:flex; flex-direction:column; }
+.memory-panel header span { margin-top:2px; color:var(--muted); font-size:11px; }
+.memory-panel-toolbar { justify-content:space-between; padding:14px 0 10px; color:var(--muted); font-size:12px; }
+.memory-panel-toolbar button,.memory-card-actions button { display:flex; align-items:center; gap:4px; padding:6px 8px; border:0; border-radius:7px; color:var(--accent-strong); background:var(--accent-soft); cursor:pointer; }
+.memory-list { min-height:0; overflow-y:auto; }
+.memory-card { margin-bottom:10px; padding:13px; border:1px solid var(--line); border-radius:12px; background:var(--surface-subtle); }
+.memory-card.is-pending { border-color:#e8c99b; background:#fffaf2; }
+.memory-card-meta { justify-content:space-between; font-size:11px; }
+.memory-card-meta span { color:var(--accent-strong); font-weight:700; }
+.memory-card-meta i { color:var(--muted); font-style:normal; }
+.memory-card p { margin:10px 0; line-height:1.65; }
+.memory-card small { display:block; margin-bottom:10px; color:var(--muted); line-height:1.5; }
+.memory-card textarea { box-sizing:border-box; width:100%; min-height:90px; margin:10px 0; padding:9px; border:1px solid var(--line-strong); border-radius:8px; resize:vertical; }
+.memory-card-actions { flex-wrap:wrap; gap:6px; }
+.memory-card-actions button:last-child { margin-left:auto; color:var(--danger); background:#faecee; }
+.memory-panel-state { padding:28px 10px; color:var(--muted); text-align:center; }
+.memory-panel-state.is-error { color:var(--danger); }
 .spin { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

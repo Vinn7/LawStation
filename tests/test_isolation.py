@@ -28,5 +28,6 @@ def test_memory_isolation():
 
     repository_a = OwnedRepository(db, RequestUserContext("t", "a", "r"))
     assert repository_a.memories() == []
-    assert not repository_a.update_memory("secret", "stolen")
+    assert repository_a.update_memory("secret", "stolen", 1) == "missing"
+    assert repository_a.set_memory_status("secret", 1, "active") == "missing"
     assert not repository_a.delete_memory("secret")

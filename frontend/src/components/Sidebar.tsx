@@ -1,4 +1,4 @@
-import { BookOpenText, ChevronDown, MessageSquareText, Plus, Scale, X } from 'lucide-react';
+import { BookOpenText, BrainCircuit, ChevronDown, MessageSquareText, Plus, Scale, X } from 'lucide-react';
 import type { AgentStage, Conversation, User } from '../types';
 
 interface SidebarProps {
@@ -15,6 +15,7 @@ interface SidebarProps {
   onCreate: () => void;
   onOpenConversation: (id: string) => void;
   onClose: () => void;
+  onOpenMemories: () => void;
 }
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
@@ -43,6 +44,7 @@ export function Sidebar({
   onCreate,
   onOpenConversation,
   onClose,
+  onOpenMemories,
 }: SidebarProps) {
   return (
     <>
@@ -97,6 +99,10 @@ export function Sidebar({
         <button className="new-chat-button" onClick={onCreate} disabled={!userId || disabled}>
           <Plus size={18} />
           新建对话
+        </button>
+        <button className="memory-manage-button" onClick={onOpenMemories} disabled={!userId || disabled}>
+          <BrainCircuit size={17} />
+          管理我的记忆
         </button>
 
         <div className="conversation-section-heading">

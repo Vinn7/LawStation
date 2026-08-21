@@ -48,7 +48,7 @@ describe('App user isolation', () => {
       'event: token\ndata: "根据相关法律，"\n\n',
       'event: token\ndata: "可以依法主张权利。"\n\n',
       'event: citations\ndata: [{"document_id":"law-1","law_name":"劳动合同法","article_number":"第八十二条"}]\n\n',
-      'event: memory_status\ndata: {"compressed":true}\n\n',
+      'event: memory_status\ndata: {"status":"pending","job_id":"memory-1"}\n\n',
       'event: message_end\ndata: {"message_id":"assistant-1"}\n\n',
     ];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -67,6 +67,9 @@ describe('App user isolation', () => {
           },
         }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
       }
+      if (url.endsWith('/api/memory-jobs/memory-1')) {
+        return json({ id: 'memory-1', status: 'completed', candidate_count: 1, summary_updated: false });
+      }
       throw new Error(`Unexpected request: ${url}`);
     });
     const user = userEvent.setup();
@@ -77,7 +80,7 @@ describe('App user isolation', () => {
 
     expect(await screen.findByText('根据相关法律，可以依法主张权利。')).toBeInTheDocument();
     expect(screen.getByText('劳动合同法 第八十二条')).toBeInTheDocument();
-    expect(screen.getByText('本轮对话已完成摘要与记忆整理')).toBeInTheDocument();
+    expect(await screen.findByText('本轮记忆整理已完成，新增 1 条记忆并已生效', {}, { timeout: 2500 })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument());
   });
 
