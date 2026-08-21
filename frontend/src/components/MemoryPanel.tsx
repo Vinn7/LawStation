@@ -54,16 +54,11 @@ export function MemoryPanel({ open, userId, conversationId, onClose }: MemoryPan
     return () => controller.abort();
   }, [open, userId, conversationId]);
 
-  const visible = useMemo(
-    () => items.filter((item) => !['rejected', 'superseded', 'expired'].includes(item.status)),
-    [items],
-  );
+  const visible = useMemo(() => items.filter((item) => item.status === 'active'), [items]);
 
-  async function act(action: 'confirm' | 'reject' | 'delete', item: UserMemory) {
+  async function remove(item: UserMemory) {
     try {
-      if (action === 'confirm') await api.confirmMemory(userId, item.id, item.version);
-      if (action === 'reject') await api.rejectMemory(userId, item.id, item.version);
-      if (action === 'delete') await api.deleteMemory(userId, item.id);
+      await api.deleteMemory(userId, item.id);
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '操作失败');
@@ -100,18 +95,16 @@ export function MemoryPanel({ open, userId, conversationId, onClose }: MemoryPan
         <div className="memory-list">
           {visible.map((item) => (
             <article className={`memory-card is-${item.status}`} key={item.id}>
-              <div className="memory-card-meta"><span>{typeLabels[item.memory_type] ?? item.memory_type}</span><i>{item.status === 'active' ? '已生效' : '待确认'}</i></div>
+              <div className="memory-card-meta"><span>{typeLabels[item.memory_type] ?? item.memory_type}</span><i>已生效</i></div>
               {editing === item.id ? (
                 <textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} />
               ) : <p>{item.content}</p>}
               {item.source_excerpt && <small>来源：{item.source_excerpt}</small>}
               <div className="memory-card-actions">
-                {item.status === 'pending' && <button onClick={() => void act('confirm', item)}><Check size={14} />确认</button>}
                 {editing === item.id
                   ? <button onClick={() => void save(item)}><Check size={14} />保存</button>
                   : <button onClick={() => { setEditing(item.id); setEditContent(item.content); }}><Pencil size={14} />修正</button>}
-                {item.status === 'pending' && <button onClick={() => void act('reject', item)}><X size={14} />拒绝</button>}
-                <button onClick={() => void act('delete', item)}><Trash2 size={14} />删除</button>
+                <button onClick={() => void remove(item)}><Trash2 size={14} />删除</button>
               </div>
             </article>
           ))}

@@ -80,7 +80,7 @@ describe('App user isolation', () => {
 
     expect(await screen.findByText('根据相关法律，可以依法主张权利。')).toBeInTheDocument();
     expect(screen.getByText('劳动合同法 第八十二条')).toBeInTheDocument();
-    expect(await screen.findByText('本轮记忆整理已完成，新增 1 条记忆并已生效', {}, { timeout: 2500 })).toBeInTheDocument();
+    expect(await screen.findByText('本轮记忆整理完成，1 条记忆已更新', {}, { timeout: 2500 })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument());
   });
 

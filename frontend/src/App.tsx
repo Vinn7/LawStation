@@ -294,7 +294,7 @@ export default function App() {
         const job = await api.memoryJob(snapshot.userId, jobId);
         if (job.status === 'completed') {
           const message = job.candidate_count > 0
-            ? `本轮记忆整理已完成，新增 ${job.candidate_count} 条记忆并已生效`
+            ? `本轮记忆整理完成，${job.candidate_count} 条记忆已更新`
             : '本轮无需新增记忆';
           updateRuntime(snapshot.key, (runtime) => ({ ...runtime, memoryMessage: message, updatedAt: Date.now() }), snapshot);
           return;

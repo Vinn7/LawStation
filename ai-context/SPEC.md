@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：1.8
+> 版本：1.9
 > 基线日期：2026-08-21
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -208,11 +208,11 @@ get_law_article(law_name: string, article_number: string)
 
 `MemoryService.context` 使用中英文保守 token 估算，将 `MEMORY_CONTEXT_TOKEN_LIMIT` 分配给当前问题、近期消息、当前案件 active 记忆、用户级 active 偏好和结构化摘要。案件事实只允许在来源会话使用；跨会话只加载 `profile_preference` 和 `identity_background`。
 
-`MemoryTaskManager` 在主回答保存后创建 SQLite 持久任务。后台 worker 只从本轮用户消息抽取结构化候选；通过 Schema 和作用域校验的用户偏好、身份背景及案件事实均直接写为 `active`，无需用户再次确认。同一用户、作用域和 `canonical_key` 下出现不同内容时，新记忆立即生效，旧记忆自动转为 `superseded` 并保留修订记录。达到压缩阈值时，worker 使用旧摘要和新增覆盖区间生成结构化增量摘要。
+`MemoryTaskManager` 在主回答保存后创建 SQLite 持久任务。后台 worker 只从本轮用户消息抽取结构化候选；通过 Schema 和作用域校验的用户偏好、身份背景及案件事实均直接写为 `active`，无需用户再次确认。提取模型同时读取当前用户级 active 记忆和当前会话 active 记忆，可通过 `replaces_memory_id` 建议冲突目标；服务端必须使用所有者、作用域、会话、状态和版本号复核。合法冲突在原记忆行上更新，新事实沿用原 `memory_id/canonical_key`，旧正文仅写入 `memory_revisions(action=auto_replace)`。达到压缩阈值时，worker 使用旧摘要和新增覆盖区间生成结构化增量摘要。
 
 记忆抽取和摘要使用 `LLMProvider.get_memory_model` 提供的独立非流式、非 Thinking 模型配置，通过 DeepSeek JSON Output 返回 JSON 并由 Pydantic 校验。该链路不得绑定、发现或调用 MCP/业务工具，也不得发送 `tools` 或 `tool_choice`。没有可沉淀内容时 `memories=[]` 是成功结果；确定性配置或兼容错误不得反复重试，主回答保存不受后台记忆失败影响。
 
-记忆状态为 `pending | active | superseded | rejected | expired`；作用域为 `user | conversation`。`pending` 只用于兼容升级前已有记录，新抽取记录不再进入该状态。会话级冲突只能替换同一案件内的旧事实，用户级冲突可以在该用户范围内替换。`memory_revisions` 保存自动替换和人工修订轨迹，`memory_jobs` 支持服务重启后恢复未完成整理任务。
+记忆状态为 `pending | active | superseded | rejected | expired`；作用域为 `user | conversation`。`pending/superseded` 只用于兼容历史记录，新抽取记录和新冲突不再进入这些状态。会话级冲突只能原位替换同一案件内的旧事实，用户级冲突可以在该用户范围内替换。模型返回的无效、越权或跨会话替换 ID 必须丢弃，不得降级为新增记录。当前轮消息与历史记忆冲突时，Case Analyst、Legal Counsel 和 Reviewer 均必须以当前消息为准。
 
 ### 7.3 强制隔离规则
 
@@ -233,7 +233,7 @@ get_law_article(law_name: string, article_number: string)
 | `messages` | 原始消息 | 复合外键指向所属用户会话 |
 | `conversation_summaries` | 滚动摘要 | 每个所属用户会话一条当前摘要 |
 | `user_memories` | 长期记忆 | 复合外键指向来源用户会话；所有操作必须限定所有者 |
-| `memory_revisions` | 记忆修订历史 | 按 `tenant_id + user_id + memory_id` 追溯自动替换、历史确认、拒绝和修改 |
+| `memory_revisions` | 记忆修订历史 | 按 `tenant_id + user_id + memory_id` 追溯原位自动替换、历史确认、拒绝和修改 |
 | `memory_jobs` | 后台记忆整理任务 | 来源消息幂等；`pending/running/completed/failed` 可恢复 |
 | `tool_call_records` | 工具调用数据库审计 | 保存用户、会话、参数、结果摘要、状态和耗时 |
 | `retrieval_traces` | 法规检索追踪 | 保存用户、会话、查询及截断结果 |
@@ -436,7 +436,7 @@ INDEX_BUILD_BATCH_SIZE
 当前自动化测试覆盖：
 
 - `tests/test_isolation.py`：其他用户无法列出、修改或删除记忆。
-- `tests/test_memory.py`：案件/用户作用域、上下文预算、自动生效与冲突替换、结构化抽取和后台任务。
+- `tests/test_memory.py`：案件/用户作用域、上下文预算、模型建议与 canonical key 原位替换、越权拒绝、结构化抽取和后台任务。
 - `tests/test_migrations.py`：旧 SQLite 自动备份、字段升级和 Alembic 版本。
 - `tests/test_law_sample.py`：样本数量、来源一致性、可复现性和默认路径。
 - `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建和稳定 chunk ID。
@@ -446,7 +446,7 @@ INDEX_BUILD_BATCH_SIZE
 - `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、引用边界、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
 - `frontend/src/test/App.test.tsx`：切换用户隔离显示、后台流继续、返回会话恢复进度和 no_match 工具状态清理。
 - `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
-- `frontend/src/test/MemoryPanel.test.tsx`：记忆面板用户限定加载、历史待确认记录兼容操作和记忆治理。
+- `frontend/src/test/MemoryPanel.test.tsx`：记忆面板用户限定加载、仅展示 active 最新事实和记忆治理。
 
 截至本 Spec 基线：应以当前 CI/本地验证输出为准；后端、前端测试和生产构建必须同时通过。
 
@@ -520,3 +520,4 @@ INDEX_BUILD_BATCH_SIZE
 - **1.6 / 2026-08-20**：实现用户/案件分层记忆、确认生命周期、上下文预算、结构化增量摘要、持久后台抽取任务、Alembic 迁移和前端记忆治理面板。
 - **1.7 / 2026-08-21**：将记忆抽取和摘要从 Function Calling 改为独立非 Thinking JSON Output；空记忆正常完成，增加错误分类、有限重试和历史兼容失败任务恢复。
 - **1.8 / 2026-08-21**：新抽取记忆通过校验后直接生效，无需用户确认；同语义键冲突由新记录自动替换旧记录，历史待确认数据保持原状以避免批量误激活。
+- **1.9 / 2026-08-21**：最新事实冲突改为模型建议、服务端验证的原位替换；主表只保留最新事实，旧内容进入修订审计，三 Agent 明确优先采用本轮用户消息。

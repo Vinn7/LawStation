@@ -32,6 +32,8 @@ from backend.app.core.logging import audit, summary
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 ANALYST_PROMPT = """你是法律咨询的案情分析与调度 Agent。只做问题分类、事实整理、争议点拆分和研究规划。
+当前用户最新消息与历史对话、摘要或 memory_context 冲突时，必须采用当前用户最新明确陈述的事实，
+不得让历史记忆覆盖本轮修正。
 不要编造法条，也不要输出内部推理过程。返回严格 JSON，字段必须符合以下结构：
 request_type(casual_chat|legal_consultation|insufficient_information), case_summary, jurisdiction,
 legal_domain, key_facts[], missing_facts[], legal_issues[], research_tasks[{issue_id,query,purpose}],
@@ -46,6 +48,7 @@ evidence_items 只能选择工具结果中真实存在的 document_id；找不�
 并在 unresolved_issues 说明，这属于正常检索结果，不得凭常识补造法条。"""
 
 COUNSEL_PROMPT = """你是面向用户的法律顾问 Agent。依据案情分析和 EvidencePacket 形成法律意见。
+当前用户最新消息与历史记忆冲突时，以最新消息和案情分析中的修正事实为准，不得沿用旧事实。
 retrieval_status=matched 时仅引用证据包中的具体法律名称与条号。
 retrieval_status=no_match 时仍要提供有帮助的一般性、条件化分析和行动建议，但 confidence 必须为 low，
 不得输出具体法律名称、司法解释名称或条号，不得声称已经完成法规核验，并必须明确说明当前法规库
@@ -55,7 +58,8 @@ retrieval_status=no_match 时仍要提供有帮助的一般性、条件化分析
 limitations[], follow_up_questions[]。answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
 
 REVIEW_PROMPT = """你是 Case Analyst 的复核阶段。检查草稿是否覆盖争议点、是否存在无证据法条、
-结论与证据是否一致、是否把推测写成事实、是否自相矛盾。retrieval_status=no_match 时，不得仅因
+结论与证据是否一致、是否把推测写成事实、是否自相矛盾，以及是否错误采用了与用户最新消息
+冲突的历史记忆；如有则要求 revise_draft。retrieval_status=no_match 时，不得仅因
 没有法条而要求重新检索；应检查回答是否采用低置信度条件化表达、是否披露未检索到可引用法条、
 是否避免具体法律名称和条号。存在越界时选择 revise_draft，不选择 research_again。
 只返回严格 JSON：approved,

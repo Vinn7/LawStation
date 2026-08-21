@@ -16,7 +16,13 @@ from backend.app.agent.concurrency import (
     ConcurrencyIdentity,
     ConversationBusyError,
 )
-from backend.app.agent.graph import _citation_errors, _no_match_violations
+from backend.app.agent.graph import (
+    ANALYST_PROMPT,
+    COUNSEL_PROMPT,
+    REVIEW_PROMPT,
+    _citation_errors,
+    _no_match_violations,
+)
 from backend.app.agent.middleware import result_metadata
 from backend.app.agent.provider import AgentConfigurationError, LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
@@ -37,6 +43,12 @@ def settings(**changes):
     }
     values.update(changes)
     return Settings(_env_file=None, **values)
+
+
+def test_agent_prompts_prioritize_latest_user_facts_over_memory():
+    assert "必须采用当前用户最新明确陈述的事实" in ANALYST_PROMPT
+    assert "以最新消息" in COUNSEL_PROMPT
+    assert "与用户最新消息" in REVIEW_PROMPT
 
 
 def test_memory_model_is_non_streaming_non_thinking_and_separate(monkeypatch):

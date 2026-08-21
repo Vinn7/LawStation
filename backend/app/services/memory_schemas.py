@@ -31,6 +31,7 @@ class ExtractedMemory(BaseModel):
     source_excerpt: str = Field(default="", max_length=500)
     confidence: float = Field(ge=0, le=1)
     importance: int = Field(default=50, ge=1, le=100)
+    replaces_memory_id: str | None = None
 
     @field_validator("scope")
     @classmethod
