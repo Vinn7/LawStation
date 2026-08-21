@@ -203,20 +203,21 @@ class ToolAuditMiddleware(AgentMiddleware):
                 **fields,
             )
         duration_ms = int((time.perf_counter() - started) * 1000)
-        try:
-            await asyncio.to_thread(
-                _persist_tool_audit, context, name, args, result, status, duration_ms
-            )
-        except Exception as exc:
-            audit(
-                "tool.call.audit_failed",
-                level=logging.ERROR,
-                status="failed",
-                tool_name=name,
-                error_type=type(exc).__name__,
-                error=summary(str(exc)),
-                **fields,
-            )
+        if context.persist_tool_audit:
+            try:
+                await asyncio.to_thread(
+                    _persist_tool_audit, context, name, args, result, status, duration_ms
+                )
+            except Exception as exc:
+                audit(
+                    "tool.call.audit_failed",
+                    level=logging.ERROR,
+                    status="failed",
+                    tool_name=name,
+                    error_type=type(exc).__name__,
+                    error=summary(str(exc)),
+                    **fields,
+                )
         if status == "success":
             audit(
                 "tool.call.completed",
@@ -239,5 +240,8 @@ class ToolAuditMiddleware(AgentMiddleware):
             )
         request.runtime.stream_writer(
             {"event": "tool_call_result", "data": {"name": name, "status": status}}
+        )
+        context.metrics.tool_trajectory.append(
+            {"agent": "legal_researcher", "tool": name, "status": status}
         )
         return message

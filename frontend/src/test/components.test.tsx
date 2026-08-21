@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChatHeader } from '../components/ChatHeader';
 import { Composer } from '../components/Composer';
 import { StatusNotice } from '../components/StatusNotice';
+import { MessageList } from '../components/MessageList';
 
 describe('Composer', () => {
   it('sends with Enter and keeps Shift+Enter as a newline', async () => {
@@ -53,5 +54,23 @@ describe('status presentation', () => {
     );
     expect(screen.getByText('正在检索相关法律条款…')).toBeInTheDocument();
     expect(screen.queryByText(/query|top_k|正文/)).not.toBeInTheDocument();
+  });
+});
+
+describe('message feedback', () => {
+  it('submits an owned assistant message rating', async () => {
+    const user = userEvent.setup();
+    const onFeedback = vi.fn().mockResolvedValue(undefined);
+    render(
+      <MessageList
+        messages={[{ id: 'message-1', role: 'assistant', content: '法律意见', status: 'complete' }]}
+        loading={false}
+        conversationSelected
+        onSuggestion={vi.fn()}
+        onFeedback={onFeedback}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: '回答有帮助' }));
+    expect(onFeedback).toHaveBeenCalledWith('message-1', 1, '');
   });
 });

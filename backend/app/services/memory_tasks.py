@@ -23,6 +23,7 @@ from backend.app.db.models import (
     UserMemory,
 )
 from backend.app.db.session import SessionLocal
+from backend.app.observability import LangSmithObservability
 from backend.app.services.memory import estimate_tokens
 from backend.app.services.memory_schemas import (
     MemoryExtractionResult,
@@ -113,9 +114,11 @@ class MemoryTaskManager:
         self,
         provider: LLMProvider,
         settings: Settings | None = None,
+        observability: LangSmithObservability | None = None,
     ) -> None:
         self.provider = provider
         self.settings = settings or get_settings()
+        self.observability = observability or LangSmithObservability(self.settings)
         self._wake = asyncio.Event()
         self._worker: asyncio.Task | None = None
         self._stopping = False
@@ -224,6 +227,16 @@ class MemoryTaskManager:
         try:
             phase = "extraction"
             model = self.provider.get_memory_model()
+            trace = self.observability.memory(
+                request_id=job_data["audit"]["request_id"],
+                tenant_id=job_data["tenant_id"],
+                user_id=job_data["user_id"],
+                conversation_id=job_data["conversation_id"],
+                job_id=job_data["id"],
+            )
+            extraction_trace_config = (
+                {**trace.config, "run_name": "memory.extraction"} if trace.enabled else None
+            )
             extracted = await self._invoke_structured_json(
                 model,
                 MemoryExtractionResult,
@@ -233,6 +246,7 @@ class MemoryTaskManager:
                     "existing_memories": job_data["existing_memories"],
                 },
                 {"memories": []},
+                trace_config=extraction_trace_config,
             )
             phase = "persistence"
             persist_stats = self._persist_candidates(job_data, extracted)
@@ -298,6 +312,7 @@ class MemoryTaskManager:
         system_prompt: str,
         payload: dict[str, Any],
         example: dict[str, Any],
+        trace_config: dict[str, Any] | None = None,
     ) -> StructuredResult:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         example_json = json.dumps(example, ensure_ascii=False)
@@ -311,10 +326,14 @@ class MemoryTaskManager:
         last_category = "empty_response"
         attempts = max(0, self.settings.memory_llm_json_retry_count) + 1
         for attempt in range(attempts):
-            response = await runner.ainvoke([
+            messages = [
                 ("system", prompt),
                 ("human", json.dumps(payload, ensure_ascii=False)),
-            ])
+            ]
+            response = (
+                await runner.ainvoke(messages, config=trace_config)
+                if trace_config else await runner.ainvoke(messages)
+            )
             raw = _response_text(response)
             if not raw:
                 last_category = "empty_response"
@@ -642,6 +661,13 @@ class MemoryTaskManager:
                 ],
             }
         audit("memory.summary.started", status="started", **job_data["audit"])
+        summary_trace = self.observability.memory(
+            request_id=job_data["audit"]["request_id"],
+            tenant_id=job_data["tenant_id"],
+            user_id=job_data["user_id"],
+            conversation_id=job_data["conversation_id"],
+            job_id=job_data.get("id", job_data["audit"]["request_id"]),
+        )
         generated = await self._invoke_structured_json(
             model,
             StructuredConversationSummary,
@@ -656,6 +682,10 @@ class MemoryTaskManager:
                 "uncertain_facts": [],
                 "open_questions": [],
             },
+            trace_config=(
+                {**summary_trace.config, "run_name": "memory.summary"}
+                if summary_trace.enabled else None
+            ),
         )
         summary_json = generated.model_dump_json()
         with SessionLocal() as db:

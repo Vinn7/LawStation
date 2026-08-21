@@ -39,12 +39,16 @@ class AgentInvocationIdentity:
 class AgentInvocationMetrics:
     tool_call_count: int = 0
     model_call_count: int = 0
+    tool_trajectory: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class AgentInvocationContext:
     identity: AgentInvocationIdentity
     metrics: AgentInvocationMetrics = field(default_factory=AgentInvocationMetrics)
+    langsmith_trace_id: str | None = None
+    evaluation_output: dict[str, Any] = field(default_factory=dict)
+    persist_tool_audit: bool = True
 
     @property
     def audit_fields(self) -> dict[str, Any]:

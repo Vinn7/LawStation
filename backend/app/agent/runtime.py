@@ -9,6 +9,7 @@ from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings, get_settings
+from backend.app.observability import LangSmithObservability
 
 
 class AgentRuntime:
@@ -17,10 +18,12 @@ class AgentRuntime:
         registry: MCPToolRegistry,
         provider: LLMProvider,
         settings: Settings | None = None,
+        observability: LangSmithObservability | None = None,
     ) -> None:
         self.registry = registry
         self.provider = provider
         self.settings = settings or get_settings()
+        self.observability = observability or LangSmithObservability(self.settings)
         self._compile_lock = asyncio.Lock()
         self._graph: LegalConsultationGraph | None = None
         self._graph_key: tuple[int, tuple[str, ...]] | None = None
@@ -64,9 +67,19 @@ class AgentRuntime:
             "errors": [],
         }
         final_state: dict[str, Any] = dict(state)
+        trace = self.observability.consultation(
+            request_id=context.identity.request_id,
+            tenant_id=context.identity.tenant_id,
+            user_id=context.identity.user_id,
+            conversation_id=context.identity.conversation_id,
+            model_name=self.settings.deepseek_model,
+            memory_context_chars=len(memory_context),
+        )
+        context.langsmith_trace_id = trace.trace_id
         async for part in graph.compiled.astream(
             state,
             context=context,
+            config=trace.config,
             stream_mode=["updates", "custom"],
             version="v2",
         ):
@@ -87,6 +100,52 @@ class AgentRuntime:
                     if isinstance(update, dict):
                         final_state.update(update)
         citations = final_state.get("citations") or []
+        context.evaluation_output = {
+            "final_answer": str(final_state.get("final_answer") or ""),
+            "case_analysis": (
+                final_state["case_analysis"].model_dump()
+                if final_state.get("case_analysis") else None
+            ),
+            "evidence_packet": (
+                final_state["evidence_packet"].model_dump()
+                if final_state.get("evidence_packet") else None
+            ),
+            "review_result": (
+                final_state["review_result"].model_dump()
+                if final_state.get("review_result") else None
+            ),
+            "citations": [
+                item.model_dump() if hasattr(item, "model_dump") else item for item in citations
+            ],
+            "tool_call_count": context.metrics.tool_call_count,
+            "model_call_count": context.metrics.model_call_count,
+            "tool_trajectory": list(context.metrics.tool_trajectory),
+            "retry_count": int(final_state.get("retry_count") or 0),
+            "revision_count": int(final_state.get("revision_count") or 0),
+            "errors": [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in final_state.get("errors", [])
+            ],
+        }
+        analysis = context.evaluation_output.get("case_analysis") or {}
+        evidence = context.evaluation_output.get("evidence_packet") or {}
+        important_outcome = (
+            analysis.get("risk_level") == "high"
+            or evidence.get("retrieval_status") in {"tool_error", "tool_unavailable"}
+        )
+        if not trace.enabled and important_outcome:
+            question = ""
+            if messages:
+                content = messages[-1].content
+                question = content if isinstance(content, str) else str(content)
+            context.langsmith_trace_id = await self.observability.force_outcome_trace(
+                request_id=context.identity.request_id,
+                tenant_id=context.identity.tenant_id,
+                user_id=context.identity.user_id,
+                conversation_id=context.identity.conversation_id,
+                question=question,
+                outcome=context.evaluation_output,
+            )
         if citations:
             yield {
                 "event": "citations",

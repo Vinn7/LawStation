@@ -144,6 +144,13 @@ button:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opaci
 .message-status.is-error { color: var(--danger); }
 .message-citations { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .message-citations span { display: flex; align-items: center; gap: 4px; padding: 4px 7px; border-radius: 7px; color: var(--accent-strong); background: var(--accent-soft); font-size: 10px; }
+.message-feedback { display:flex; align-items:center; flex-wrap:wrap; gap:5px; margin-top:10px; padding-top:8px; border-top:1px solid var(--line); }
+.message-feedback>button { display:grid; place-items:center; width:28px; height:28px; padding:0; border:0; border-radius:7px; color:var(--muted); background:transparent; cursor:pointer; }
+.message-feedback>button:hover,.message-feedback>button.is-selected { color:var(--accent); background:var(--accent-soft); }
+.message-feedback>span { color:var(--soft); font-size:10px; }
+.message-feedback form { display:flex; flex:1 0 100%; gap:6px; margin-top:4px; }
+.message-feedback input { flex:1; min-width:0; padding:7px 9px; border:1px solid var(--line); border-radius:7px; color:var(--text); background:var(--surface-subtle); }
+.message-feedback form button { padding:6px 9px; border:0; border-radius:7px; color:#fff; background:var(--accent); cursor:pointer; font-size:11px; }
 .thinking { display: flex; align-items: center; gap: 5px; min-width: 45px; height: 22px; }
 .thinking i { width: 6px; height: 6px; border-radius: 50%; background: #b67a8b; animation: thinking 1.2s infinite ease-in-out; }
 .thinking i:nth-child(2) { animation-delay: .15s; }

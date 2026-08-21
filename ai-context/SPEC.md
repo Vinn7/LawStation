@@ -1,6 +1,6 @@
 # LawStation 项目 Spec
 
-> 版本：1.9
+> 版本：2.0
 > 基线日期：2026-08-21
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
@@ -50,6 +50,8 @@ flowchart LR
     DENSE --> LAW
     API --> LOG["JSONL 轮转审计日志"]
     MCP --> LOG
+    AGENT --> OBS["LangSmith Trace / Eval"]
+    MEM --> OBS
 ```
 
 ### 3.1 运行边界
@@ -75,6 +77,8 @@ flowchart LR
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志和脱敏 | `Settings`、`RequestUserContext`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
+| `backend/app/observability/` | LangSmith 客户端、采样、身份哈希、内容过滤和反馈同步 | `LangSmithObservability`、`TraceInvocation` |
+| `backend/app/evaluation/` | 确定性评估器、独立 Judge 和无生产写入的评测目标 | `DETERMINISTIC_EVALUATORS`、`LegalQualityJudge` |
 | `backend/app/schemas.py` | API 输入校验模型 | `ConversationCreate`、`ChatRequest`、`MemoryUpdate` |
 | `mcp_servers/law_rag/` | 法规切分、BM25、Dense、索引生命周期和 MCP 工具 | `LawSearchEngine`、`search_laws`、`get_law_article` |
 | `frontend/src/` | React 响应式工作台、用户/会话隔离、Markdown 消息、完整 SSE 状态和索引状态展示 | `App.tsx::App`、`api.ts::api`、`sse.ts::consumeSse` |
@@ -238,6 +242,7 @@ get_law_article(law_name: string, article_number: string)
 | `tool_call_records` | 工具调用数据库审计 | 保存用户、会话、参数、结果摘要、状态和耗时 |
 | `retrieval_traces` | 法规检索追踪 | 保存用户、会话、查询及截断结果 |
 | `index_manifests` | 已构建索引版本记录 | `data_version` 唯一 |
+| `message_feedback` | 助手消息的本地反馈与 LangSmith 同步状态 | `tenant_id + user_id + message_id` 唯一 |
 
 模型定义：`backend/app/db/models.py`。数据库会话：`backend/app/db/session.py::SessionLocal`。
 
@@ -260,6 +265,7 @@ get_law_article(law_name: string, article_number: string)
 | `DELETE /api/memories/{id}` | 删除当前用户单条记忆 | 必须 |
 | `DELETE /api/memories` | 清空当前用户全部或指定会话记忆 | 必须 |
 | `GET /api/memory-jobs/{id}` | 查询当前用户的后台记忆整理状态 | 必须 |
+| `POST /api/messages/{id}/feedback` | 当前用户对所属助手消息点赞或点踩 | 必须 |
 | `/mcp/` | Streamable HTTP MCP | Agent 内部使用 |
 
 ## 10. 技术选型
@@ -282,6 +288,7 @@ get_law_article(law_name: string, article_number: string)
 | 前端网络层 | 原生 `fetch` + `ReadableStream` | 类型化 REST 封装和完整 SSE 事件消费；不使用 TanStack Query |
 | 前端内容/图标 | react-markdown + remark-gfm + lucide-react | 禁止原始 HTML 的 Markdown 展示和一致的矢量图标 |
 | 日志 | Python logging + `RotatingFileHandler` | 控制台和 JSONL 文件审计 |
+| 模型可观测与评估 | LangSmith + `LangChainTracer` | Agent/记忆 trace、实验、确定性/LLM Judge 和用户反馈 |
 | 测试/质量 | pytest、pytest-asyncio、ruff、Vitest、Testing Library | 后端单元/异步测试及前端交互、SSE 测试 |
 | 容器 | Docker 多阶段构建 + Docker Compose | Node 构建前端、Python 运行单容器应用 |
 
@@ -395,6 +402,16 @@ INDEX_BUILD_BATCH_SIZE
 
 **[已实现]** 文件日志和数据库工具审计均执行正文最小化：参数只保存脱敏摘要，结果只保存数量、document ID、法律名称、条号和字符数。正式上线前仍须确定审计留存周期和清理策略。
 
+### 13.3 LangSmith 可观测与评估
+
+- **[已实现]** `LangSmithObservability` 在应用生命周期复用 Client；显式 callback 将 LangGraph、模型和 MCP Tool 组织为嵌套 trace，记忆任务使用独立项目标签。
+- **[已实现]** 采样基于 `request_id` 稳定哈希；高风险、工具不可用和失败的未采样请求补充 summary trace。LangSmith 异常不得中断业务。
+- **[已实现]** 租户、用户、会话标识以 HMAC-SHA256 上报；API Key、Authorization、Cookie、数据库 URL 和 `reasoning_content` 强制过滤。正文由 `LANGSMITH_CAPTURE_CONTENT` 控制。
+- **[已实现]** `evals/datasets/` 保存 60 条合成基准；组件模式使用固定工具结果，live 模式调用真实 MCP。评测目标不写正式消息、记忆或工具审计。
+- **[已实现]** 评估器覆盖路由、Schema、召回、引用、no_match、轨迹、循环、最新事实和隔离；独立非 Thinking Judge 输出结构化评分。
+- **[已实现]** 用户反馈先写 `message_feedback`，再异步同步 LangSmith；越权消息 ID 统一返回不存在或无权访问。
+- **[需配置]** 云端数据集、在线 evaluator、费用规则和 Annotation Queue 需配置 API Key 后初始化。
+
 ## 14. 开发要求与准则
 
 ### 14.1 必须做的事
@@ -441,6 +458,8 @@ INDEX_BUILD_BATCH_SIZE
 - `tests/test_law_sample.py`：样本数量、来源一致性、可复现性和默认路径。
 - `tests/test_index_manager.py`：有效索引跳过 Embedding、强制重建和稳定 chunk ID。
 - `tests/test_audit_logging.py`：敏感信息脱敏和摘要长度。
+- `tests/test_langsmith_observability.py`：trace 内容过滤、稳定采样/哈希和关键 evaluator。
+- `tests/test_feedback.py`：消息反馈所有权和本地优先持久化。
 - `tests/test_run.py`：前端过期检测与 `--no-build` 失败语义。
 - `frontend/src/test/sse.test.ts`：分块 SSE、全部事件解析和 HTTP 错误语义。
 - `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、引用边界、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
@@ -475,9 +494,9 @@ INDEX_BUILD_BATCH_SIZE
 ### P1：核心体验与质量
 
 - 增加记忆来源消息跳转、自动替换提示和冲突历史并排对比。
-- 建立记忆抽取与摘要质量评测集，监控错误沉淀率和摘要事实保持率。
+- 扩充当前记忆基准，增加摘要事实保持率和错误沉淀率指标。
 - 扩展 citations 展示和法规原文定位能力；当前已展示法律名称、条号并保存证据摘要。
-- 增加 RAG 评测集，衡量召回率、法条准确率和无依据回答率。
+- 用全量正式法规标注扩充当前合成 RAG 基准并持续校准 Recall@5 门槛。
 
 ### P2：检索与部署演进
 
@@ -501,6 +520,8 @@ INDEX_BUILD_BATCH_SIZE
 9. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
 10. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
 11. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
+12. `backend/app/observability/langsmith.py::LangSmithObservability`：采样、隐私过滤、trace 与反馈。
+13. `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`：发布质量门禁。
 
 ## 18. Spec 维护规则
 
@@ -521,3 +542,4 @@ INDEX_BUILD_BATCH_SIZE
 - **1.7 / 2026-08-21**：将记忆抽取和摘要从 Function Calling 改为独立非 Thinking JSON Output；空记忆正常完成，增加错误分类、有限重试和历史兼容失败任务恢复。
 - **1.8 / 2026-08-21**：新抽取记忆通过校验后直接生效，无需用户确认；同语义键冲突由新记录自动替换旧记录，历史待确认数据保持原状以避免批量误激活。
 - **1.9 / 2026-08-21**：最新事实冲突改为模型建议、服务端验证的原位替换；主表只保留最新事实，旧内容进入修订审计，三 Agent 明确优先采用本轮用户消息。
+- **2.0 / 2026-08-21**：接入集中式 LangSmith 追踪、HMAC 身份隔离和敏感字段过滤；增加 60 条合成基准、确定性/独立 Judge 评估、实验脚本、反馈持久化与前端赞踩闭环。

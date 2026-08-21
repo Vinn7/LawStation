@@ -1,4 +1,4 @@
-import { BookOpen, CircleStop, Scale, Sparkles, UserRound } from 'lucide-react';
+import { BookOpen, CircleStop, Scale, Sparkles, ThumbsDown, ThumbsUp, UserRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,10 +15,30 @@ interface MessageListProps {
   loading: boolean;
   conversationSelected: boolean;
   onSuggestion: (question: string) => void;
+  onFeedback: (messageId: string, score: -1 | 1, comment?: string) => Promise<void>;
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({
+  message,
+  onFeedback,
+}: {
+  message: ChatMessage;
+  onFeedback: (messageId: string, score: -1 | 1, comment?: string) => Promise<void>;
+}) {
   const assistant = message.role === 'assistant';
+  const [submitting, setSubmitting] = useState(false);
+  const [comment, setComment] = useState('');
+  const [commentOpen, setCommentOpen] = useState(false);
+
+  async function vote(score: -1 | 1, detail = '') {
+    setSubmitting(true);
+    try {
+      await onFeedback(message.id, score, detail);
+      if (score < 0) setCommentOpen(true);
+    } finally {
+      setSubmitting(false);
+    }
+  }
   return (
     <article className={`message-row is-${message.role}`}>
       <span className="message-avatar" aria-hidden="true">
@@ -48,12 +68,43 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         {message.status === 'error' && (
           <span className="message-status is-error">回答生成失败</span>
         )}
+        {assistant && message.status === 'complete' && !message.id.startsWith('assistant-') && (
+          <div className="message-feedback" aria-label="评价回答">
+            <button
+              type="button"
+              className={message.feedback_score === 1 ? 'is-selected' : ''}
+              aria-label="回答有帮助"
+              disabled={submitting}
+              onClick={() => void vote(1)}
+            ><ThumbsUp size={14} /></button>
+            <button
+              type="button"
+              className={message.feedback_score === -1 ? 'is-selected' : ''}
+              aria-label="回答需改进"
+              disabled={submitting}
+              onClick={() => void vote(-1)}
+            ><ThumbsDown size={14} /></button>
+            {message.feedback_score && <span>感谢反馈</span>}
+            {commentOpen && message.feedback_score === -1 && (
+              <form onSubmit={(event) => { event.preventDefault(); void vote(-1, comment.trim()); }}>
+                <input
+                  aria-label="反馈说明"
+                  value={comment}
+                  maxLength={1000}
+                  placeholder="可选：告诉我们哪里需要改进"
+                  onChange={(event) => setComment(event.target.value)}
+                />
+                <button type="submit" disabled={submitting || !comment.trim()}>提交说明</button>
+              </form>
+            )}
+          </div>
+        )}
       </div>
     </article>
   );
 }
 
-export function MessageList({ messages, loading, conversationSelected, onSuggestion }: MessageListProps) {
+export function MessageList({ messages, loading, conversationSelected, onSuggestion, onFeedback }: MessageListProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const contentSignature = messages.map((message) => `${message.id}:${message.content.length}:${message.status}`).join('|');
@@ -93,7 +144,7 @@ export function MessageList({ messages, loading, conversationSelected, onSuggest
             </div>
           </section>
         )}
-        {!loading && messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+        {!loading && messages.map((message) => <MessageBubble key={message.id} message={message} onFeedback={onFeedback} />)}
       </div>
     </div>
   );

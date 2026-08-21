@@ -24,6 +24,7 @@ export interface ChatMessage {
   status?: MessageStatus;
   created_at?: string;
   citations?: Citation[];
+  feedback_score?: -1 | 1 | null;
 }
 
 export interface Citation {

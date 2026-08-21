@@ -269,7 +269,8 @@ export default function App() {
       const citations = raw.filter((citation): citation is Citation => Boolean(citation && typeof citation === 'object'));
       updateAssistant(snapshot, (message) => ({ ...message, citations }));
     } else if (item.event === 'message_end') {
-      updateAssistant(snapshot, (message) => ({ ...message, status: 'complete' }));
+      const data = item.data as { message_id?: string };
+      updateAssistant(snapshot, (message) => ({ ...message, id: data.message_id ?? message.id, status: 'complete' }));
       const visible = currentSelection.current.userId === snapshot.userId && currentSelection.current.conversationId === snapshot.conversationId;
       updateRuntime(snapshot.key, (runtime) => ({
         ...runtime,
@@ -388,6 +389,18 @@ export default function App() {
     setDrafts((current) => ({ ...current, [draftKey]: value }));
   }
 
+  async function submitFeedback(messageId: string, score: -1 | 1, comment = '') {
+    if (!userId || !selectedKey) return;
+    await api.messageFeedback(userId, messageId, score, comment);
+    updateRuntime(selectedKey, (runtime) => ({
+      ...runtime,
+      messages: runtime.messages.map((message) => (
+        message.id === messageId ? { ...message, feedback_score: score } : message
+      )),
+      updatedAt: Date.now(),
+    }), { userId, conversationId });
+  }
+
   const agentActivity: AgentActivity | null = selectedRuntime?.activeAgent && selectedRuntime.statusMessage
     ? { agent: selectedRuntime.activeAgent, status: selectedRuntime.status, message: selectedRuntime.statusMessage }
     : null;
@@ -421,6 +434,7 @@ export default function App() {
           loading={Boolean(selectedRuntime?.loading)}
           conversationSelected={Boolean(conversationId)}
           onSuggestion={setDraft}
+          onFeedback={submitFeedback}
         />
         <div className="bottom-dock">
           <StatusNotice

@@ -3,7 +3,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,9 +17,15 @@ from backend.app.agent.concurrency import (
 from backend.app.agent.service import AgentService
 from backend.app.core.context import RequestUserContext, get_user_context
 from backend.app.core.logging import audit, summary
-from backend.app.db.models import Conversation, MemoryJob, Message, User
+from backend.app.db.models import Conversation, MemoryJob, Message, MessageFeedback, User
 from backend.app.db.session import SessionLocal, get_db
-from backend.app.schemas import ChatRequest, ConversationCreate, MemoryUpdate, MemoryVersionRequest
+from backend.app.schemas import (
+    ChatRequest,
+    ConversationCreate,
+    MemoryUpdate,
+    MemoryVersionRequest,
+    MessageFeedbackRequest,
+)
 from backend.app.services.memory import MemoryService
 from backend.app.services.repositories import OwnedRepository
 from mcp_servers.law_rag.server import get_index_status
@@ -59,7 +65,16 @@ def messages(conversation_id: str, ctx=Depends(get_user_context), db=Depends(get
     repo = OwnedRepository(db, ctx)
     if not repo.conversation(conversation_id):
         raise HTTPException(404, "会话不存在或无权访问")
-    return [obj(item) for item in repo.messages(conversation_id)]
+    items = repo.messages(conversation_id)
+    feedback_by_message = {
+        item.message_id: item.score
+        for item in db.scalars(select(MessageFeedback).where(
+            MessageFeedback.tenant_id == ctx.tenant_id,
+            MessageFeedback.user_id == ctx.user_id,
+            MessageFeedback.message_id.in_([message.id for message in items]),
+        ))
+    } if items else {}
+    return [{**obj(item), "feedback_score": feedback_by_message.get(item.id)} for item in items]
 
 
 @router.get("/memories")
@@ -184,6 +199,7 @@ def _save_assistant(
     conversation_id: str,
     content: str,
     status: str,
+    langsmith_trace_id: str | None = None,
 ) -> Message:
     with SessionLocal() as db:
         assistant = Message(
@@ -193,10 +209,80 @@ def _save_assistant(
             role="assistant",
             content=content,
             status=status,
+            langsmith_trace_id=langsmith_trace_id,
         )
         db.add(assistant)
         db.commit()
         return assistant
+
+
+async def _sync_message_feedback(app, feedback_id: str) -> None:
+    with SessionLocal() as db:
+        feedback = db.get(MessageFeedback, feedback_id)
+        if not feedback:
+            return
+        trace_id = feedback.langsmith_trace_id or ""
+        score = feedback.score
+        comment = feedback.comment
+    synced = await app.state.langsmith_observability.create_user_feedback(
+        trace_id=trace_id, score=score, comment=comment
+    )
+    with SessionLocal() as db:
+        feedback = db.get(MessageFeedback, feedback_id)
+        if feedback:
+            feedback.sync_status = "synced" if synced else "unavailable"
+            feedback.last_error = "" if synced else "LangSmith 当前不可用或该消息没有 trace"
+            db.commit()
+
+
+@router.post("/messages/{message_id}/feedback")
+async def message_feedback(
+    message_id: str,
+    payload: MessageFeedbackRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    ctx=Depends(get_user_context),
+    db=Depends(get_db),
+):
+    message = db.scalar(select(Message).where(
+        Message.id == message_id,
+        Message.tenant_id == ctx.tenant_id,
+        Message.user_id == ctx.user_id,
+        Message.role == "assistant",
+    ))
+    if not message:
+        raise HTTPException(404, "消息不存在或无权访问")
+    feedback = db.scalar(select(MessageFeedback).where(
+        MessageFeedback.tenant_id == ctx.tenant_id,
+        MessageFeedback.user_id == ctx.user_id,
+        MessageFeedback.message_id == message_id,
+    ))
+    if feedback is None:
+        feedback = MessageFeedback(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            message_id=message_id,
+        )
+        db.add(feedback)
+    feedback.score = payload.score
+    feedback.comment = payload.comment.strip()
+    feedback.langsmith_trace_id = message.langsmith_trace_id
+    feedback.sync_status = "pending"
+    feedback.last_error = ""
+    db.commit()
+    db.refresh(feedback)
+    audit(
+        "message.feedback.saved",
+        request_id=ctx.request_id,
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        conversation_id=message.conversation_id,
+        message_id=message.id,
+        score=payload.score,
+        status="saved",
+    )
+    background_tasks.add_task(_sync_message_feedback, request.app, feedback.id)
+    return {"ok": True, "sync_status": feedback.sync_status}
 
 
 @router.post("/conversations/{conversation_id}/messages/stream")
@@ -250,7 +336,8 @@ async def stream_message(
                     yield sse(item["event"], item["data"])
             persisted_answer = agent.final_answer or "".join(answer)
             assistant = await asyncio.to_thread(
-                _save_assistant, ctx, conversation_id, persisted_answer, "complete"
+                _save_assistant, ctx, conversation_id, persisted_answer, "complete",
+                agent.langsmith_trace_id,
             )
             job = await asyncio.to_thread(
                 request.app.state.memory_tasks.enqueue,
@@ -260,21 +347,23 @@ async def stream_message(
             )
             audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_job_id=job.id, tool_call_count=agent.tool_call_count, model_call_count=agent.model_call_count)
             yield sse("memory_status", {"status": "pending", "job_id": job.id})
-            yield sse("message_end", {"message_id": assistant.id})
+            yield sse("message_end", {"message_id": assistant.id, "trace_available": bool(agent.langsmith_trace_id)})
         except AgentQueueTimeoutError as exc:
             audit("conversation.failed", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="queue_timeout", duration_ms=int((time.perf_counter()-started)*1000))
             yield sse("error", {"message": str(exc)})
         except asyncio.CancelledError:
             if answer:
                 await asyncio.to_thread(
-                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted"
+                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted",
+                    agent.langsmith_trace_id,
                 )
             audit("conversation.interrupted", level=logging.WARNING, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="interrupted", duration_ms=int((time.perf_counter()-started)*1000), answer_chars=len("".join(answer)))
             raise
         except Exception as exc:
             if answer:
                 await asyncio.to_thread(
-                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted"
+                    _save_assistant, ctx, conversation_id, "".join(answer), "interrupted",
+                    agent.langsmith_trace_id,
                 )
             audit("conversation.failed", level=logging.ERROR, request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="failed", duration_ms=int((time.perf_counter()-started)*1000), error_type=type(exc).__name__, error=summary(str(exc)))
             yield sse("error", {"message": str(exc)})

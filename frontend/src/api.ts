@@ -59,6 +59,12 @@ export const api = {
     request<void>(`/memories/${memoryId}`, userId, { method: 'DELETE' }),
   memoryJob: (userId: string, jobId: string, signal?: AbortSignal) =>
     request<MemoryJob>(`/memory-jobs/${jobId}`, userId, { signal }),
+  messageFeedback: (userId: string, messageId: string, score: -1 | 1, comment = '') =>
+    request<{ ok: boolean; sync_status: string }>(`/messages/${messageId}/feedback`, userId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ score, comment }),
+    }),
   streamMessage: (userId: string, conversationId: string, content: string, signal: AbortSignal) =>
     fetch(`${API}/conversations/${conversationId}/messages/stream`, {
       method: 'POST',

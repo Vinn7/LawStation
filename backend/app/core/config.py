@@ -56,6 +56,23 @@ class Settings(BaseSettings):
     index_chunk_max_chars: int = 1000
     index_chunk_overlap_chars: int = 150
     index_build_batch_size: int = 20
+    langsmith_enabled: bool = False
+    langsmith_api_key: str = ""
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_workspace_id: str = ""
+    langsmith_project: str = "lawstation"
+    langsmith_environment: str = "development"
+    langsmith_capture_content: bool = True
+    langsmith_id_hash_secret: str = ""
+    langsmith_trace_sample_rate: float = 1.0
+    langsmith_error_trace_enabled: bool = True
+    langsmith_flush_timeout_seconds: float = 5.0
+    langsmith_evaluator_model: str = ""
+    langsmith_evaluator_base_url: str = ""
+    langsmith_evaluator_api_key: str = ""
+    langsmith_evaluator_temperature: float = 0.0
+    langsmith_online_eval_sample_rate: float = 0.05
+    langsmith_annotation_queue_id: str = ""
 
 
 @lru_cache

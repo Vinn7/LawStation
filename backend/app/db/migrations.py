@@ -8,7 +8,7 @@ from alembic import command
 from backend.app.core.config import Settings, get_settings
 
 ROOT = Path(__file__).resolve().parents[3]
-TARGET_REVISION = "20260821_03"
+TARGET_REVISION = "20260821_04"
 
 
 def _sqlite_path(database_url: str) -> Path | None:

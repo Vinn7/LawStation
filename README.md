@@ -72,6 +72,32 @@ python scripts/build_index.py --force
 
 控制台审计事件同时以 JSON Lines 追加到 `data/logs/lawstation.log`。默认单文件 20 MB、保留 10 个备份；日志只保存脱敏摘要和工具结果标识，不记录密钥或完整法条正文。
 
+## LangSmith 追踪与评估
+
+LangSmith 默认关闭。启用前在 `.env` 至少配置：
+
+```dotenv
+LANGSMITH_ENABLED=true
+LANGSMITH_API_KEY=你的密钥
+LANGSMITH_ID_HASH_SECRET=一个独立的高强度随机字符串
+LANGSMITH_PROJECT=lawstation
+LANGSMITH_ENVIRONMENT=development
+```
+
+咨询 Graph 和记忆整理分别进入 `lawstation-<环境>-agent` 和 `lawstation-<环境>-memory` 项目。租户、用户和会话 ID 只以 HMAC 哈希发送；API Key、请求头、数据库地址和模型内部推理始终过滤。设置 `LANGSMITH_CAPTURE_CONTENT=false` 可隐藏 trace 输入输出。LangSmith 异常不会阻断咨询，`/health` 只暴露启用与导出状态。
+
+仓库提供 5 组、共 60 条合成基准样本：
+
+```bash
+python scripts/create_eval_datasets.py
+python scripts/seed_langsmith_datasets.py
+python scripts/run_langsmith_eval.py --dataset lawstation-e2e-v1 --mode component
+python scripts/run_langsmith_eval.py --dataset lawstation-e2e-v1 --mode live --judge
+python scripts/run_langsmith_eval.py --compare baseline-experiment current-experiment
+```
+
+`component` 使用固定法规工具结果；`live` 调用当前 MCP 和真实模型，运行前需要应用已启动。`--fail-on-threshold` 可启用发布门禁。助手回答的赞踩先写入 SQLite，再异步同步 LangSmith；配置 `LANGSMITH_ANNOTATION_QUEUE_ID` 后，点踩会加入人工标注队列。
+
 ## 分层记忆
 
 - 当前案件事实只在所属会话使用；用户偏好和稳定背景可以跨该用户的会话复用。

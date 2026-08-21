@@ -15,6 +15,7 @@ from backend.app.db.migrations import upgrade_database
 from backend.app.db.models import Tenant, User
 from backend.app.db.session import Base, SessionLocal, engine
 from backend.app.services.memory_tasks import MemoryTaskManager
+from backend.app.observability import LangSmithObservability
 from mcp_servers.law_rag.server import (
     close_engine,
     get_index_status,
@@ -50,10 +51,12 @@ async def lifespan(app: FastAPI):
     await initialize_engine()
     registry = MCPToolRegistry()
     provider = LLMProvider()
+    observability = LangSmithObservability()
+    app.state.langsmith_observability = observability
     app.state.mcp_tool_registry = registry
-    app.state.agent_runtime = AgentRuntime(registry, provider)
+    app.state.agent_runtime = AgentRuntime(registry, provider, observability=observability)
     app.state.agent_concurrency = AgentConcurrencyManager()
-    app.state.memory_tasks = MemoryTaskManager(provider)
+    app.state.memory_tasks = MemoryTaskManager(provider, observability=observability)
     await app.state.memory_tasks.start()
     async with mcp.session_manager.run():
         audit("application.started", status="ready")
@@ -62,6 +65,7 @@ async def lifespan(app: FastAPI):
         finally:
             await app.state.memory_tasks.close()
             await app.state.agent_runtime.close()
+            await observability.close()
             await close_engine()
             audit("application.stopped", status="stopped")
 
@@ -80,7 +84,8 @@ app.include_router(router)
 @app.get("/health")
 def health():
     index = get_index_status()
-    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False)}
+    langsmith = getattr(app.state, "langsmith_observability", None)
+    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False), "langsmith": langsmith.status() if langsmith else {"enabled": False, "export_status": "uninitialized"}}
 
 
 app.mount("/mcp", mcp_app)

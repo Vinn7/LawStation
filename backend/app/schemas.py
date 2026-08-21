@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -16,3 +18,8 @@ class MemoryUpdate(BaseModel):
 
 class MemoryVersionRequest(BaseModel):
     version: int = Field(ge=1)
+
+
+class MessageFeedbackRequest(BaseModel):
+    score: Literal[-1, 1]
+    comment: str = Field(default="", max_length=1000)

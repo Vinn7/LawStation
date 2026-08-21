@@ -22,6 +22,7 @@ class AgentService:
         self.tool_call_count = 0
         self.model_call_count = 0
         self.final_answer = ""
+        self.langsmith_trace_id: str | None = None
 
     async def run(self, memory_context: str, history, question: str) -> AsyncIterator[dict]:
         messages = []
@@ -39,10 +40,25 @@ class AgentService:
                 conversation_id=self.conversation_id,
             ),
         )
-        async for item in self.runtime.stream(invocation, messages, memory_context):
-            if item["event"] == "agent_final":
-                self.final_answer = item["data"]
-            else:
-                yield item
+        try:
+            async for item in self.runtime.stream(invocation, messages, memory_context):
+                if item["event"] == "agent_final":
+                    self.final_answer = item["data"]
+                else:
+                    yield item
+        except Exception as exc:
+            if invocation.langsmith_trace_id is None:
+                invocation.langsmith_trace_id = await self.runtime.observability.force_outcome_trace(
+                    request_id=self.ctx.request_id,
+                    tenant_id=self.ctx.tenant_id,
+                    user_id=self.ctx.user_id,
+                    conversation_id=self.conversation_id,
+                    question=question,
+                    outcome={"status": "failed"},
+                    error=type(exc).__name__,
+                )
+            self.langsmith_trace_id = invocation.langsmith_trace_id
+            raise
         self.tool_call_count = invocation.metrics.tool_call_count
         self.model_call_count = invocation.metrics.model_call_count
+        self.langsmith_trace_id = invocation.langsmith_trace_id
