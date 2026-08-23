@@ -1,5 +1,7 @@
 # LawStation Memory 模块设计与实现
 
+> Review 状态：**已验证**。本文按 2026-08-23 当前代码更新；关键链路由 `MemoryService.context`、`MemoryTaskManager`、`OwnedRepository`、数据库模型和 `tests/test_memory.py` 交叉确认。
+
 ## 1. 模块定位
 
 LawStation 的 Memory 模块不是简单地把全部聊天记录重复放入 Prompt，而是一套基于 SQLite 的分层、结构化、用户隔离记忆系统。
@@ -409,9 +411,9 @@ WHERE id = :memory_id
 
 ## 11. 当前不足与演进方向
 
-### 11.1 遗留的 `MemoryService.consolidate`
+### 11.1 已封存的 `MemoryService.consolidate`
 
-`MemoryService.consolidate` 是早期的截断拼接方案，目前主链路没有调用。实际链路是：
+`MemoryService.consolidate` 是早期的截断拼接方案，当前已经改为明确抛出弃用异常；静态测试保证业务代码不会调用。实际唯一整理链路是：
 
 ```text
 MemoryTaskManager._process
@@ -419,7 +421,7 @@ MemoryTaskManager._process
 → _update_summary
 ```
 
-该方法属于待清理技术债，不应作为现行设计介绍。
+该 symbol 为兼容定位而保留，但已经不能执行旧写入逻辑，不应作为现行设计介绍。
 
 ### 11.2 `MemorySnapshot` 未实际落地
 

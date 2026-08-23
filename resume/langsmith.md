@@ -1,5 +1,7 @@
 # LawStation：LangSmith 可观测与评估设计
 
+> Review 状态：生产 Trace、反馈同步、离线 evaluator、资源预算和时间戳报告均为**已验证**；独立的线上 LLM evaluator 调度器为**部分实现**，当前只有配置项，没有持续执行 Worker。
+
 ## 项目亮点
 
 我为三 Agent 法律咨询系统建立了从运行追踪、离线回归、线上监控到用户反馈回流的质量闭环，而不是只记录一次 LLM 请求。
@@ -51,6 +53,13 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 ## 用户反馈闭环
 
 回答赞踩先按 `tenant_id + user_id + message_id` 写入 SQLite，再异步同步 LangSmith。其他用户即使猜到消息 ID 也不能提交反馈。点踩 trace 可进入 Annotation Queue，经人工脱敏和标注后回流离线数据集。
+
+## 当前边界
+
+- `LANGSMITH_ONLINE_EVAL_SAMPLE_RATE` 已配置，但代码没有独立线上 evaluator 调度器，不能声称生产请求会自动持续运行 Judge。
+- `LANGSMITH_CAPTURE_CONTENT=true` 允许上传咨询正文；生产启用前必须完成隐私、数据驻留和授权评估。
+- Compare/Release 的小样本只能作为见证实验，不能替代大规模人工法律标注。
+- LangSmith 不是业务数据库或安全审计事实源，本地 JSONL 与 SQLite 反馈才承担可恢复记录。
 
 ## 面试表达
 
