@@ -1,0 +1,140 @@
+{
+  "baseline_experiment": "rag-bm25-baseline-19a8bde6",
+  "candidate_experiment": "rag-hybrid-candidate-44ab423f",
+  "baseline_run_count": 300,
+  "candidate_run_count": 300,
+  "metrics": {
+    "citation_grounding": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "citation_precision": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "completion_success": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "absolute_delta": 0.0,
+      "relative_delta": null
+    },
+    "exact_article_hit": {
+      "baseline": 0.98,
+      "candidate": 0.98,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "latest_fact_priority": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "loop_limit": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "no_match_safety": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "retrieval_mrr": {
+      "baseline": 0.9065,
+      "candidate": 0.924167,
+      "absolute_delta": 0.017667,
+      "relative_delta": 0.019489
+    },
+    "retrieval_recall_at_k": {
+      "baseline": 0.98,
+      "candidate": 0.98,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "retrieval_status_correctness": {
+      "baseline": 0.8,
+      "candidate": 0.8,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "route_correctness": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "schema_validity": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "absolute_delta": 0.0,
+      "relative_delta": null
+    },
+    "tenant_isolation": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    },
+    "tool_trajectory": {
+      "baseline": 1.0,
+      "candidate": 1.0,
+      "absolute_delta": 0.0,
+      "relative_delta": 0.0
+    }
+  },
+  "runtime_metrics": {
+    "llm_review_rate": {
+      "baseline": 0.0,
+      "candidate": 0.0
+    },
+    "mean_model_calls": {
+      "baseline": 0.0,
+      "candidate": 0.0
+    },
+    "mean_retrieval_duration_ms": {
+      "baseline": 309.811,
+      "candidate": 388.90885
+    },
+    "mean_tool_calls": {
+      "baseline": 0.0,
+      "candidate": 0.0
+    }
+  },
+  "project_stats": {
+    "baseline": {
+      "id": "c67bab62-bce6-41be-b40b-80bee284cd56",
+      "name": "rag-bm25-baseline-19a8bde6",
+      "run_count": 339,
+      "error_rate": 0.0,
+      "latency_p50": "0:00:00.342979",
+      "latency_p99": "0:00:00.491608",
+      "total_tokens": 0,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_cost": "0",
+      "prompt_cost": "0",
+      "completion_cost": "0"
+    },
+    "candidate": {
+      "id": "b25776af-11bd-4a3d-9d09-c03405f5859a",
+      "name": "rag-hybrid-candidate-44ab423f",
+      "run_count": 32,
+      "error_rate": 0.0,
+      "latency_p50": "0:00:00.404489",
+      "latency_p99": "0:00:00.514211",
+      "total_tokens": 0,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_cost": "0",
+      "prompt_cost": "0",
+      "completion_cost": "0"
+    }
+  }
+}

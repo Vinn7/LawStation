@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -77,6 +78,8 @@ class Settings(BaseSettings):
     rag_bm25_min_score: float = 0.01
     rag_dense_min_score: float = 0.20
     rag_rrf_min_score: float = 0.01
+    rag_retrieval_mode: Literal["bm25", "hybrid"] = "hybrid"
+    agent_review_mode: Literal["always-llm", "auto"] = "auto"
     sse_heartbeat_seconds: float = 15.0
     langsmith_enabled: bool = False
     langsmith_api_key: str = ""
@@ -86,15 +89,21 @@ class Settings(BaseSettings):
     langsmith_environment: str = "development"
     langsmith_capture_content: bool = True
     langsmith_id_hash_secret: str = ""
-    langsmith_trace_sample_rate: float = 1.0
+    langsmith_trace_sample_rate: float = 0.02
     langsmith_error_trace_enabled: bool = True
     langsmith_flush_timeout_seconds: float = 5.0
     langsmith_evaluator_model: str = ""
     langsmith_evaluator_base_url: str = ""
     langsmith_evaluator_api_key: str = ""
     langsmith_evaluator_temperature: float = 0.0
-    langsmith_online_eval_sample_rate: float = 0.05
+    langsmith_online_eval_sample_rate: float = 0.0
     langsmith_annotation_queue_id: str = ""
+    langsmith_monthly_production_trace_budget: int = 20
+    eval_monthly_trace_budget: int = 60
+    eval_monthly_agent_model_call_budget: int = 80
+    eval_monthly_judge_call_budget: int = 20
+    eval_resource_budget_path: str = "./data/runtime/eval-resource-budget.json"
+    langsmith_test_cache: str = "./data/runtime/langsmith-test-cache"
 
 
 @lru_cache

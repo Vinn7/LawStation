@@ -1,0 +1,18 @@
+{
+  "status": "blocked: LangSmith monthly unique traces usage limit exceeded",
+  "started_at": "2026-08-22T06:08:37.339967+00:00",
+  "completed_at": "2026-08-22T06:19:44.968221+00:00",
+  "comparisons": {
+    "RAG：BM25 vs Hybrid": {
+      "baseline": "rag-bm25-baseline-19a8bde6",
+      "candidate": "rag-hybrid-candidate-44ab423f"
+    },
+    "Reviewer Judge smoke": {
+      "experiment": "reviewer-judge-smoke-aad2e6b9",
+      "local_result": "completed",
+      "langsmith_export": "incomplete_due_to_monthly_trace_quota"
+    }
+  },
+  "resume_grade": false,
+  "blocking_condition": "LangSmith 工作区月度 unique traces 配额已耗尽；未继续消耗 DeepSeek 运行阶段 2/3"
+}

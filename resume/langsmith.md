@@ -27,9 +27,21 @@ flowchart LR
 
 ## 评测体系
 
-首期建立五类、60 条合成基准：路由、检索、回答、记忆和端到端。组件模式使用固定 MCP 返回以隔离检索波动；live 模式运行真实 DeepSeek、MCP、BM25 和 FAISS。
+首期建立 60 条合成 E2E、30 条分层 Agent 基准，并从 `law.json` 派生 100 条使用真实
+document/chunk ID 的检索回归集。检索、组件和 live 三种模式分别隔离 RAG、Agent 编排与
+真实 MCP 链路；源数据派生集明确不冒充律师人工标注。
 
 确定性指标覆盖路由与 Schema、Recall@5/MRR、引用归属、`no_match` 安全、工具轨迹、循环上限、最新事实覆盖和租户隔离。独立、可配置的非 Thinking Judge 只依据问题、EvidencePacket 和回答，评价证据一致性、事实忠实、风险校准和帮助程度。
+
+通过 `BM25-only vs BM25 + Dense + RRF` 和 `始终 LLM Reviewer vs 确定性快速复核`
+两组单变量消融实验，报告样本数、延迟、Token 和安全指标。评测采用四级渐进策略：日常用
+零外部调用的确定性回归，Smoke 不上传 Trace，Compare 只上传固定分层见证样本，Release 才
+按预算放量。月度账本为生产 Trace、评测 Trace、Agent 模型和 Judge 分别设置硬上限。
+
+完整本地 RAG 指标以数据集 SHA256、索引指纹和 Git Commit 保证可复现；LangSmith 用于查看
+少量代表性三 Agent Trace。LLM Judge 只处理确定性规则无法判断的边界样本，一次请求同时返回
+8 个质量维度。这样的设计把可重复工程回归与昂贵语义评审分开，避免为了展示可观测性而消耗
+大量 Trace 和模型额度。
 
 ## 用户反馈闭环
 
@@ -39,10 +51,13 @@ flowchart LR
 
 > 我没有把 LangSmith 当作简单日志面板，而是围绕三 Agent 的结构化状态建立质量工程体系。线上 trace 能看到分析、检索、生成和复核的完整轨迹；线下通过固定检索结果区分 Prompt 问题和 RAG 波动，并用引用归属、no-match 安全、事实一致性等确定性指标做强门禁，再用独立 Judge 评价回答质量。用户反馈本地优先持久化，LangSmith 故障不会影响主链路，低分案例经人工审核后回流为下一轮回归样本。
 
+> 为控制成本，我又把评测拆成零成本学习、本地 Smoke、小样本云端对比和按需 Release 四层。完整检索指标本地可复现，LangSmith 只保存固定见证 Trace；上传需要显式确认，并由月度预算在调用前拦截。这样既保留了实验对比与链路可观测能力，也把日常评测资源控制在可预测范围内。
+
 ## 关键代码
 
 - `backend/app/observability/langsmith.py::LangSmithObservability`
 - `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`
 - `backend/app/evaluation/judge.py::LegalQualityJudge`
 - `scripts/run_langsmith_eval.py`
+- `scripts/run_staged_langsmith_eval.py`
 - `backend/app/api/routes.py::message_feedback`

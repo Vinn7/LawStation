@@ -1,0 +1,26 @@
+{
+  "tutorial-6": {
+    "dataset": "lawstation-agent-v3",
+    "size": 6,
+    "categories": ["casual", "clarification", "matched", "no_match", "tool_error", "memory"],
+    "upload": false
+  },
+  "retrieval-witness-10": {
+    "dataset": "lawstation-live-retrieval-v1",
+    "size": 10,
+    "categories": ["matched", "no_match"],
+    "upload": true
+  },
+  "reviewer-witness-3": {
+    "dataset": "lawstation-agent-v3",
+    "size": 3,
+    "categories": ["matched", "no_match", "memory"],
+    "upload": true
+  },
+  "e2e-witness-2": {
+    "dataset": "lawstation-e2e-v2",
+    "size": 2,
+    "categories": ["matched", "no_match"],
+    "upload": true
+  }
+}

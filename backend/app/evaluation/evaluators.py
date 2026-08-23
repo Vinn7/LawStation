@@ -46,13 +46,31 @@ def schema_validity(run: Any, example: Any) -> dict[str, Any]:
 
 def retrieval_status_correctness(run: Any, example: Any) -> dict[str, Any]:
     expected = _reference(example).get("expected_retrieval_status")
-    actual = _mapping(_outputs(run).get("evidence_packet")).get("retrieval_status")
+    output = _outputs(run)
+    actual = _mapping(output.get("evidence_packet")).get("retrieval_status")
+    if actual is None:
+        actual = output.get("retrieval_status")
     return _feedback("retrieval_status_correctness", expected is None or actual == expected, f"expected={expected}, actual={actual}")
 
 
 def _ranked_documents(run: Any) -> list[str]:
-    evidence = _mapping(_outputs(run).get("evidence_packet")).get("evidence_items", [])
+    output = _outputs(run)
+    evidence = _mapping(output.get("evidence_packet")).get("evidence_items")
+    if evidence is None:
+        evidence = output.get("retrieval_results", [])
     return [str(item.get("document_id")) for item in evidence if isinstance(item, dict) and item.get("document_id")]
+
+
+def _ranked_chunks(run: Any) -> list[str]:
+    output = _outputs(run)
+    evidence = _mapping(output.get("evidence_packet")).get("evidence_items")
+    if evidence is None:
+        evidence = output.get("retrieval_results", [])
+    return [
+        str(item.get("chunk_id"))
+        for item in evidence
+        if isinstance(item, dict) and item.get("chunk_id")
+    ]
 
 
 def _evidence_keys(run: Any) -> set[str]:
@@ -80,6 +98,14 @@ def retrieval_mrr(run: Any, example: Any) -> dict[str, Any]:
         if document_id in expected:
             return _feedback("retrieval_mrr", 1 / index)
     return _feedback("retrieval_mrr", 0.0)
+
+
+def exact_article_hit(run: Any, example: Any) -> dict[str, Any]:
+    expected = {str(item) for item in _reference(example).get("expected_chunk_ids", [])}
+    if not expected:
+        return _feedback("exact_article_hit", 1.0, "no reference chunks")
+    actual = set(_ranked_chunks(run)[:5])
+    return _feedback("exact_article_hit", expected <= actual)
 
 
 def citation_grounding(run: Any, example: Any) -> dict[str, Any]:
@@ -167,6 +193,7 @@ DETERMINISTIC_EVALUATORS = [
     retrieval_status_correctness,
     retrieval_recall_at_k,
     retrieval_mrr,
+    exact_article_hit,
     citation_grounding,
     citation_precision,
     no_match_safety,

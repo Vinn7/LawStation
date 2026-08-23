@@ -1,6 +1,7 @@
 """Create deterministic, synthetic LawStation evaluation datasets."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ def example(question, category, route, status=None, documents=None, **reference)
 def law(index, name="中华人民共和国民法典"):
     return {
         "document_id": f"fixture-law-{index}",
+        "chunk_id": f"fixture-chunk-{index}",
         "law_name": name,
         "article_number": f"第{index}条",
         "content": f"与测试争议点相关的示例法条内容 {index}。",
@@ -94,7 +96,6 @@ def build():
             expected_current_fact=current,
             forbidden_old_fact=old,
         ))
-    assert len(cases) == 60
     return cases
 
 
@@ -104,14 +105,75 @@ def write(name, cases):
     path.write_text(text, encoding="utf-8")
 
 
+def fixture_analysis(item):
+    question = item["inputs"]["question"]
+    category = item["metadata"]["category"]
+    route = item["outputs"]["expected_route"]
+    if route == "research":
+        return {
+            "request_type": "legal_consultation",
+            "case_summary": question,
+            "legal_issues": [question],
+            "research_tasks": [{
+                "issue_id": "issue-1", "query": question, "purpose": "评测法律依据",
+            }],
+            "risk_level": "low" if category in {"no_match", "memory"} else "medium",
+            "next_action": "research",
+        }
+    if route == "ask_clarification":
+        return {
+            "request_type": "insufficient_information",
+            "case_summary": question,
+            "risk_level": "medium",
+            "next_action": "ask_clarification",
+            "clarification_questions": ["请补充关键事实和相关材料。"],
+        }
+    return {
+        "request_type": "casual_chat",
+        "case_summary": question,
+        "risk_level": "low",
+        "next_action": "direct_answer",
+        "direct_answer": "您好，我是 LawStation 法律咨询助手。",
+    }
+
+
 def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     cases = build()
+    assert len(cases) == 60
     write("lawstation-e2e-v1", cases)
+    live_cases = deepcopy(cases)
+    for item in live_cases:
+        # Live E2E validates orchestration and answer safety. Retrieval quality is
+        # measured separately against lawstation-live-retrieval-v1 real IDs.
+        item["inputs"]["fixture_documents"] = []
+        item["inputs"]["fixture_tool_error"] = False
+        item["outputs"]["expected_document_ids"] = []
+        item["metadata"]["live_e2e"] = True
+    write("lawstation-e2e-v2", live_cases)
     write("lawstation-routing-v1", [item for item in cases if item["metadata"]["category"] in {"casual", "clarification", "matched"}])
     write("lawstation-retrieval-v1", [item for item in cases if item["metadata"]["category"] in {"matched", "no_match", "tool_error"}])
     write("lawstation-answer-v1", [item for item in cases if item["metadata"]["category"] in {"matched", "no_match"}])
     write("lawstation-memory-v1", [item for item in cases if item["metadata"]["category"] == "memory"])
+    limits = {
+        "casual": 5,
+        "clarification": 5,
+        "matched": 10,
+        "no_match": 5,
+        "tool_error": 3,
+        "memory": 2,
+    }
+    selected = []
+    counts = {key: 0 for key in limits}
+    for item in cases:
+        category = item["metadata"]["category"]
+        if category in limits and counts[category] < limits[category]:
+            selected_item = deepcopy(item)
+            selected_item["inputs"]["fixture_case_analysis"] = fixture_analysis(item)
+            selected.append(selected_item)
+            counts[category] += 1
+    assert len(selected) == 30 and counts == limits
+    write("lawstation-agent-v3", selected)
 
 
 if __name__ == "__main__":

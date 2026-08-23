@@ -119,6 +119,7 @@ class AgentRuntime:
             ],
             "tool_call_count": context.metrics.tool_call_count,
             "model_call_count": context.metrics.model_call_count,
+            "review_mode": context.metrics.review_mode,
             "tool_trajectory": list(context.metrics.tool_trajectory),
             "retry_count": int(final_state.get("retry_count") or 0),
             "revision_count": int(final_state.get("revision_count") or 0),

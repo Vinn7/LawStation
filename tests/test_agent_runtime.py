@@ -28,7 +28,7 @@ from backend.app.agent.middleware import result_metadata
 from backend.app.agent.provider import AgentConfigurationError, LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
-from backend.app.agent.schemas import CounselDraft, EvidenceItem, EvidencePacket
+from backend.app.agent.schemas import CaseAnalysis, CounselDraft, EvidenceItem, EvidencePacket
 from backend.app.agent.service import AgentService
 from backend.app.agent.state import AgentInvocationContext, AgentInvocationIdentity
 from backend.app.core.config import Settings
@@ -458,3 +458,26 @@ def test_deterministic_review_rejects_law_article_outside_evidence_packet():
 
     assert not any("劳动合同法" in error for error in errors)
     assert any("《民法典》第五百条" in error for error in errors)
+
+
+def test_case_analysis_normalizes_nullable_optional_model_fields():
+    analysis = CaseAnalysis.model_validate({
+        "request_type": "legal_consultation",
+        "case_summary": None,
+        "jurisdiction": None,
+        "legal_domain": None,
+        "key_facts": None,
+        "missing_facts": None,
+        "legal_issues": None,
+        "research_tasks": None,
+        "next_action": "research",
+        "direct_answer": None,
+        "clarification_questions": None,
+    })
+
+    assert analysis.case_summary == ""
+    assert analysis.jurisdiction == "中国大陆"
+    assert analysis.legal_domain == "其他"
+    assert analysis.direct_answer == ""
+    assert analysis.key_facts == []
+    assert analysis.research_tasks == []

@@ -1,0 +1,15 @@
+metric,sample_count,mean,standard_deviation,pass_rate
+citation_grounding,300,1.0,0.0,1.0
+citation_precision,300,1.0,0.0,1.0
+completion_success,300,0.0,0.0,0.0
+exact_article_hit,300,0.98,0.14,0.98
+latest_fact_priority,300,1.0,0.0,1.0
+loop_limit,300,1.0,0.0,1.0
+no_match_safety,300,1.0,0.0,1.0
+retrieval_mrr,300,0.9065,0.240865,0.86
+retrieval_recall_at_k,300,0.98,0.14,0.98
+retrieval_status_correctness,300,0.8,0.4,0.8
+route_correctness,300,1.0,0.0,1.0
+schema_validity,300,0.0,0.0,0.0
+tenant_isolation,300,1.0,0.0,1.0
+tool_trajectory,300,1.0,0.0,1.0

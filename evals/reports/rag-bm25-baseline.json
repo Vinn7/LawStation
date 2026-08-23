@@ -1,0 +1,141 @@
+{
+  "experiment_name": "rag-bm25-baseline-19a8bde6",
+  "dataset": "lawstation-live-retrieval-v1",
+  "mode": "retrieval",
+  "rag_mode": "bm25",
+  "review_mode": "auto",
+  "repetitions": 3,
+  "run_count": 300,
+  "started_at": "2026-08-22T05:57:37.700432+00:00",
+  "completed_at": "2026-08-22T05:59:05.618049+00:00",
+  "metadata": {
+    "git_commit": "5c2b76a808ac82e833566a8c2cf899b3624e7973",
+    "mode": "retrieval",
+    "graph_version": "three-agent-v2-chunk-evidence-fast-review",
+    "prompt_version": "legal-consultation-v2-no-match-safe",
+    "model": "deepseek-v4-flash",
+    "models": "deepseek-v4-flash",
+    "prompts": [
+      "legal-consultation-v2-no-match-safe"
+    ],
+    "tools": [
+      {
+        "name": "search_laws"
+      },
+      {
+        "name": "get_law_article"
+      }
+    ],
+    "embedding_model": "qwen3-embedding:0.6b",
+    "law_data_version": "9c95a6fe9f682fd3ca41d097e8b7463180503620d39e4b724a381f9fde718f0d",
+    "rag_mode": "bm25",
+    "review_mode": "auto"
+  },
+  "metrics": {
+    "route_correctness": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "schema_validity": {
+      "sample_count": 300,
+      "mean": 0.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    },
+    "retrieval_status_correctness": {
+      "sample_count": 300,
+      "mean": 0.8,
+      "standard_deviation": 0.4,
+      "pass_rate": 0.8
+    },
+    "retrieval_recall_at_k": {
+      "sample_count": 300,
+      "mean": 0.98,
+      "standard_deviation": 0.14,
+      "pass_rate": 0.98
+    },
+    "retrieval_mrr": {
+      "sample_count": 300,
+      "mean": 0.9065,
+      "standard_deviation": 0.240865,
+      "pass_rate": 0.86
+    },
+    "exact_article_hit": {
+      "sample_count": 300,
+      "mean": 0.98,
+      "standard_deviation": 0.14,
+      "pass_rate": 0.98
+    },
+    "citation_grounding": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "citation_precision": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "no_match_safety": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "tool_trajectory": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "loop_limit": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "latest_fact_priority": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "tenant_isolation": {
+      "sample_count": 300,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "completion_success": {
+      "sample_count": 300,
+      "mean": 0.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    }
+  },
+  "runtime_metrics": {
+    "mean_model_calls": 0.0,
+    "mean_tool_calls": 0.0,
+    "llm_review_rate": 0.0,
+    "mean_retrieval_duration_ms": 309.811
+  },
+  "project_stats": {
+    "id": "c67bab62-bce6-41be-b40b-80bee284cd56",
+    "name": "rag-bm25-baseline-19a8bde6",
+    "run_count": 339,
+    "error_rate": 0.0,
+    "latency_p50": "0:00:00.342979",
+    "latency_p99": "0:00:00.491608",
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_cost": "0",
+    "prompt_cost": "0",
+    "completion_cost": "0"
+  },
+  "missing_required_metrics": []
+}

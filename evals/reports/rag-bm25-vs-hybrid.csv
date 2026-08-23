@@ -1,0 +1,15 @@
+metric,baseline,candidate,absolute_delta,relative_delta
+citation_grounding,1.0,1.0,0.0,0.0
+citation_precision,1.0,1.0,0.0,0.0
+completion_success,0.0,0.0,0.0,
+exact_article_hit,0.98,0.98,0.0,0.0
+latest_fact_priority,1.0,1.0,0.0,0.0
+loop_limit,1.0,1.0,0.0,0.0
+no_match_safety,1.0,1.0,0.0,0.0
+retrieval_mrr,0.9065,0.924167,0.017667,0.019489
+retrieval_recall_at_k,0.98,0.98,0.0,0.0
+retrieval_status_correctness,0.8,0.8,0.0,0.0
+route_correctness,1.0,1.0,0.0,0.0
+schema_validity,0.0,0.0,0.0,
+tenant_isolation,1.0,1.0,0.0,0.0
+tool_trajectory,1.0,1.0,0.0,0.0

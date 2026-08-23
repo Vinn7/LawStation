@@ -443,10 +443,13 @@ SSE_HEARTBEAT_SECONDS
 ### 13.3 LangSmith 可观测与评估
 
 - **[已实现]** `LangSmithObservability` 在应用生命周期复用 Client；显式 callback 将 LangGraph、模型和 MCP Tool 组织为嵌套 trace，记忆任务使用独立项目标签。
-- **[已实现]** 采样基于 `request_id` 稳定哈希；高风险、工具不可用和失败的未采样请求补充 summary trace。LangSmith 异常不得中断业务。
+- **[已实现]** 采样基于 `request_id` 稳定哈希，生产成功请求默认采样 2%；高风险、工具不可用和失败的未采样请求可补充 summary trace，但生产 Trace 月度预算耗尽后停止上报。LangSmith 异常或预算耗尽不得中断业务。
 - **[已实现]** 租户、用户、会话标识以 HMAC-SHA256 上报；API Key、Authorization、Cookie、数据库 URL 和 `reasoning_content` 强制过滤。正文由 `LANGSMITH_CAPTURE_CONTENT` 控制。
-- **[已实现]** `evals/datasets/` 保存 60 条合成基准；组件模式使用固定工具结果，live 模式调用真实 MCP。评测目标不写正式消息、记忆或工具审计。
+- **[已实现]** `evals/datasets/` 保存 60 条合成 E2E、30 条分层 Agent 基准和 100 条引用真实 document/chunk ID 的源数据派生检索集；retrieval/component/live 分别隔离评估 RAG、Agent 编排和真实 MCP 链路。源数据派生集必须标记 `human_verified=false`，不得冒充律师人工标注。
 - **[已实现]** 评估器覆盖路由、Schema、召回、引用、no_match、轨迹、循环、最新事实和隔离；独立非 Thinking Judge 输出结构化评分。
+- **[已实现]** 评测采用 learn、smoke、compare、release 四级渐进模式；默认 learn 不访问外部服务，smoke 不上传 Trace，云端上传必须显式确认。Compare 默认只执行 10 条检索、3 条 Reviewer 和 2 条 E2E 双组见证样本。
+- **[已实现]** 月度预算账本分别限制评测 Trace、生产 Trace、Agent 模型和 Judge 调用；运行前可用 `--plan-only` 查看样本哈希、最坏调用量和剩余额度，在线 LLM evaluator 默认关闭。
+- **[已实现]** 完整本地确定性 RAG 指标通过数据集 SHA256、索引指纹和 Git Commit 作为可复现事实源；LangSmith 负责小样本 Trace 见证。Agent/Judge 数字必须标注样本量，任何报告不得把小样本结果描述为生产准确率。
 - **[已实现]** 用户反馈先写 `message_feedback`，再异步同步 LangSmith；越权消息 ID 统一返回不存在或无权访问。
 - **[需配置]** 云端数据集、在线 evaluator、费用规则和 Annotation Queue 需配置 API Key 后初始化。
 
@@ -585,3 +588,6 @@ SSE_HEARTBEAT_SECONDS
 - **2.1 / 2026-08-21**：补充开发、测试或构建完成后不得自动启动服务或遗留常驻服务进程的执行约束。
 - **2.2 / 2026-08-21**：默认法规源切换为全量 `law.json`；增加 Embedding 响应校验、有限重试、批次恢复、memmap/FAISS 增量装配和全量索引热切换约束。
 - **2.3 / 2026-08-21**：默认 Dense Provider 改为本机 Ollama `qwen3-embedding:0.6b`；统一入口负责探测、按需启动、模型校验和预热，索引指纹加入模型 digest 与查询指令，Docker 改为访问宿主 Ollama。
+- **2.4 / 2026-08-22**：完成 chunk 级证据追踪、检索阈值与过滤修复、SSE 心跳、低风险确定性 Reviewer 快速路径，并封存旧记忆整理入口。
+- **2.5 / 2026-08-22**：增加 LangSmith 三模式分阶段消融评测、真实法规 ID 源数据派生集、严格缺失指标门禁、重复实验统计和本地对比报告；生产 RAG 与 Reviewer 默认行为保持不变。
+- **2.6 / 2026-08-22**：LangSmith 评测改为 learn/smoke/compare/release 四级低资源流程；增加显式上传确认、分层小批次、月度 Trace/Agent/Judge 预算、生产 2% 采样、零资源学习指南及本地可复现指标规则。

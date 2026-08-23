@@ -13,6 +13,11 @@ class ResearchTask(BaseModel):
     def normalize_issue_id(cls, value):
         return str(value)
 
+    @field_validator("query", "purpose", mode="before")
+    @classmethod
+    def normalize_task_text(cls, value):
+        return "" if value is None else str(value)
+
 
 class CaseAnalysis(BaseModel):
     request_type: Literal["casual_chat", "legal_consultation", "insufficient_information"]
@@ -27,6 +32,29 @@ class CaseAnalysis(BaseModel):
     next_action: Literal["direct_answer", "ask_clarification", "research"] = "research"
     direct_answer: str = ""
     clarification_questions: list[str] = Field(default_factory=list)
+
+    @field_validator("case_summary", "direct_answer", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value):
+        return "" if value is None else str(value)
+
+    @field_validator("jurisdiction", mode="before")
+    @classmethod
+    def normalize_jurisdiction(cls, value):
+        return "中国大陆" if value is None else str(value)
+
+    @field_validator("legal_domain", mode="before")
+    @classmethod
+    def normalize_legal_domain(cls, value):
+        return "其他" if value is None else str(value)
+
+    @field_validator(
+        "key_facts", "missing_facts", "legal_issues", "research_tasks",
+        "clarification_questions", mode="before",
+    )
+    @classmethod
+    def normalize_optional_lists(cls, value):
+        return [] if value is None else value
 
 
 class EvidenceItem(BaseModel):

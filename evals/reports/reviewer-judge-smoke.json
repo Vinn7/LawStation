@@ -1,0 +1,187 @@
+{
+  "experiment_name": "reviewer-judge-smoke-aad2e6b9",
+  "dataset": "lawstation-agent-v3",
+  "mode": "component",
+  "rag_mode": "hybrid",
+  "review_mode": "always-llm",
+  "repetitions": 1,
+  "run_count": 1,
+  "started_at": "2026-08-22T06:19:15.126572+00:00",
+  "completed_at": "2026-08-22T06:19:44.968221+00:00",
+  "metadata": {
+    "git_commit": "5c2b76a808ac82e833566a8c2cf899b3624e7973",
+    "mode": "component",
+    "graph_version": "three-agent-v2-chunk-evidence-fast-review",
+    "prompt_version": "legal-consultation-v2-no-match-safe",
+    "model": "deepseek-v4-flash",
+    "models": "deepseek-v4-flash",
+    "prompts": [
+      "legal-consultation-v2-no-match-safe"
+    ],
+    "tools": [
+      {
+        "name": "search_laws"
+      },
+      {
+        "name": "get_law_article"
+      }
+    ],
+    "embedding_model": "qwen3-embedding:0.6b",
+    "law_data_version": "9c95a6fe9f682fd3ca41d097e8b7463180503620d39e4b724a381f9fde718f0d",
+    "rag_mode": "hybrid",
+    "review_mode": "always-llm"
+  },
+  "metrics": {
+    "route_correctness": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "schema_validity": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "retrieval_status_correctness": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "retrieval_recall_at_k": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "retrieval_mrr": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "exact_article_hit": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "citation_grounding": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "citation_precision": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "no_match_safety": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "tool_trajectory": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "loop_limit": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "latest_fact_priority": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "tenant_isolation": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "completion_success": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "judge_legal_issue_coverage": {
+      "sample_count": 1,
+      "mean": 0.6,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    },
+    "judge_evidence_consistency": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "judge_factual_fidelity": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "judge_risk_calibration": {
+      "sample_count": 1,
+      "mean": 0.8,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    },
+    "judge_completeness": {
+      "sample_count": 1,
+      "mean": 0.8,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    },
+    "judge_actionability": {
+      "sample_count": 1,
+      "mean": 0.8,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    },
+    "judge_clarity": {
+      "sample_count": 1,
+      "mean": 1.0,
+      "standard_deviation": 0.0,
+      "pass_rate": 1.0
+    },
+    "judge_helpfulness": {
+      "sample_count": 1,
+      "mean": 0.8,
+      "standard_deviation": 0.0,
+      "pass_rate": 0.0
+    }
+  },
+  "runtime_metrics": {
+    "mean_model_calls": 4.0,
+    "mean_tool_calls": 2.0,
+    "llm_review_rate": 1.0,
+    "mean_retrieval_duration_ms": null
+  },
+  "project_stats": {
+    "id": "1f95ce29-15d1-4518-8e2a-5faae3104fdf",
+    "name": "reviewer-judge-smoke-aad2e6b9",
+    "run_count": 0,
+    "error_rate": 0.0,
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_cost": "0",
+    "prompt_cost": "0",
+    "completion_cost": "0"
+  },
+  "missing_required_metrics": []
+}

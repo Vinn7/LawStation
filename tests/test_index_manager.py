@@ -350,6 +350,39 @@ async def test_unknown_filter_is_rejected(tmp_path, monkeypatch):
         await engine.search("内容", filters={"region": "北京"})
 
 
+@pytest.mark.asyncio
+async def test_bm25_evaluation_mode_does_not_call_dense(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"测试法第一条":"劳动合同解除赔偿"}', encoding="utf-8")
+    config = settings(source, tmp_path / "indexes")
+    config.rag_bm25_min_score = -1
+    monkeypatch.setattr(engine_module, "get_settings", lambda: config)
+    engine = engine_module.LawSearchEngine()
+    engine.faiss = object()
+    engine.embedding_descriptor = EmbeddingDescriptor("ollama", "test", "digest", 4)
+
+    async def forbidden(_query):
+        raise AssertionError("BM25-only 评测不得调用 Dense Embedding")
+
+    engine._embed_query = forbidden
+    result = await engine.search("劳动合同解除", retrieval_mode="bm25")
+
+    assert result
+    assert result[0]["retrieval_mode"] == "bm25"
+    assert result[0]["retrieval_sources"] == ["bm25"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_retrieval_mode_is_rejected(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"测试法第一条":"内容"}', encoding="utf-8")
+    monkeypatch.setattr(engine_module, "get_settings", lambda: settings(source, tmp_path / "indexes"))
+    engine = engine_module.LawSearchEngine()
+
+    with pytest.raises(ValueError, match="retrieval_mode"):
+        await engine.search("内容", retrieval_mode="invalid")
+
+
 def test_exact_article_lookup_uses_map_and_returns_all_chunks(tmp_path, monkeypatch):
     source = tmp_path / "law.json"
     source.write_text('{"中华人民共和国测试法第一条":"' + "甲" * 1200 + '"}', encoding="utf-8")

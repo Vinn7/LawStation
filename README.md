@@ -98,17 +98,27 @@ LANGSMITH_ENVIRONMENT=development
 
 咨询 Graph 和记忆整理分别进入 `lawstation-<环境>-agent` 和 `lawstation-<环境>-memory` 项目。租户、用户和会话 ID 只以 HMAC 哈希发送；API Key、请求头、数据库地址和模型内部推理始终过滤。设置 `LANGSMITH_CAPTURE_CONTENT=false` 可隐藏 trace 输入输出。LangSmith 异常不会阻断咨询，`/health` 只暴露启用与导出状态。
 
-仓库提供 5 组、共 60 条合成基准样本：
+仓库提供 60 条合成 E2E 基准、30 条分层 Agent 基准，以及 100 条引用真实
+`document_id/chunk_id` 的源数据派生检索集：
 
 ```bash
 python scripts/create_eval_datasets.py
+python scripts/create_live_retrieval_dataset.py
 python scripts/seed_langsmith_datasets.py
-python scripts/run_langsmith_eval.py --dataset lawstation-e2e-v1 --mode component
-python scripts/run_langsmith_eval.py --dataset lawstation-e2e-v1 --mode live --judge
-python scripts/run_langsmith_eval.py --compare baseline-experiment current-experiment
+python scripts/run_langsmith_eval.py --profile learn
+python scripts/run_langsmith_eval.py --profile smoke
+python scripts/run_staged_langsmith_eval.py --profile compare --plan-only
 ```
 
-`component` 使用固定法规工具结果；`live` 调用当前 MCP 和真实模型，运行前需要应用已启动。`--fail-on-threshold` 可启用发布门禁。助手回答的赞踩先写入 SQLite，再异步同步 LangSmith；配置 `LANGSMITH_ANNOTATION_QUEUE_ID` 后，点踩会加入人工标注队列。
+默认 `learn` 使用固定输出讲解确定性指标，不访问 LangSmith、DeepSeek 或 Ollama；`smoke`
+只运行 6 条分层样本且 `upload_results=false`。云端 Compare 默认仅上传 30 条根 Trace、调用
+10 次 Judge，执行前必须先查看 `--plan-only`，再显式增加 `--confirm-upload`。所有评测受月度
+Trace、Agent 模型和 Judge 三类本地预算保护。完整概念、指标公式和失败定位方法见
+`evals/LEARNING_GUIDE.md`。
+
+`retrieval` 用于隔离比较 BM25 与 Hybrid，`component` 使用固定法规工具结果，`live` 调用当前
+MCP 和真实模型。完整本地 RAG 指标以数据集哈希、索引指纹和 Git Commit 保证可复现；LangSmith
+只保存固定见证样本。源数据派生集尚未经过律师人工标注，不能宣称为专家标注的法律准确率。
 
 ## 分层记忆
 

@@ -15,7 +15,7 @@ import numpy as np
 from filelock import FileLock, Timeout
 from rank_bm25 import BM25Okapi
 
-from backend.app.core.config import get_settings
+from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit
 from backend.app.core.ollama import ollama_runtime_status
 from mcp_servers.law_rag.embeddings import create_embedding_provider
@@ -79,8 +79,8 @@ def load_chunks(path: Path, maximum: int, overlap: int) -> list[dict]:
 
 
 class LawSearchEngine:
-    def __init__(self):
-        self.settings = get_settings()
+    def __init__(self, settings: Settings | None = None):
+        self.settings = settings or get_settings()
         self.path = Path(self.settings.law_data_path)
         self.index_root = Path(self.settings.index_dir)
         self.final_dir = self.index_root / "law"
@@ -504,7 +504,10 @@ class LawSearchEngine:
         minimum = float(getattr(self.settings, "rag_bm25_min_score", 0.01))
         return [item for item in ranked[:pool] if item[1] >= minimum]
 
-    async def search(self, query, top_k=8, filters=None):
+    async def search(self, query, top_k=8, filters=None, retrieval_mode: str | None = None):
+        mode = retrieval_mode or getattr(self.settings, "rag_retrieval_mode", "hybrid")
+        if mode not in {"bm25", "hybrid"}:
+            raise ValueError("retrieval_mode 必须是 bm25 或 hybrid")
         top_k = max(1, min(int(top_k), 20))
         eligible_indices = self._filtered_indices(filters)
         if eligible_indices == []:
@@ -520,7 +523,7 @@ class LawSearchEngine:
             ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
             sources.setdefault(index, []).append("bm25")
             raw_scores.setdefault(index, {})["bm25"] = score
-        if self.faiss is not None and self.embedding_descriptor is not None:
+        if mode == "hybrid" and self.faiss is not None and self.embedding_descriptor is not None:
             vector = await self._embed_query(query)
             import faiss
 
@@ -562,6 +565,7 @@ class LawSearchEngine:
                 "rrf": round(ranks[index], 8),
             },
             "data_version": self.fingerprint,
+            "retrieval_mode": mode,
             "dense_enabled": state["dense_enabled"],
             "index_status": state["status"],
         } for rank, index in enumerate(ordered)]

@@ -294,6 +294,17 @@ class LegalConsultationGraph:
 
     async def case_analyst(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "analyzing", "message": "正在分析案情"}})
+        if runtime.context.evaluation_case_analysis is not None:
+            analysis = CaseAnalysis.model_validate(runtime.context.evaluation_case_analysis)
+            update: dict[str, Any] = {"case_analysis": analysis}
+            if analysis.next_action == "direct_answer":
+                update["final_answer"] = analysis.direct_answer
+            elif analysis.next_action == "ask_clarification":
+                questions = analysis.clarification_questions or analysis.missing_facts
+                update["final_answer"] = "为了更准确地分析，请补充以下信息：\n\n" + "\n".join(
+                    f"- {item}" for item in questions
+                )
+            return update
         try:
             analysis = await self._invoke_json(runtime, "case_analyst", ANALYST_PROMPT, _payload(state), CaseAnalysis)
         except (ValueError, ValidationError, RuntimeError) as exc:
@@ -455,7 +466,9 @@ class LegalConsultationGraph:
         packet = state["evidence_packet"]
         draft = state["counsel_draft"]
         skip_reason = ""
-        if state["review_result"] is not None:
+        if self.settings.agent_review_mode == "always-llm":
+            skip_reason = "评测配置要求始终执行模型复核"
+        elif state["review_result"] is not None:
             skip_reason = "修订后的草稿必须再次复核"
         elif not analysis or analysis.risk_level != "low":
             skip_reason = "中高风险问题必须进行模型复核"
@@ -469,6 +482,7 @@ class LegalConsultationGraph:
             skip_reason = "无法条回答包含证据引用"
 
         if skip_reason:
+            runtime.context.metrics.review_mode = "llm"
             audit(
                 "agent.review.selected",
                 status="selected",
@@ -484,6 +498,7 @@ class LegalConsultationGraph:
             review_skip_reason="低风险无法条回答已通过确定性边界校验",
             **runtime.context.audit_fields,
         )
+        runtime.context.metrics.review_mode = "deterministic"
         return {
             "review_result": ReviewResult(approved=True, next_action="finalize")
         }

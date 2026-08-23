@@ -14,6 +14,7 @@ from langsmith import Client
 
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit, redact, summary
+from backend.app.core.resource_budget import MonthlyResourceBudget, ResourceBudgetExceeded
 
 _PRIVATE_KEYS = (
     "api_key",
@@ -62,8 +63,8 @@ class TraceInvocation:
 class LangSmithObservability:
     """Application-scoped, fail-open LangSmith integration."""
 
-    graph_version = "three-agent-v1"
-    prompt_version = "legal-consultation-v1"
+    graph_version = "three-agent-v2-chunk-evidence-fast-review"
+    prompt_version = "legal-consultation-v2-no-match-safe"
     app_version = "0.2.0"
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -71,6 +72,8 @@ class LangSmithObservability:
         self._client: Client | None = None
         self._status = "disabled"
         self._last_error = ""
+        self._budget = MonthlyResourceBudget(self.settings.eval_resource_budget_path)
+        self._budget_exhausted_logged = False
         if not self.settings.langsmith_enabled:
             return
         if not self.settings.langsmith_api_key or not self.settings.langsmith_id_hash_secret:
@@ -145,6 +148,25 @@ class LangSmithObservability:
     def _project(self, pipeline: str) -> str:
         return f"{self.settings.langsmith_project}-{self.settings.langsmith_environment}-{pipeline}"
 
+    def _production_slot(self) -> bool:
+        try:
+            self._budget.reserve(
+                "production_traces",
+                1,
+                self.settings.langsmith_monthly_production_trace_budget,
+            )
+            return True
+        except ResourceBudgetExceeded as exc:
+            if not self._budget_exhausted_logged:
+                self._budget_exhausted_logged = True
+                audit(
+                    "langsmith.budget.exhausted",
+                    status="degraded",
+                    resource="production_traces",
+                    error=summary(str(exc)),
+                )
+            return False
+
     def _law_data_version(self) -> str:
         path = Path(self.settings.index_dir) / "law" / "manifest.json"
         try:
@@ -168,6 +190,8 @@ class LangSmithObservability:
         if not self.enabled or not self._sampled(
             request_id, self.settings.langsmith_trace_sample_rate
         ):
+            return TraceInvocation(False, None, base_config)
+        if not self._production_slot():
             return TraceInvocation(False, None, base_config)
         try:
             trace_uuid = UUID(request_id)
@@ -220,6 +244,8 @@ class LangSmithObservability:
             or not self.settings.langsmith_error_trace_enabled
         ):
             return None
+        if not self._production_slot():
+            return None
         try:
             run_id = UUID(request_id)
         except ValueError:
@@ -271,6 +297,8 @@ class LangSmithObservability:
         if not self.enabled or not self._sampled(
             request_id, self.settings.langsmith_trace_sample_rate
         ):
+            return TraceInvocation(False, None, {})
+        if not self._production_slot():
             return TraceInvocation(False, None, {})
         metadata = {
             "request_id": request_id,

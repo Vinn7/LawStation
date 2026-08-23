@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -19,13 +20,25 @@ def main() -> None:
     )
     for path in sorted((ROOT / "evals" / "datasets").glob("*.jsonl")):
         dataset_name = path.stem
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if client.has_dataset(dataset_name=dataset_name):
+            dataset = client.read_dataset(dataset_name=dataset_name)
+            remote_digest = (dataset.metadata or {}).get("source_sha256")
+            if remote_digest and remote_digest != digest:
+                raise SystemExit(
+                    f"LangSmith 数据集 {dataset_name} 与本地内容不一致；"
+                    "请使用新的版本化数据集名称，禁止静默覆盖基准"
+                )
             print(f"跳过已存在数据集：{dataset_name}")
             continue
         client.create_dataset(
             dataset_name,
             description="LawStation 人工编写或合成的脱敏基准数据集",
-            metadata={"version": "v1", "contains_production_data": False},
+            metadata={
+                "version": dataset_name.rsplit("-", 1)[-1],
+                "contains_production_data": False,
+                "source_sha256": digest,
+            },
         )
         examples = [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
         client.create_examples(dataset_name=dataset_name, examples=examples)
