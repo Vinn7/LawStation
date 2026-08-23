@@ -450,6 +450,8 @@ SSE_HEARTBEAT_SECONDS
 - **[已实现]** 评测采用 learn、smoke、compare、release 四级渐进模式；默认 learn 不访问外部服务，smoke 不上传 Trace，云端上传必须显式确认。Compare 默认只执行 10 条检索、3 条 Reviewer 和 2 条 E2E 双组见证样本。
 - **[已实现]** 月度预算账本分别限制评测 Trace、生产 Trace、Agent 模型和 Judge 调用；运行前可用 `--plan-only` 查看样本哈希、最坏调用量和剩余额度，在线 LLM evaluator 默认关闭。
 - **[已实现]** 完整本地确定性 RAG 指标通过数据集 SHA256、索引指纹和 Git Commit 作为可复现事实源；LangSmith 负责小样本 Trace 见证。Agent/Judge 数字必须标注样本量，任何报告不得把小样本结果描述为生产准确率。
+- **[已实现]** 每次非 `plan-only` 评测按新加坡时区归档到 `evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/`；JSON 与 CSV 同名，分阶段实验共享一个运行目录。Manifest 保存状态、失败阶段、完成产物和 Baseline 复用来源，原子维护 `latest.json` 与 `latest-success.json`，历史运行不自动清理。
+- **[已实现]** Baseline 复用必须校验数据集 SHA256、样本内容哈希、种子、运行模式、Graph/Prompt 版本及 LangSmith 完整性；复用结果复制进当前运行目录并记录来源，不能只按文件名复用。
 - **[已实现]** 用户反馈先写 `message_feedback`，再异步同步 LangSmith；越权消息 ID 统一返回不存在或无权访问。
 - **[需配置]** 云端数据集、在线 evaluator、费用规则和 Annotation Queue 需配置 API Key 后初始化。
 
@@ -591,3 +593,4 @@ SSE_HEARTBEAT_SECONDS
 - **2.4 / 2026-08-22**：完成 chunk 级证据追踪、检索阈值与过滤修复、SSE 心跳、低风险确定性 Reviewer 快速路径，并封存旧记忆整理入口。
 - **2.5 / 2026-08-22**：增加 LangSmith 三模式分阶段消融评测、真实法规 ID 源数据派生集、严格缺失指标门禁、重复实验统计和本地对比报告；生产 RAG 与 Reviewer 默认行为保持不变。
 - **2.6 / 2026-08-22**：LangSmith 评测改为 learn/smoke/compare/release 四级低资源流程；增加显式上传确认、分层小批次、月度 Trace/Agent/Judge 预算、生产 2% 采样、零资源学习指南及本地可复现指标规则。
+- **2.7 / 2026-08-23**：评测报告改为新加坡时区的逐次时间戳目录；增加原子 Manifest、最近运行索引、中断归档、同目录 staged 产物及严格 Baseline 跨运行复用校验。

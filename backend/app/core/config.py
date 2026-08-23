@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     eval_monthly_judge_call_budget: int = 20
     eval_resource_budget_path: str = "./data/runtime/eval-resource-budget.json"
     langsmith_test_cache: str = "./data/runtime/langsmith-test-cache"
+    eval_report_root: str = "./evals/reports/runs"
+    eval_report_timezone: str = "Asia/Singapore"
 
 
 @lru_cache

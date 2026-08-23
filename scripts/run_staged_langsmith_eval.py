@@ -1,7 +1,6 @@
 """Run guarded LawStation LangSmith ablations and produce local comparison reports."""
 
 import argparse
-import csv
 import json
 import os
 import signal
@@ -25,6 +24,7 @@ from backend.app.evaluation.profiles import (
     load_cases,
     select_cases,
 )
+from backend.app.evaluation.reporting import ReportRun
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "evals" / "reports"
@@ -36,8 +36,26 @@ def run_checked(command: list[str], *, env: dict[str, str] | None = None) -> Non
     subprocess.run(command, cwd=ROOT, env=env, check=True)
 
 
-def load_report(name: str) -> dict[str, Any]:
-    return json.loads((REPORTS / name).read_text("utf-8"))
+def load_report(path: str | Path) -> dict[str, Any]:
+    return json.loads(Path(path).read_text("utf-8"))
+
+
+def _report_candidates(name: str) -> list[tuple[Path, str]]:
+    candidates = []
+    runs_root = Path(get_settings().eval_report_root)
+    if runs_root.is_dir():
+        for path in sorted(runs_root.glob(f"*/{name}"), reverse=True):
+            manifest_path = path.parent / "run-manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text("utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if manifest.get("status") == "completed":
+                candidates.append((path, str(manifest.get("run_id", path.parent.name))))
+    legacy = REPORTS / name
+    if legacy.is_file():
+        candidates.append((legacy, "legacy"))
+    return candidates
 
 
 def reusable_report(
@@ -47,30 +65,42 @@ def reusable_report(
     runs: int,
     categories: list[str],
     seed: int,
+    rag_mode: str,
+    review_mode: str,
 ) -> dict[str, Any] | None:
-    path = REPORTS / name
-    if not path.is_file():
-        return None
-    report = load_report(name)
     resolved_seed = effective_seed(seed)
     expected = select_cases(
         load_cases(dataset), limit=runs, categories=categories, seed=resolved_seed
     )
     expected_hashes = [case_hash(item) for item in expected]
-    actual_hashes = [
-        item.get("content_sha256") for item in report.get("batch", {}).get("examples", [])
-    ]
-    if (
-        report.get("dataset") == dataset
-        and int(report.get("run_count", 0)) == runs
-        and report.get("dataset_sha256") == dataset_sha256(dataset)
-        and report.get("batch", {}).get("seed") == resolved_seed
-        and actual_hashes == expected_hashes
-        and not report.get("missing_required_metrics")
-        and report.get("langsmith_export_complete") is True
-    ):
-        print(f"复用已完成实验：{report.get('experiment_name')}", flush=True)
-        return report
+    for path, source_run_id in _report_candidates(name):
+        report = load_report(path)
+        actual_hashes = [
+            item.get("content_sha256")
+            for item in report.get("batch", {}).get("examples", [])
+        ]
+        metadata = report.get("metadata", {})
+        if (
+            report.get("dataset") == dataset
+            and int(report.get("run_count", 0)) == runs
+            and report.get("dataset_sha256") == dataset_sha256(dataset)
+            and report.get("batch", {}).get("seed") == resolved_seed
+            and actual_hashes == expected_hashes
+            and report.get("rag_mode") == rag_mode
+            and report.get("review_mode") == review_mode
+            and metadata.get("graph_version") == "three-agent-v2-chunk-evidence-fast-review"
+            and metadata.get("prompt_version") == "legal-consultation-v2-no-match-safe"
+            and not report.get("missing_required_metrics")
+            and report.get("langsmith_export_complete") is True
+        ):
+            print(f"复用已完成实验：{report.get('experiment_name')}", flush=True)
+            return {
+                **report,
+                "_reuse_source": {
+                    "run_id": source_run_id,
+                    "path": str(path.resolve()),
+                },
+            }
     return None
 
 
@@ -124,24 +154,38 @@ def compare(
     }
 
 
-def write_json(name: str, value: dict[str, Any]) -> None:
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    (REPORTS / name).write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+def write_json(report_run: ReportRun, name: str, value: dict[str, Any]) -> None:
+    report_run.write_json(name, value)
+
+
+def write_comparison(report_run: ReportRun, name: str, value: dict[str, Any]) -> None:
+    write_json(report_run, name, value)
+    rows = [
+        {"metric": key, **values}
+        for key, values in sorted(value.get("metrics", {}).items())
+    ]
+    report_run.write_csv(
+        Path(name).with_suffix(".csv").name,
+        ["metric", "baseline", "candidate", "absolute_delta", "relative_delta"],
+        rows,
     )
 
 
-def write_comparison(name: str, value: dict[str, Any]) -> None:
-    write_json(name, value)
-    csv_path = (REPORTS / name).with_suffix(".csv")
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["metric", "baseline", "candidate", "absolute_delta", "relative_delta"],
-        )
-        writer.writeheader()
-        for key, values in sorted(value.get("metrics", {}).items()):
-            writer.writerow({"metric": key, **values})
+def materialize_reused_report(
+    report_run: ReportRun,
+    name: str,
+    report: dict[str, Any],
+) -> None:
+    """Keep a self-contained copy while retaining the validated reuse provenance."""
+    source = report.get("_reuse_source")
+    if not source:
+        return
+    archived = {
+        key: value for key, value in report.items() if key != "_reuse_source"
+    }
+    archived["reused_from"] = source
+    report_run.write_metrics(name, archived)
+    report_run.record_reuse(name, source["run_id"], source["path"])
 
 
 def run_eval(
@@ -159,6 +203,7 @@ def run_eval(
     categories: str = "",
     seed: int = 0,
     profile: str = "compare",
+    report_run: ReportRun,
 ) -> dict[str, Any]:
     command = [
         PYTHON,
@@ -170,7 +215,8 @@ def run_eval(
         "--repetitions", str(repetitions),
         "--concurrency", "2",
         "--experiment", experiment,
-        "--output", str(REPORTS / output),
+        "--run-dir", str(report_run.path),
+        "--report-name", output,
         "--require-export",
         "--profile", profile,
         "--upload-results",
@@ -187,7 +233,12 @@ def run_eval(
     if fail_on_threshold:
         command.append("--fail-on-threshold")
     run_checked(command)
-    return load_report(output)
+    path = report_run.path / output
+    report_run.record_artifact(path)
+    csv_path = path.with_suffix(".csv")
+    if csv_path.is_file():
+        report_run.record_artifact(csv_path)
+    return load_report(path)
 
 
 def port_in_use(port: int) -> bool:
@@ -357,10 +408,17 @@ def main() -> None:
         return
     if not args.confirm_upload:
         raise SystemExit("云端分阶段实验必须显式提供 --confirm-upload；可先使用 --plan-only")
-    REPORTS.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    report_run = ReportRun.create(
+        settings.eval_report_root,
+        args.profile,
+        settings.eval_report_timezone,
+    )
     started = datetime.now(UTC)
     comparisons: dict[str, dict[str, Any]] = {}
     status = "running"
+    current_stage = "preflight"
+    failure: BaseException | None = None
     ollama = None
     service = None
     service_log = None
@@ -376,25 +434,37 @@ def main() -> None:
 
         sizes = plan["sample_sizes"]
         rag_runs = sizes["retrieval"]
+        current_stage = "rag.baseline"
         rag_baseline = reusable_report(
             "rag-bm25-baseline.json", dataset="lawstation-live-retrieval-v1", runs=rag_runs,
             categories=["matched", "no_match"], seed=args.sample_seed,
+            rag_mode="bm25", review_mode="auto",
         ) or run_eval(
             dataset="lawstation-live-retrieval-v1", mode="retrieval", rag_mode="bm25",
             review_mode="auto", repetitions=1, experiment="rag-bm25-baseline",
             output="rag-bm25-baseline.json", fail_on_threshold=True,
             max_examples=sizes["retrieval"], categories="matched,no_match",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
         )
+        materialize_reused_report(
+            report_run, "rag-bm25-baseline.json", rag_baseline
+        )
+        current_stage = "rag.hybrid"
         rag_candidate = reusable_report(
             "rag-hybrid-candidate.json", dataset="lawstation-live-retrieval-v1", runs=rag_runs,
             categories=["matched", "no_match"], seed=args.sample_seed,
+            rag_mode="hybrid", review_mode="auto",
         ) or run_eval(
             dataset="lawstation-live-retrieval-v1", mode="retrieval", rag_mode="hybrid",
             review_mode="auto", repetitions=1, experiment="rag-hybrid-candidate",
             output="rag-hybrid-candidate.json", fail_on_threshold=True,
             max_examples=sizes["retrieval"], categories="matched,no_match",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
+        )
+        materialize_reused_report(
+            report_run, "rag-hybrid-candidate.json", rag_candidate
         )
         if metric(rag_candidate, "retrieval_recall_at_k") < metric(rag_baseline, "retrieval_recall_at_k"):
             raise RuntimeError("Hybrid Recall@5 低于 BM25，停止后续实验")
@@ -406,48 +476,62 @@ def main() -> None:
                 "retrieval_mrr", "exact_article_hit",
             },
         )
-        write_comparison("rag-bm25-vs-hybrid.json", comparisons["RAG：BM25 vs Hybrid"])
+        write_comparison(report_run, "rag-bm25-vs-hybrid.json", comparisons["RAG：BM25 vs Hybrid"])
 
+        current_stage = "reviewer.baseline"
         reviewer_baseline = reusable_report(
             "reviewer-llm-baseline.json", dataset="lawstation-agent-v3",
             runs=sizes["reviewer"],
             categories=["matched", "no_match", "memory"], seed=args.sample_seed,
+            rag_mode="hybrid", review_mode="always-llm",
         ) or run_eval(
             dataset="lawstation-agent-v3", mode="component", rag_mode="hybrid",
             review_mode="always-llm", repetitions=1, experiment="reviewer-llm-baseline",
             output="reviewer-llm-baseline.json", judge=True,
             max_examples=sizes["reviewer"], categories="matched,no_match,memory",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
         )
+        materialize_reused_report(
+            report_run, "reviewer-llm-baseline.json", reviewer_baseline
+        )
+        current_stage = "reviewer.candidate"
         reviewer_candidate = run_eval(
             dataset="lawstation-agent-v3", mode="component", rag_mode="hybrid",
             review_mode="auto", repetitions=1, experiment="reviewer-fastpath-candidate",
             output="reviewer-fastpath-candidate.json", judge=True,
             max_examples=sizes["reviewer"], categories="matched,no_match,memory",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
         )
         stage_two_gate(reviewer_baseline, reviewer_candidate)
         comparisons["Agent：LLM Reviewer vs Fast Path"] = compare(
             reviewer_baseline, reviewer_candidate
         )
         write_comparison(
+            report_run,
             "reviewer-llm-vs-fastpath.json",
             comparisons["Agent：LLM Reviewer vs Fast Path"],
         )
 
+        current_stage = "e2e.baseline"
         service, service_log = start_service("bm25")
         e2e_baseline = reusable_report(
             "e2e-baseline.json", dataset="lawstation-e2e-v2", runs=sizes["e2e"],
             categories=["matched", "no_match"], seed=args.sample_seed,
+            rag_mode="bm25", review_mode="always-llm",
         ) or run_eval(
             dataset="lawstation-e2e-v2", mode="live", rag_mode="bm25",
             review_mode="always-llm", repetitions=1, experiment="lawstation-e2e-baseline",
             output="e2e-baseline.json", judge=True,
             max_examples=sizes["e2e"], categories="matched,no_match",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
         )
+        materialize_reused_report(report_run, "e2e-baseline.json", e2e_baseline)
         stop_service(service, service_log)
         service = service_log = None
+        current_stage = "e2e.candidate"
         service, service_log = start_service("hybrid")
         e2e_candidate = run_eval(
             dataset="lawstation-e2e-v2", mode="live", rag_mode="hybrid",
@@ -455,20 +539,30 @@ def main() -> None:
             output="e2e-candidate.json", judge=True, fail_on_threshold=True,
             max_examples=sizes["e2e"], categories="matched,no_match",
             seed=args.sample_seed, profile=args.profile,
+            report_run=report_run,
         )
         comparisons["E2E：Baseline vs Candidate"] = compare(e2e_baseline, e2e_candidate)
-        write_comparison("e2e-baseline-vs-candidate.json", comparisons["E2E：Baseline vs Candidate"])
+        write_comparison(
+            report_run,
+            "e2e-baseline-vs-candidate.json",
+            comparisons["E2E：Baseline vs Candidate"],
+        )
         status = "completed"
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         status = "interrupted"
+        failure = exc
         raise
     except Exception as exc:
-        status = f"failed: {type(exc).__name__}: {exc}"
+        status = "failed"
+        failure = exc
         raise
     finally:
         stop_service(service, service_log)
         if ollama is not None:
             ollama.close()
+        for artifact in report_run.path.iterdir():
+            if artifact.is_file() and artifact.name != "run-manifest.json":
+                report_run.record_artifact(artifact)
         manifest = {
             "status": status,
             "started_at": started.isoformat(),
@@ -481,10 +575,21 @@ def main() -> None:
                 for key, value in comparisons.items()
             },
         }
-        write_json("experiment-manifest.json", manifest)
-        (REPORTS / "EVAL_REPORT.md").write_text(
-            markdown_report(comparisons, status), encoding="utf-8"
+        write_json(report_run, "experiment-manifest.json", manifest)
+        report_path = report_run.write_text(
+            "EVAL_REPORT.md", markdown_report(comparisons, status)
         )
+        if failure is None:
+            report_run.complete({"comparisons": manifest["comparisons"]})
+        else:
+            report_run.fail(
+                status,
+                stage=current_stage,
+                error=failure,
+                extra={"comparisons": manifest["comparisons"]},
+            )
+        print(f"评测结果：{report_run.path}")
+        print(f"汇总报告：{report_path}")
 
 
 if __name__ == "__main__":

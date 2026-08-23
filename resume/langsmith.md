@@ -43,6 +43,11 @@ document/chunk ID 的检索回归集。检索、组件和 live 三种模式分�
 8 个质量维度。这样的设计把可重复工程回归与昂贵语义评审分开，避免为了展示可观测性而消耗
 大量 Trace 和模型额度。
 
+每次评测使用 `YYYYMMDD-HHMMSS-ffffff-<profile>` 独立目录归档 JSON、CSV、Manifest 和
+Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成产物，最近运行与最近成功运行使用
+两个原子索引区分；跨运行复用 Baseline 时校验数据集、样本哈希、种子、Graph/Prompt 和索引
+版本，并在新报告中保留来源。这使面试中展示的指标可以追溯到一次确定的代码、数据和实验运行。
+
 ## 用户反馈闭环
 
 回答赞踩先按 `tenant_id + user_id + message_id` 写入 SQLite，再异步同步 LangSmith。其他用户即使猜到消息 ID 也不能提交反馈。点踩 trace 可进入 Annotation Queue，经人工脱敏和标注后回流离线数据集。
@@ -58,6 +63,7 @@ document/chunk ID 的检索回归集。检索、组件和 live 三种模式分�
 - `backend/app/observability/langsmith.py::LangSmithObservability`
 - `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`
 - `backend/app/evaluation/judge.py::LegalQualityJudge`
+- `backend/app/evaluation/reporting.py::ReportRun`
 - `scripts/run_langsmith_eval.py`
 - `scripts/run_staged_langsmith_eval.py`
 - `backend/app/api/routes.py::message_feedback`

@@ -120,6 +120,16 @@ Trace、Agent 模型和 Judge 三类本地预算保护。完整概念、指标�
 MCP 和真实模型。完整本地 RAG 指标以数据集哈希、索引指纹和 Git Commit 保证可复现；LangSmith
 只保存固定见证样本。源数据派生集尚未经过律师人工标注，不能宣称为专家标注的法律准确率。
 
+除 `--plan-only` 和测试专用的 `--no-report` 外，每次评测都会在新加坡时区生成独立归档目录：
+
+```text
+evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/
+```
+
+目录内保存 JSON、同名 CSV 和 `run-manifest.json`；分阶段实验还会保存
+`EVAL_REPORT.md`。`latest.json` 指向最近一次运行，`latest-success.json` 只指向最近一次完整成功的运行。历史目录不会自动清理，且默认被 Git 忽略。可通过 `.env` 中的
+`EVAL_REPORT_ROOT` 和 `EVAL_REPORT_TIMEZONE` 调整归档位置及时区。
+
 ## 分层记忆
 
 - 当前案件事实只在所属会话使用；用户偏好和稳定背景可以跨该用户的会话复用。

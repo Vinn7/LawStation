@@ -13,10 +13,22 @@
 
 ```bash
 conda run -n LawStation python scripts/run_langsmith_eval.py --profile learn \
-  --output evals/reports/learn.json
+  --report-name learn.json
 ```
 
 报告中的 `details` 会并列展示输入、期望、固定输出、每个 evaluator 的分数和原因。该模式不访问 LangSmith、DeepSeek 或 Ollama。
+
+命令默认把结果写入：
+
+```text
+evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-learn/
+├── learn.json
+├── learn.csv
+└── run-manifest.json
+```
+
+时间使用新加坡时区，微秒避免同一秒内运行冲突。`--plan-only` 完全只读，不创建报告；
+`--no-report` 仅供自动测试使用。旧 `--output <path>` 仍兼容，但同时保留本次时间戳归档。
 
 ## 2. 关键指标
 
@@ -67,6 +79,14 @@ conda run -n LawStation python scripts/run_staged_langsmith_eval.py \
 ```
 
 真正上传必须显式增加 `--confirm-upload`。日常 Smoke 使用 `upload_results=False`，不会产生 LangSmith Trace。
+
+分阶段 Compare/Release 只创建一个运行目录，所有 Baseline、Candidate、对比 CSV、
+`experiment-manifest.json` 和 `EVAL_REPORT.md` 都归档在其中。中途失败或用户中断时，已完成阶段不会被删除，`run-manifest.json` 会记录失败阶段和安全错误摘要。最近运行可查看：
+
+```text
+evals/reports/runs/latest.json
+evals/reports/runs/latest-success.json
+```
 
 ## 5. 如何定位失败
 

@@ -29,6 +29,7 @@ from backend.app.evaluation.profiles import (
     select_cases,
     to_examples,
 )
+from backend.app.evaluation.reporting import ReportRun
 from backend.app.evaluation.targets import RetrievalTarget, agent_target
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,9 +190,14 @@ def _project_stats(
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+    os.replace(temporary, path)
     csv_path = path.with_suffix(".csv")
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+    csv_temporary = csv_path.with_suffix(csv_path.suffix + f".{os.getpid()}.tmp")
+    with csv_temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=["metric", "sample_count", "mean", "standard_deviation", "pass_rate"],
@@ -199,6 +205,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         writer.writeheader()
         for metric, values in sorted(payload.get("metrics", {}).items()):
             writer.writerow({"metric": metric, **values})
+    os.replace(csv_temporary, csv_path)
 
 
 def _learning_output(case: dict[str, Any]) -> dict[str, Any]:
@@ -285,9 +292,6 @@ def _run_learn(args) -> dict[str, Any]:
         "batch": batch_manifest(dataset, cases, seed),
         "details": details,
     }
-    if args.output:
-        _write_report(Path(args.output), payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     return payload
 
 
@@ -446,7 +450,6 @@ async def run(args) -> dict[str, Any]:
             data=args.dataset,
             client=ls_client,
         )
-        print(result)
         return {"comparison": str(result)}
     evaluators = list(DETERMINISTIC_EVALUATORS)
     judge_calls = 0
@@ -507,7 +510,6 @@ async def run(args) -> dict[str, Any]:
         "budget_remaining_before": budget_before,
         "batch": batch,
     }
-    print(json.dumps(preview, ensure_ascii=False, indent=2))
     if args.plan_only:
         return preview
     ledger.check_many(plan, _limits(settings))
@@ -628,9 +630,7 @@ async def run(args) -> dict[str, Any]:
         },
     }
     payload["langsmith_export_complete"] = witness_complete
-    if args.output:
-        _write_report(Path(args.output), payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    args._result_payload = payload
     if args.fail_on_threshold:
         if missing:
             raise SystemExit("评测门禁未通过：缺少关键指标 " + ", ".join(missing))
@@ -646,6 +646,77 @@ async def run(args) -> dict[str, Any]:
             "LangSmith 导出不完整：实验运行数小于本地结果数，可能已达到 Trace 配额"
         )
     return payload
+
+
+def _default_report_name(args) -> str:
+    if args.report_name:
+        return ReportRun.validate_report_name(args.report_name)
+    if args.profile == "learn":
+        return "learn.json"
+    return f"{args.profile}-{args.mode}.json"
+
+
+async def execute(args) -> dict[str, Any]:
+    _profile_args(args)
+    if args.run_dir and args.run_id:
+        raise SystemExit("--run-dir 与 --run-id 不能同时使用")
+    if args.no_report and args.output:
+        raise SystemExit("--no-report 与兼容参数 --output 不能同时使用")
+    settings = get_settings()
+    report_run = None
+    report_path = None
+    if not args.plan_only and not args.no_report:
+        report_run = (
+            ReportRun.attach(args.run_dir, settings.eval_report_timezone)
+            if args.run_dir
+            else ReportRun.create(
+                args.report_root or settings.eval_report_root,
+                args.profile,
+                settings.eval_report_timezone,
+                args.run_id,
+            )
+        )
+    try:
+        payload = await run(args)
+        if report_run is not None:
+            report_path = report_run.report_path(_default_report_name(args))
+            payload.update({
+                "run_id": report_run.run_id,
+                "report_path": str(report_path),
+                "created_at": report_run.started_at.isoformat(),
+                "report_timezone": report_run.timezone.key,
+            })
+            report_run.write_metrics(report_path.name, payload)
+            compatibility_output = ""
+            if args.output:
+                compatibility_output = str(Path(args.output).resolve())
+                _write_report(Path(args.output), payload)
+            report_run.complete({"compatibility_output": compatibility_output or None})
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        if report_run is not None:
+            print(f"评测结果：{report_run.path}")
+            print(f"汇总报告：{report_path}")
+        return payload
+    except BaseException as exc:
+        payload = getattr(args, "_result_payload", None)
+        if report_run is not None and payload:
+            report_path = report_run.report_path(_default_report_name(args))
+            payload.update({
+                "run_id": report_run.run_id,
+                "report_path": str(report_path),
+                "created_at": report_run.started_at.isoformat(),
+                "report_timezone": report_run.timezone.key,
+            })
+            report_run.write_metrics(report_path.name, payload)
+        if report_run is not None:
+            interrupted = isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+            report_run.fail(
+                "interrupted" if interrupted else "failed",
+                stage=f"{args.profile}.{args.mode}",
+                error=exc,
+            )
+            print(f"评测结果：{report_run.path}")
+        raise
 
 
 def parse_args():
@@ -669,10 +740,15 @@ def parse_args():
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--reuse-experiment", default="")
     parser.add_argument("--output", default="")
+    parser.add_argument("--report-root", default="")
+    parser.add_argument("--run-id", default="")
+    parser.add_argument("--run-dir", default="")
+    parser.add_argument("--report-name", default="")
+    parser.add_argument("--no-report", action="store_true")
     parser.add_argument("--require-export", action="store_true")
     parser.add_argument("--compare", nargs=2, metavar=("BASELINE", "CURRENT"))
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    asyncio.run(run(parse_args()))
+    asyncio.run(execute(parse_args()))
