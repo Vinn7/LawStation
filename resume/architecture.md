@@ -46,7 +46,10 @@ flowchart TB
     API --> DB[("SQLite")]
     MEMORY --> DB
     GRAPH --> AUDIT
-    GRAPH -. "可选 Trace" .-> OBS
+    API -. "端到端根 Trace" .-> OBS
+    GRAPH -. "Agent/LLM 子 Span" .-> OBS
+    MCP -. "签名传播上下文" .-> OBS
+    RAG -. "BM25/Embedding/FAISS/RRF 子 Span" .-> OBS
     RAG --> LAW["law.json"]
     RAG --> INDEX["FAISS 文件索引"]
     RAG --> OLLAMA["Ollama Embedding"]
@@ -64,7 +67,7 @@ flowchart TB
 | RAG | 法规加载、索引构建、混合召回、精确查询 | `LawSearchEngine` |
 | Memory | 上下文选择、异步提取、摘要和替换 | `MemoryService`、`MemoryTaskManager` |
 | Data | 所有权约束、原始消息、审计和迁移 | `OwnedRepository`、`db/models.py` |
-| Evaluation | 追踪、确定性指标、Judge、预算和报告 | `LangSmithObservability`、`ReportRun` |
+| Evaluation | 进程级追踪开关、端到端/跨 MCP Trace、确定性指标、Judge、预算和报告 | `LangSmithObservability`、`ReportRun` |
 
 ## 3. 顶层目录职责
 
@@ -120,6 +123,8 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - `AgentConcurrencyManager`。
 - `MemoryTaskManager` 单 Worker。
 - `LangSmithObservability`。
+
+其中 `LangSmithObservability` 只共享 Client、脱敏规则、进程 Session Budget 和随机 Bridge Token；当前 RunTree、Trace config、用户/会话哈希和 RAG 父上下文均为请求级数据。MCP 传播只接受同进程 Client 携带的内存 Bridge Token，外部 MCP 调试请求不会被拼接进咨询 Trace。
 
 创建位置：`backend/app/main.py::lifespan`。
 

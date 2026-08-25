@@ -51,6 +51,7 @@ class AgentRuntime:
         context: AgentInvocationContext,
         messages: list[BaseMessage],
         memory_context: str,
+        trace_config: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         graph = await self.ensure_ready(context)
         state: LegalConsultationState = {
@@ -67,19 +68,13 @@ class AgentRuntime:
             "errors": [],
         }
         final_state: dict[str, Any] = dict(state)
-        trace = self.observability.consultation(
-            request_id=context.identity.request_id,
-            tenant_id=context.identity.tenant_id,
-            user_id=context.identity.user_id,
-            conversation_id=context.identity.conversation_id,
-            model_name=self.settings.deepseek_model,
-            memory_context_chars=len(memory_context),
-        )
-        context.langsmith_trace_id = trace.trace_id
+        config = trace_config or context.trace_config or {
+            "configurable": {"thread_id": context.identity.conversation_id}
+        }
         async for part in graph.compiled.astream(
             state,
             context=context,
-            config=trace.config,
+            config=config,
             stream_mode=["updates", "custom"],
             version="v2",
         ):
@@ -134,7 +129,7 @@ class AgentRuntime:
             analysis.get("risk_level") == "high"
             or evidence.get("retrieval_status") in {"tool_error", "tool_unavailable"}
         )
-        if not trace.enabled and important_outcome:
+        if not context.langsmith_trace_id and important_outcome:
             question = ""
             if messages:
                 content = messages[-1].content

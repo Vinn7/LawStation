@@ -77,7 +77,7 @@ flowchart LR
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
-| `backend/app/observability/` | LangSmith 客户端、采样、身份哈希、内容过滤和反馈同步 | `LangSmithObservability`、`TraceInvocation` |
+| `backend/app/observability/` | LangSmith 客户端、进程级模式、根 Trace/预算、身份哈希、内容过滤和反馈同步 | `LangSmithObservability`、`RootTrace`、`SessionTraceBudget` |
 | `backend/app/evaluation/` | 确定性评估器、独立 Judge 和无生产写入的评测目标 | `DETERMINISTIC_EVALUATORS`、`LegalQualityJudge` |
 | `backend/app/schemas.py` | API 输入校验模型 | `ConversationCreate`、`ChatRequest`、`MemoryUpdate` |
 | `mcp_servers/law_rag/` | 法规切分、BM25、Dense、索引生命周期和 MCP 工具 | `LawSearchEngine`、`search_laws`、`get_law_article` |
@@ -124,7 +124,7 @@ python run.py
 12. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
 13. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager；仅关闭本次入口创建的 Ollama 进程组，不影响外部 Ollama。
 
-启动参数：`--rebuild`、`--no-build`、`--host`、`--port`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
+启动参数：`--rebuild`、`--no-build`、`--host`、`--port`、`--langsmith-trace-all`、`--langsmith-trace-limit`、`--no-langsmith-trace`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
 
 ## 6. 核心请求链路
 
@@ -442,7 +442,12 @@ SSE_HEARTBEAT_SECONDS
 
 ### 13.3 LangSmith 可观测与评估
 
-- **[已实现]** `LangSmithObservability` 在应用生命周期复用 Client；显式 callback 将 LangGraph、模型和 MCP Tool 组织为嵌套 trace，记忆任务使用独立项目标签。
+- **[已实现]** `LangSmithObservability` 在应用生命周期复用 Client。默认 `config` 沿用 `.env` 采样和月度预算；`--langsmith-trace-all` 将当前进程切为 100% 采样并使用咨询/记忆共享的 Session 根 Trace 上限（默认 200）；`--no-langsmith-trace` 强制关闭。CLI 覆盖不得写回 `.env`，互斥和非法上限必须在启动前拒绝。
+- **[已实现]** 全量模式在前端构建、Ollama 和 Uvicorn 前严格校验 API Key、HMAC、Workspace 及远端鉴权；启动后导出故障 fail-open。达到 Session 上限后停止创建新 Trace，只记录一次告警，业务继续。
+- **[已实现]** `backend/app/api/routes.py::stream_message` 持有 `lawstation.consultation` 根 Run，覆盖会话预占、排队、用户消息/MemorySnapshot、三 Agent Graph、回答持久化和记忆任务入队；heartbeat 和回答字符分片不得产生 Span。咨询根 Trace ID 写入用户及助手消息。
+- **[已实现]** LangGraph、DeepSeek 与 MCP Tool 继承请求级 Trace config。MCP Client Interceptor 只在当前父 Run 存在时传播 `langsmith-trace`/`baggage`，MCP Server 还必须验证进程内随机 Bridge Token；普通或伪造外部 MCP 请求不得注入咨询 Trace。
+- **[已实现]** RAG 以 `law_rag.search_laws` retriever 为父 Span，并记录 filter、BM25、query embedding、FAISS、RRF 和 get_article；不得上传原始向量、FAISS 对象或密钥，Dense 追踪候选明细限制为 100 条但不得改变实际检索结果。
+- **[已实现]** 每个 Memory Job 只创建一个独立 `lawstation.memory` 根 Trace，提取、替换/创建、增量摘要和持久化为子 Span；通过来源消息的咨询 Trace ID、会话哈希和来源消息哈希关联。重试 attempt 可形成新根 Trace，但同一进程同一 attempt 不得重复创建。
 - **[已实现]** 采样基于 `request_id` 稳定哈希，生产成功请求默认采样 2%；高风险、工具不可用和失败的未采样请求可补充 summary trace，但生产 Trace 月度预算耗尽后停止上报。LangSmith 异常或预算耗尽不得中断业务。
 - **[已实现]** 租户、用户、会话标识以 HMAC-SHA256 上报；API Key、Authorization、Cookie、数据库 URL 和 `reasoning_content` 强制过滤。正文由 `LANGSMITH_CAPTURE_CONTENT` 控制。
 - **[已实现]** `evals/datasets/` 保存 60 条合成 E2E、30 条分层 Agent 基准和 100 条引用真实 document/chunk ID 的源数据派生检索集；retrieval/component/live 分别隔离评估 RAG、Agent 编排和真实 MCP 链路。源数据派生集必须标记 `human_verified=false`，不得冒充律师人工标注。
@@ -598,3 +603,4 @@ SSE_HEARTBEAT_SECONDS
 - **2.6 / 2026-08-22**：LangSmith 评测改为 learn/smoke/compare/release 四级低资源流程；增加显式上传确认、分层小批次、月度 Trace/Agent/Judge 预算、生产 2% 采样、零资源学习指南及本地可复现指标规则。
 - **2.7 / 2026-08-23**：评测报告改为新加坡时区的逐次时间戳目录；增加原子 Manifest、最近运行索引、中断归档、同目录 staged 产物及严格 Baseline 跨运行复用校验。
 - **2.8 / 2026-08-24**：将 `resume/` 文档同步设为所有功能变更的强制交付门禁；每次变更必须更新受影响模块分册并同步更新或明确核验架构总览，文档结论必须以实际代码和测试为依据。
+- **2.9 / 2026-08-25**：增加 `config/all/off` 进程级 LangSmith 开关、严格启动预检、Session 根 Trace 上限、SSE 端到端咨询 RunTree、签名 MCP 分布式传播、RAG 内部检索 Span，以及每个 Memory Job 单根 Trace 收敛。

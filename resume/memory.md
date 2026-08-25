@@ -368,6 +368,12 @@ WHERE id = :memory_id
 
 这可以减少 SQLite 长事务和锁竞争。
 
+### 8.5 记忆 Trace 收敛
+
+`MemoryTaskManager._process` 每个实际 Worker attempt 最多申请一次 `lawstation.memory` 根 Trace。`memory.extraction`、`memory.replacement_or_create`、按需的 `memory.summary` 和 `memory.persist` 都是该根 Run 的子 Span，不会分别消耗根 Trace 额度。
+
+来源用户消息保存的 `Message.langsmith_trace_id` 被写入记忆 Trace metadata 的 `linked_consultation_trace_id`；同时只上传会话和来源消息 HMAC，不上传租户/用户原始 ID。空候选与未达到摘要阈值都是成功输出。记忆 Trace 失败不会回写或延长已经结束的咨询 Trace，也不会改变主回答状态。
+
 ## 9. 用户治理与前端反馈
 
 后端提供以下能力：

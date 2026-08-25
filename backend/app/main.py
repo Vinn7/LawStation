@@ -14,8 +14,8 @@ from backend.app.core.logging import audit, setup_logging
 from backend.app.db.migrations import upgrade_database
 from backend.app.db.models import Tenant, User
 from backend.app.db.session import Base, SessionLocal, engine
-from backend.app.services.memory_tasks import MemoryTaskManager
 from backend.app.observability import LangSmithObservability
+from backend.app.services.memory_tasks import MemoryTaskManager
 from mcp_servers.law_rag.server import (
     close_engine,
     get_index_status,
@@ -47,12 +47,14 @@ def initialize_database() -> None:
 async def lifespan(app: FastAPI):
     setup_logging()
     audit("application.starting", status="starting")
+    observability = LangSmithObservability()
+    observability.ensure_startup_ready()
+    app.state.langsmith_observability = observability
+    mcp_app.bind(observability)
     initialize_database()
     await initialize_engine()
-    registry = MCPToolRegistry()
+    registry = MCPToolRegistry(observability=observability)
     provider = LLMProvider()
-    observability = LangSmithObservability()
-    app.state.langsmith_observability = observability
     app.state.mcp_tool_registry = registry
     app.state.agent_runtime = AgentRuntime(registry, provider, observability=observability)
     app.state.agent_concurrency = AgentConcurrencyManager()
@@ -65,6 +67,7 @@ async def lifespan(app: FastAPI):
         finally:
             await app.state.memory_tasks.close()
             await app.state.agent_runtime.close()
+            mcp_app.bind(None)
             await observability.close()
             await close_engine()
             audit("application.stopped", status="stopped")

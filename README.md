@@ -91,12 +91,23 @@ LangSmith 默认关闭。启用前在 `.env` 至少配置：
 ```dotenv
 LANGSMITH_ENABLED=true
 LANGSMITH_API_KEY=你的密钥
+LANGSMITH_WORKSPACE_ID=你的工作区ID
 LANGSMITH_ID_HASH_SECRET=一个独立的高强度随机字符串
 LANGSMITH_PROJECT=lawstation
 LANGSMITH_ENVIRONMENT=development
 ```
 
-咨询 Graph 和记忆整理分别进入 `lawstation-<环境>-agent` 和 `lawstation-<环境>-memory` 项目。租户、用户和会话 ID 只以 HMAC 哈希发送；API Key、请求头、数据库地址和模型内部推理始终过滤。设置 `LANGSMITH_CAPTURE_CONTENT=false` 可隐藏 trace 输入输出。LangSmith 异常不会阻断咨询，`/health` 只暴露启用与导出状态。
+咨询 Graph 和记忆整理分别进入 `lawstation-<环境>-agent` 和 `lawstation-<环境>-memory` 项目。租户、用户和会话 ID 只以 HMAC 哈希发送；API Key、请求头、数据库地址和模型内部推理始终过滤。设置 `LANGSMITH_CAPTURE_CONTENT=false` 可隐藏 trace 输入输出。LangSmith 异常不会阻断咨询，`/health` 只暴露非敏感运行状态与预算。
+
+线上排查可按本次进程开启全链路追踪，不会改写 `.env`：
+
+```bash
+python run.py --langsmith-trace-all
+python run.py --langsmith-trace-all --langsmith-trace-limit 500
+python run.py --no-langsmith-trace
+```
+
+全量模式启动前严格校验 Key、HMAC、Workspace 和 LangSmith 鉴权；默认最多接收 200 条咨询/记忆根 Trace。咨询的排队、记忆快照、三 Agent、MCP、BM25、Ollama Query Embedding、FAISS、RRF 和持久化属于同一根 Trace；每个后台记忆 Job 使用一个可关联的独立根 Trace。达到上限或运行期导出故障后停止新增 Trace，但咨询继续运行。
 
 仓库提供 60 条合成 E2E 基准、30 条分层 Agent 基准，以及 100 条引用真实
 `document_id/chunk_id` 的源数据派生检索集：

@@ -27,6 +27,9 @@ sequenceDiagram
 
     User->>Run: python run.py
     Run->>Run: 固定工作目录、读取 .env
+    opt --langsmith-trace-all
+        Run->>Run: CLI 进程覆盖 + LangSmith 严格预检
+    end
     Run->>Run: 检查 frontend/dist 是否过期
     alt 需要构建
         Run->>Run: npm ci / npm install
@@ -75,12 +78,13 @@ sequenceDiagram
 `backend/app/main.py::lifespan` 顺序：
 
 1. `setup_logging()`。
-2. `initialize_database()`：运行 Alembic、补建表、创建默认租户与张三/李四。
-3. `initialize_engine()`：在线程中构造全量 BM25，引导 Dense 检查或后台建库。
-4. 创建应用级 `MCPToolRegistry`、`LLMProvider`、`LangSmithObservability`。
-5. 创建 `AgentRuntime` 和 `AgentConcurrencyManager`。
-6. 创建并启动 `MemoryTaskManager`。
-7. 进入 `mcp.session_manager.run()` 后才 `yield`。
+2. 创建并校验应用级 `LangSmithObservability`，把随机 MCP Trace Bridge Token 绑定到 MCP ASGI 包装层。
+3. `initialize_database()`：运行 Alembic、补建表、创建默认租户与张三/李四。
+4. `initialize_engine()`：在线程中构造全量 BM25，引导 Dense 检查或后台建库。
+5. 创建应用级 `MCPToolRegistry`、`LLMProvider`；Registry 注入 Trace Interceptor。
+6. 创建 `AgentRuntime` 和 `AgentConcurrencyManager`。
+7. 创建并启动 `MemoryTaskManager`。
+8. 进入 `mcp.session_manager.run()` 后才 `yield`。
 
 MCP 工具发现没有在 lifespan 中通过 HTTP 自调用；它在首个需要 Agent 的请求中由 `MCPToolRegistry.get_tools` 懒加载，避免服务尚未开始监听时自调用死锁。
 
@@ -117,7 +121,12 @@ python run.py --rebuild
 python run.py --no-build
 python run.py --host 0.0.0.0
 python run.py --port 9000
+python run.py --langsmith-trace-all
+python run.py --langsmith-trace-all --langsmith-trace-limit 500
+python run.py --no-langsmith-trace
 ```
+
+LangSmith 三模式分别为 `config/all/off`。CLI 开关只写当前进程环境并清除 Settings 缓存，不修改 `.env`；两个开关互斥，上限只能用于 `all` 且必须为正数。`all` 模式在构建前端、启动 Ollama 和 Uvicorn 前验证 API Key、HMAC、Workspace 与远端鉴权，失败即退出；运行期故障仍 fail-open。
 
 **文档偏差/风险**：`--port 9000` 只改变 Uvicorn 端口，默认 `MCP_LAW_SERVER_URL=http://127.0.0.1:8000/mcp/` 不会自动改为 9000。除非 `.env` 同步设置，首轮工具发现会访问错误端口。
 

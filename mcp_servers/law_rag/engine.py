@@ -13,6 +13,7 @@ from uuid import uuid4
 import jieba
 import numpy as np
 from filelock import FileLock, Timeout
+from langsmith import trace
 from rank_bm25 import BM25Okapi
 
 from backend.app.core.config import Settings, get_settings
@@ -240,7 +241,24 @@ class LawSearchEngine:
         return await self.embedding_provider.embed_documents(texts)
 
     async def _embed_query(self, query: str) -> np.ndarray:
-        return await self.embedding_provider.embed_query(query)
+        async with trace(
+            "law_rag.query_embedding",
+            run_type="chain",
+            inputs={
+                "query": query,
+                "provider": self.settings.embedding_provider,
+                "model": self.settings.embedding_model,
+            },
+        ) as run:
+            vector = await self.embedding_provider.embed_query(query)
+            if run is not None:
+                run.end(outputs={
+                    "vector_count": int(vector.shape[0]) if vector.ndim > 1 else 1,
+                    "dimension": int(vector.shape[-1]),
+                    "provider": self.settings.embedding_provider,
+                    "model": self.settings.embedding_model,
+                })
+            return vector
 
     async def _embed_batch(self, texts: list[str], batch_start: int) -> np.ndarray:
         import httpx
@@ -469,128 +487,219 @@ class LawSearchEngine:
             audit("index.manifest.persist_failed", status="failed", error_type=type(exc).__name__, message=str(exc))
 
     def _filtered_indices(self, filters: dict | None) -> list[int] | None:
-        if filters is None:
-            return None
-        if not isinstance(filters, dict):
-            raise TypeError("filters 必须是对象")
-        unknown = set(filters) - {"law_name"}
-        if unknown:
-            raise ValueError(f"不支持的过滤字段：{', '.join(sorted(unknown))}")
-        law_name = filters.get("law_name")
-        if law_name in (None, ""):
-            return None
-        if not isinstance(law_name, str):
-            raise TypeError("law_name 过滤条件必须是字符串")
-        normalized = normalize_law_name(law_name)
-        if not normalized:
-            return None
-        return [
-            index
-            for stored_name, indexes in self._law_name_indices.items()
-            if normalized in stored_name or stored_name in normalized
-            for index in indexes
-        ]
+        with trace("law_rag.filter", inputs={"filters": filters or {}}) as run:
+            if filters is None:
+                result = None
+            else:
+                if not isinstance(filters, dict):
+                    raise TypeError("filters 必须是对象")
+                unknown = set(filters) - {"law_name"}
+                if unknown:
+                    raise ValueError(f"不支持的过滤字段：{', '.join(sorted(unknown))}")
+                law_name = filters.get("law_name")
+                if law_name in (None, ""):
+                    result = None
+                else:
+                    if not isinstance(law_name, str):
+                        raise TypeError("law_name 过滤条件必须是字符串")
+                    normalized = normalize_law_name(law_name)
+                    result = None if not normalized else [
+                        index
+                        for stored_name, indexes in self._law_name_indices.items()
+                        if normalized in stored_name or stored_name in normalized
+                        for index in indexes
+                    ]
+            if run is not None:
+                run.end(outputs={
+                    "candidate_count": len(self.docs) if result is None else len(result),
+                    "filter_applied": result is not None,
+                })
+            return result
 
     def _lexical(
         self, query: str, pool: int, eligible_indices: list[int] | None = None
     ) -> list[tuple[int, float]]:
-        scores = self.bm25.get_scores(tokens(query))
-        candidates = eligible_indices if eligible_indices is not None else range(len(self.docs))
-        ranked = sorted(
-            ((int(index), float(scores[index])) for index in candidates),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        minimum = float(getattr(self.settings, "rag_bm25_min_score", 0.01))
-        return [item for item in ranked[:pool] if item[1] >= minimum]
+        with trace(
+            "law_rag.bm25",
+            run_type="retriever",
+            inputs={"query": query, "pool": pool},
+        ) as run:
+            scores = self.bm25.get_scores(tokens(query))
+            candidates = eligible_indices if eligible_indices is not None else range(len(self.docs))
+            ranked = sorted(
+                ((int(index), float(scores[index])) for index in candidates),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            minimum = float(getattr(self.settings, "rag_bm25_min_score", 0.01))
+            result = [item for item in ranked[:pool] if item[1] >= minimum]
+            if run is not None:
+                run.end(outputs={
+                    "matches": [
+                        {
+                            "document_id": self.docs[index]["document_id"],
+                            "chunk_id": self.docs[index]["chunk_id"],
+                            "score": score,
+                        }
+                        for index, score in result
+                    ],
+                    "minimum_score": minimum,
+                })
+            return result
+
+    async def _faiss_search(self, vector: np.ndarray, pool: int):
+        async with trace(
+            "law_rag.faiss",
+            run_type="retriever",
+            inputs={"pool": pool, "dimension": self.settings.embedding_dimension},
+        ) as run:
+            async with self._dense_lock:
+                dense_scores, dense = await asyncio.to_thread(
+                    self.faiss.search, vector, pool
+                )
+            if run is not None:
+                run.end(outputs={
+                    "candidate_count": int(sum(index >= 0 for index in dense[0])),
+                    "matches": [
+                        {
+                            "document_id": self.docs[int(index)]["document_id"],
+                            "chunk_id": self.docs[int(index)]["chunk_id"],
+                            "score": float(score),
+                        }
+                        for index, score in zip(dense[0], dense_scores[0], strict=True)
+                        if index >= 0
+                    ][:100],
+                    "matches_truncated": int(sum(index >= 0 for index in dense[0])) > 100,
+                })
+            return dense_scores, dense
+
+    def _rrf_order(self, ranks: dict[int, float], top_k: int) -> list[int]:
+        with trace(
+            "law_rag.rrf",
+            inputs={"candidate_count": len(ranks), "top_k": top_k},
+        ) as run:
+            minimum = float(getattr(self.settings, "rag_rrf_min_score", 0.01))
+            ordered = [
+                index
+                for index, _ in sorted(ranks.items(), key=lambda item: item[1], reverse=True)
+                if ranks[index] >= minimum
+            ][:top_k]
+            if run is not None:
+                run.end(outputs={
+                    "minimum_score": minimum,
+                    "matches": [
+                        {
+                            "document_id": self.docs[index]["document_id"],
+                            "chunk_id": self.docs[index]["chunk_id"],
+                            "rrf": round(ranks[index], 8),
+                        }
+                        for index in ordered
+                    ],
+                })
+            return ordered
 
     async def search(self, query, top_k=8, filters=None, retrieval_mode: str | None = None):
         mode = retrieval_mode or getattr(self.settings, "rag_retrieval_mode", "hybrid")
-        if mode not in {"bm25", "hybrid"}:
-            raise ValueError("retrieval_mode 必须是 bm25 或 hybrid")
-        top_k = max(1, min(int(top_k), 20))
-        eligible_indices = self._filtered_indices(filters)
-        if eligible_indices == []:
-            return []
-        eligible = set(eligible_indices) if eligible_indices is not None else None
-        candidate_count = len(eligible_indices) if eligible_indices is not None else len(self.docs)
-        pool = min(candidate_count, max(30, top_k * 4))
-        ranks: dict[int, float] = {}
-        sources: dict[int, list[str]] = {}
-        raw_scores: dict[int, dict[str, float]] = {}
-        lexical = await asyncio.to_thread(self._lexical, query, pool, eligible_indices)
-        for rank, (index, score) in enumerate(lexical):
-            ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
-            sources.setdefault(index, []).append("bm25")
-            raw_scores.setdefault(index, {})["bm25"] = score
-        if mode == "hybrid" and self.faiss is not None and self.embedding_descriptor is not None:
-            vector = await self._embed_query(query)
-            import faiss
+        async with trace(
+            "law_rag.search_laws",
+            run_type="retriever",
+            inputs={"query": query, "top_k": top_k, "filters": filters, "mode": mode},
+        ) as run:
+            if mode not in {"bm25", "hybrid"}:
+                raise ValueError("retrieval_mode 必须是 bm25 或 hybrid")
+            top_k = max(1, min(int(top_k), 20))
+            eligible_indices = self._filtered_indices(filters)
+            if eligible_indices == []:
+                if run is not None:
+                    run.end(outputs={"documents": [], "retrieval_status": "no_match"})
+                return []
+            eligible = set(eligible_indices) if eligible_indices is not None else None
+            candidate_count = len(eligible_indices) if eligible_indices is not None else len(self.docs)
+            pool = min(candidate_count, max(30, top_k * 4))
+            ranks: dict[int, float] = {}
+            sources: dict[int, list[str]] = {}
+            raw_scores: dict[int, dict[str, float]] = {}
+            lexical = await asyncio.to_thread(self._lexical, query, pool, eligible_indices)
+            for rank, (index, score) in enumerate(lexical):
+                ranks[index] = ranks.get(index, 0) + 1 / (61 + rank)
+                sources.setdefault(index, []).append("bm25")
+                raw_scores.setdefault(index, {})["bm25"] = score
+            if mode == "hybrid" and self.faiss is not None and self.embedding_descriptor is not None:
+                vector = await self._embed_query(query)
+                import faiss
 
-            faiss.normalize_L2(vector)
-            dense_pool = len(self.docs) if eligible is not None else pool
-            async with self._dense_lock:
-                dense_scores, dense = await asyncio.to_thread(
-                    self.faiss.search, vector, dense_pool
-                )
-            minimum_dense = float(getattr(self.settings, "rag_dense_min_score", 0.20))
-            accepted_rank = 0
-            for index, score in zip(dense[0], dense_scores[0], strict=True):
-                if index < 0:
-                    continue
-                index = int(index)
-                score = float(score)
-                if eligible is not None and index not in eligible:
-                    continue
-                if score < minimum_dense:
-                    continue
-                ranks[index] = ranks.get(index, 0) + 1 / (61 + accepted_rank)
-                sources.setdefault(index, []).append("dense")
-                raw_scores.setdefault(index, {})["dense"] = score
-                accepted_rank += 1
-                if accepted_rank >= pool:
-                    break
-        minimum_rrf = float(getattr(self.settings, "rag_rrf_min_score", 0.01))
-        ordered = [
-            index for index, _ in sorted(ranks.items(), key=lambda item: item[1], reverse=True)
-            if ranks[index] >= minimum_rrf
-        ][:top_k]
-        state = self.status()
-        return [{
-            **{key: value for key, value in self.docs[index].items() if key != "text"},
-            "retrieval_sources": sources[index],
-            "rank": rank + 1,
-            "retrieval_scores": {
-                **raw_scores.get(index, {}),
-                "rrf": round(ranks[index], 8),
-            },
-            "data_version": self.fingerprint,
-            "retrieval_mode": mode,
-            "dense_enabled": state["dense_enabled"],
-            "index_status": state["status"],
-        } for rank, index in enumerate(ordered)]
+                faiss.normalize_L2(vector)
+                dense_pool = len(self.docs) if eligible is not None else pool
+                dense_scores, dense = await self._faiss_search(vector, dense_pool)
+                minimum_dense = float(getattr(self.settings, "rag_dense_min_score", 0.20))
+                accepted_rank = 0
+                for index, score in zip(dense[0], dense_scores[0], strict=True):
+                    if index < 0:
+                        continue
+                    index = int(index)
+                    score = float(score)
+                    if eligible is not None and index not in eligible:
+                        continue
+                    if score < minimum_dense:
+                        continue
+                    ranks[index] = ranks.get(index, 0) + 1 / (61 + accepted_rank)
+                    sources.setdefault(index, []).append("dense")
+                    raw_scores.setdefault(index, {})["dense"] = score
+                    accepted_rank += 1
+                    if accepted_rank >= pool:
+                        break
+            ordered = self._rrf_order(ranks, top_k)
+            state = self.status()
+            results = [{
+                **{key: value for key, value in self.docs[index].items() if key != "text"},
+                "retrieval_sources": sources[index],
+                "rank": rank + 1,
+                "retrieval_scores": {
+                    **raw_scores.get(index, {}),
+                    "rrf": round(ranks[index], 8),
+                },
+                "data_version": self.fingerprint,
+                "retrieval_mode": mode,
+                "dense_enabled": state["dense_enabled"],
+                "index_status": state["status"],
+            } for rank, index in enumerate(ordered)]
+            if run is not None:
+                run.end(outputs={
+                    "documents": results,
+                    "retrieval_status": "matched" if results else "no_match",
+                })
+            return results
 
     def get(self, law_name, article_number):
-        normalized_name = normalize_law_name(law_name)
-        normalized_article = normalize_article_number(article_number)
-        matches = self._article_map.get((normalized_name, normalized_article), [])
-        if not matches:
-            matches = [
-                document
-                for (stored_name, stored_article), documents in self._article_map.items()
-                if normalized_article == stored_article
-                and (normalized_name in stored_name or stored_name in normalized_name)
-                for document in documents
-            ]
-        if len(matches) == 1:
-            return {key: value for key, value in matches[0].items() if key != "text"}
-        if matches:
-            return {
-                "law_name": matches[0]["law_name"],
-                "article_number": matches[0]["article_number"],
-                "chunks": [
-                    {key: value for key, value in document.items() if key != "text"}
-                    for document in matches
-                ],
-            }
-        return None
+        with trace(
+            "law_rag.get_article",
+            run_type="retriever",
+            inputs={"law_name": law_name, "article_number": article_number},
+        ) as run:
+            normalized_name = normalize_law_name(law_name)
+            normalized_article = normalize_article_number(article_number)
+            matches = self._article_map.get((normalized_name, normalized_article), [])
+            if not matches:
+                matches = [
+                    document
+                    for (stored_name, stored_article), documents in self._article_map.items()
+                    if normalized_article == stored_article
+                    and (normalized_name in stored_name or stored_name in normalized_name)
+                    for document in documents
+                ]
+            if len(matches) == 1:
+                result = {key: value for key, value in matches[0].items() if key != "text"}
+            elif matches:
+                result = {
+                    "law_name": matches[0]["law_name"],
+                    "article_number": matches[0]["article_number"],
+                    "chunks": [
+                        {key: value for key, value in document.items() if key != "text"}
+                        for document in matches
+                    ],
+                }
+            else:
+                result = None
+            if run is not None:
+                run.end(outputs={"result": result, "chunk_count": len(matches)})
+            return result

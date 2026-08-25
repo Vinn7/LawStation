@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -578,7 +579,8 @@ async def test_empty_memory_extraction_is_success(monkeypatch):
     monkeypatch.setattr("backend.app.services.memory_tasks.SessionLocal", local_session)
 
     class Runner:
-        async def ainvoke(self, _messages):
+        async def ainvoke(self, _messages, config=None):
+            assert config["run_name"] == "memory.extraction"
             return SimpleNamespace(content='{"memories": []}')
 
     class Model:
@@ -588,10 +590,33 @@ async def test_empty_memory_extraction_is_success(monkeypatch):
             assert kwargs["response_format"] == {"type": "json_object"}
             return Runner()
 
+    class Root:
+        def __init__(self):
+            self.enabled = True
+            self.config = {"callbacks": ["memory-tracer"]}
+            self.finished = []
+
+        def activate(self):
+            return nullcontext()
+
+        def span(self, *_args, **_kwargs):
+            return nullcontext()
+
+        async def finish(self, **kwargs):
+            self.finished.append(kwargs)
+
+    root = Root()
+    observability = SimpleNamespace(
+        calls=[],
+        start_memory_job=lambda **kwargs: (
+            observability.calls.append(kwargs) or root
+        ),
+    )
     provider = type("Provider", (), {"get_memory_model": lambda self: Model()})()
     manager = MemoryTaskManager(
         provider,
         Settings(_env_file=None, memory_compression_threshold=99999),
+        observability=observability,
     )
 
     await manager._process(job.id)
@@ -600,6 +625,9 @@ async def test_empty_memory_extraction_is_success(monkeypatch):
     assert db.get(MemoryJob, job.id).status == "completed"
     assert db.get(MemoryJob, job.id).candidate_count == 0
     assert db.query(UserMemory).count() == 0
+    assert len(observability.calls) == 1
+    assert observability.calls[0]["source_message_id"] == source.id
+    assert root.finished[0]["outputs"]["status"] == "completed"
 
 
 @pytest.mark.asyncio

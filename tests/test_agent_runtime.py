@@ -10,6 +10,7 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
 from backend.app.agent.concurrency import (
     AgentConcurrencyManager,
@@ -26,7 +27,7 @@ from backend.app.agent.graph import (
 )
 from backend.app.agent.middleware import result_metadata
 from backend.app.agent.provider import AgentConfigurationError, LLMProvider
-from backend.app.agent.registry import MCPToolRegistry
+from backend.app.agent.registry import MCPToolRegistry, MCPTraceContextInterceptor
 from backend.app.agent.runtime import AgentRuntime
 from backend.app.agent.schemas import CaseAnalysis, CounselDraft, EvidenceItem, EvidencePacket
 from backend.app.agent.service import AgentService
@@ -131,6 +132,40 @@ async def test_registry_failure_obeys_retry_cooldown():
 
     assert client.get_tools.await_count == 1
     assert registry.status().status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_mcp_trace_interceptor_only_adds_active_signed_headers():
+    observability = SimpleNamespace(
+        trace_headers=lambda: {
+            "langsmith-trace": "parent-order",
+            "baggage": "langsmith-project=lawstation",
+            "x-lawstation-trace-bridge": "internal-token",
+        }
+    )
+    interceptor = MCPTraceContextInterceptor(observability)
+    request = MCPToolCallRequest(
+        name="search_laws",
+        args={"query": "劳动合同"},
+        server_name="law",
+        headers={"x-existing": "kept"},
+    )
+    captured = None
+
+    async def handler(value):
+        nonlocal captured
+        captured = value
+        return "ok"
+
+    assert await interceptor(request, handler) == "ok"
+    assert captured.headers["x-existing"] == "kept"
+    assert captured.headers["langsmith-trace"] == "parent-order"
+    assert captured.headers["x-lawstation-trace-bridge"] == "internal-token"
+
+    observability.trace_headers = dict
+    captured = None
+    await interceptor(request, handler)
+    assert captured is request
 
 
 @pytest.mark.asyncio

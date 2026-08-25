@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     agent_review_mode: Literal["always-llm", "auto"] = "auto"
     sse_heartbeat_seconds: float = 15.0
     langsmith_enabled: bool = False
+    langsmith_runtime_mode: Literal["config", "all", "off"] = "config"
+    langsmith_session_trace_limit: int = 200
+    langsmith_strict_startup: bool = False
     langsmith_api_key: str = ""
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_workspace_id: str = ""

@@ -17,7 +17,7 @@
 | 记忆 | context budget、压缩阈值、Worker、Memory LLM |
 | RAG | BM25/Dense/RRF 阈值和 retrieval mode |
 | 日志 | 目录、级别、轮转和摘要长度 |
-| LangSmith | 开关、采样、隐私、Judge 和预算 |
+| LangSmith | `config/all/off` 运行模式、Session 根 Trace 上限、采样、隐私、Judge 和月度预算 |
 | Eval | 月度预算、缓存和时间戳报告目录 |
 
 密钥只应存在 `.env`；`.env.example` 提供空值模板。前端使用同源 `/api`，没有构建期 API Key。
@@ -44,6 +44,8 @@ conda env create -f environment.yml
 conda activate LawStation
 python run.py
 ```
+
+线上全链路诊断使用 `python run.py --langsmith-trace-all [--langsmith-trace-limit N]`；强制关闭使用 `--no-langsmith-trace`。CLI 仅覆盖当前进程，`all` 默认最多 200 条咨询与记忆根 Trace并绕过月度生产采样预算，子 Span 不重复扣减。全量模式要求 `.env` 配置 Key、Workspace ID 和 HMAC 密钥。
 
 前端构建由启动器自动判断，也可单独执行：
 
@@ -96,7 +98,7 @@ Pytest 配置位于 `pyproject.toml`，测试均在 `tests/`。
 | 所有权隔离 | `test_isolation.py` |
 | Alembic | `test_migrations.py` |
 | JSONL 审计 | `test_audit_logging.py` |
-| LangSmith | `test_langsmith_observability.py` |
+| LangSmith | `test_langsmith_observability.py`、`test_agent_runtime.py`（预算、开关、MCP header 传播） |
 | 评测预算/报告 | `test_eval_resource_budget.py`、`test_eval_reporting.py` |
 | 启动器 | `test_run.py` |
 

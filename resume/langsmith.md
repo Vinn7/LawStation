@@ -1,6 +1,8 @@
 # LawStation：LangSmith 可观测与评估设计
 
-> Review 状态：生产 Trace、反馈同步、离线 evaluator、资源预算和时间戳报告均为**已验证**；独立的线上 LLM evaluator 调度器为**部分实现**，当前只有配置项，没有持续执行 Worker。
+> Review 状态：进程级线上开关、咨询端到端根 Trace、签名 MCP/RAG 传播、记忆 Job 根 Trace、反馈同步、离线 evaluator、资源预算和时间戳报告均为**已验证**；独立的线上 LLM evaluator 调度器为**部分实现**，当前只有配置项，没有持续执行 Worker。
+
+实际配置、命令、报告解读及简历指标采用规则见 [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)。
 
 ## 项目亮点
 
@@ -20,12 +22,38 @@ flowchart LR
 
 ## 设计与实现
 
-- 使用应用级 `LangSmithObservability` 统一创建 Client、Tracer、采样配置和隐私处理，避免业务节点散落 SDK 调用。
-- 一轮咨询形成 Case Analyst、Legal Research、Legal Counsel、Reviewer、Finalize 的嵌套 trace；MCP 工具和 DeepSeek 调用自动成为子 Run。
-- 记忆提取与摘要进入独立 memory pipeline，不污染咨询 Agent 的模型调用、耗时和质量统计。
+- 使用应用级 `LangSmithObservability` 统一创建 Client、Tracer、采样配置、根 Trace 预算和隐私处理，避免业务节点散落 SDK 调用。
+- `stream_message` 手工创建 `lawstation.consultation` 根 Run，覆盖会话预占、排队、MemorySnapshot、三 Agent、回答持久化与记忆任务入队；Agent Runtime 只消费 request-scoped callback config，不再重复创建根 Trace。
+- `MCPTraceContextInterceptor` 通过 `langsmith-trace`/`baggage` 传播当前父上下文；MCP ASGI 包装层还要求本进程内存 Bridge Token。RAG 内部以 retriever/chain 子 Span 展示 filter、BM25、Ollama Query Embedding、FAISS 和 RRF。
+- 每个 Memory Job 只创建一个 `lawstation.memory` 根 Trace，提取、替换/创建、摘要和持久化为子 Span；它通过来源消息的咨询 Trace ID 关联，但不会延长已经结束的 SSE 根 Trace。
 - 用 `request_id` 关联本地 JSONL 审计；租户、用户和会话 ID 经 HMAC-SHA256 后上报。
 - 即使允许记录咨询原文，也强制过滤密钥、Authorization、Cookie、数据库地址和模型内部 `reasoning_content`。
-- LangSmith 采用 fail-open：初始化、网络、反馈同步和关闭失败不能影响 SSE、MCP 和记忆整理。
+- `all` 模式启动预检 fail-fast；服务已运行后的导出、反馈同步和关闭故障采用 fail-open，不能影响 SSE、MCP 和记忆整理。
+
+## 线上运行开关与预算
+
+```bash
+python run.py
+python run.py --langsmith-trace-all
+python run.py --langsmith-trace-all --langsmith-trace-limit 500
+python run.py --no-langsmith-trace
+```
+
+四条命令依次对应 `config`、默认上限 200 的 `all`、自定义上限的 `all` 和 `off`。CLI 不写回 `.env`。全量模式在前端构建、Ollama、Uvicorn 前校验 Key、HMAC、Workspace 和远端鉴权。咨询与记忆共享线程安全的 `SessionTraceBudget`：第 N 条允许创建，第 N+1 条停止新增 Trace 并只审计一次告警；Agent、LLM、MCP 和 RAG 子 Span 不重复扣减。`GET /health` 可查看 mode、ready/degraded/off、limit/used/remaining/exhausted，不返回凭证。
+
+```mermaid
+flowchart TD
+    ROOT["lawstation.consultation"] --> CHAT["reserve / queue / snapshot"]
+    ROOT --> GRAPH["three-agent graph"]
+    GRAPH --> MODEL["DeepSeek calls"]
+    GRAPH --> TOOL["MCP tool"]
+    TOOL --> RAG["law_rag.search_laws"]
+    RAG --> BM25["filter + BM25"]
+    RAG --> DENSE["Ollama embedding + FAISS"]
+    RAG --> RRF["RRF"]
+    ROOT --> PERSIST["answer + memory enqueue"]
+    MEMORY["lawstation.memory"] -. "linked_consultation_trace_id" .-> ROOT
+```
 
 ## 评测体系
 
@@ -60,6 +88,8 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 - `LANGSMITH_CAPTURE_CONTENT=true` 允许上传咨询正文；生产启用前必须完成隐私、数据驻留和授权评估。
 - Compare/Release 的小样本只能作为见证实验，不能替代大规模人工法律标注。
 - LangSmith 不是业务数据库或安全审计事实源，本地 JSONL 与 SQLite 反馈才承担可恢复记录。
+- 开关是进程级参数；运行时不提供动态开启 API，切换必须重启服务。
+- Bridge Token 仅证明调用来自本进程，存在于内存中，不是用户身份认证手段。
 
 ## 面试表达
 
@@ -70,6 +100,13 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 ## 关键代码
 
 - `backend/app/observability/langsmith.py::LangSmithObservability`
+- `backend/app/observability/langsmith.py::RootTrace`
+- `backend/app/observability/langsmith.py::SessionTraceBudget`
+- `backend/app/api/routes.py::stream_message`
+- `backend/app/agent/registry.py::MCPTraceContextInterceptor`
+- `mcp_servers/law_rag/server.py::MCPTracePropagationApp`
+- `mcp_servers/law_rag/engine.py::LawSearchEngine.search`
+- `backend/app/services/memory_tasks.py::MemoryTaskManager._process`
 - `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`
 - `backend/app/evaluation/judge.py::LegalQualityJudge`
 - `backend/app/evaluation/reporting.py::ReportRun`

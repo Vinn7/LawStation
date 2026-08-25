@@ -8,7 +8,11 @@ from backend.app.evaluation.evaluators import (
     no_match_safety,
     route_correctness,
 )
-from backend.app.observability.langsmith import LangSmithObservability, _safe_payload
+from backend.app.observability.langsmith import (
+    LangSmithObservability,
+    SessionTraceBudget,
+    _safe_payload,
+)
 
 
 def test_sensitive_trace_fields_and_reasoning_are_removed():
@@ -49,6 +53,33 @@ def test_production_trace_budget_is_fail_open(tmp_path):
     observability = LangSmithObservability(settings)
     assert observability._production_slot()
     assert not observability._production_slot()
+
+
+def test_session_trace_budget_counts_roots_only():
+    budget = SessionTraceBudget(2)
+    assert budget.acquire()
+    assert budget.acquire()
+    assert not budget.acquire()
+    assert budget.status() == {
+        "session_trace_limit": 2,
+        "session_trace_used": 2,
+        "session_trace_remaining": 0,
+        "session_trace_exhausted": True,
+    }
+
+
+def test_off_runtime_mode_never_enables_client():
+    settings = Settings(
+        _env_file=None,
+        langsmith_enabled=True,
+        langsmith_runtime_mode="off",
+        langsmith_api_key="not-used",
+        langsmith_id_hash_secret="test-secret",
+    )
+    observability = LangSmithObservability(settings)
+    status = observability.status()
+    assert status["enabled"] is False
+    assert status["runtime_mode"] == "off"
 
 
 def test_deterministic_evaluators_cover_evidence_boundaries():

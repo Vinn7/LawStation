@@ -39,8 +39,10 @@ sequenceDiagram
     participant Memory as MemoryService
     participant Agent as AgentService/Runtime
     participant Job as MemoryTaskManager
+    participant Trace as LangSmith RunTree
 
     UI->>Route: POST + X-User-ID
+    Route->>Trace: start_consultation（按模式/预算）
     Route->>Limit: reserve(conversation)
     Route->>DB: 验证会话所有权
     Route-->>UI: message_start
@@ -60,9 +62,12 @@ sequenceDiagram
     Route-->>UI: memory_status pending
     Route-->>UI: message_end
     Route->>Limit: release + release_reservation
+    Route->>Trace: finish(success/interrupted/error)
 ```
 
 关键 symbol：`stream_message`、`_prepare_chat`、`_save_assistant`、`with_sse_heartbeat`。
+
+`stream_message` 是线上咨询根 Trace 的所有者。根 Run 覆盖会话预占、排队、记忆快照、Agent Graph、回答保存和记忆任务入队；heartbeat 与 24 字符输出分片不创建 Span。根 Trace ID 同时写入本轮用户消息和助手消息，供反馈与后台记忆任务关联。客户端中断时以 `interrupted` 结束，Trace 中只记录已实际发送的正文长度。
 
 ## 4. 短事务设计
 

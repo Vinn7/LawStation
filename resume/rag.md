@@ -359,7 +359,8 @@ CounselDraft 实际引用的 chunk_id
 - 连接、协议和 Schema 错误会使 MCP 工具注册表进入 stale，后续按冷却策略重新发现；
 - JSONL 审计记录工具名称、耗时、结果数量、document ID、chunk ID、法律名称和条号，不记录完整法条正文；
 - `RetrievalTrace` 使用 `tenant_id + user_id + conversation_id` 关联本轮咨询；
-- LangSmith trace 可以看到 Research Agent、模型调用和 MCP 工具的嵌套轨迹。
+- LangSmith 全链路模式通过签名的 MCP HTTP 传播上下文，把 `law_rag.search_laws` 作为 retriever 子 Span 接回咨询根 Trace；其下细分 filter、BM25、query embedding、FAISS 与 RRF。查询向量和 FAISS 对象不上传，Dense 候选明细最多记录 100 条，检索算法本身不因此截断。
+- `MCPTracePropagationApp` 只接受带本进程随机 Bridge Token 的 `langsmith-trace`/`baggage`；普通或伪造的外部 MCP 请求不会创建独立 RAG Trace。
 
 ## 13. 测试体系
 

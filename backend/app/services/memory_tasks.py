@@ -204,6 +204,7 @@ class MemoryTaskManager:
     async def _process(self, job_id: str) -> None:
         started = time.perf_counter()
         phase = "load"
+        root_trace = None
         try:
             job_data = self._load_job(job_id)
         except Exception as exc:  # noqa: BLE001 - durable worker boundary
@@ -223,59 +224,80 @@ class MemoryTaskManager:
             return
         if job_data is None:
             return
+        root_trace = self.observability.start_memory_job(
+            request_id=job_data["audit"]["request_id"],
+            tenant_id=job_data["tenant_id"],
+            user_id=job_data["user_id"],
+            conversation_id=job_data["conversation_id"],
+            job_id=job_data["id"],
+            source_message_id=job_data["source_message_id"],
+            linked_consultation_trace_id=job_data["linked_consultation_trace_id"],
+            attempt=job_data["attempt"],
+        )
         audit("memory.extraction.started", status="started", **job_data["audit"])
         try:
-            phase = "extraction"
-            model = self.provider.get_memory_model()
-            trace = self.observability.memory(
-                request_id=job_data["audit"]["request_id"],
-                tenant_id=job_data["tenant_id"],
-                user_id=job_data["user_id"],
-                conversation_id=job_data["conversation_id"],
-                job_id=job_data["id"],
-            )
-            extraction_trace_config = (
-                {**trace.config, "run_name": "memory.extraction"} if trace.enabled else None
-            )
-            extracted = await self._invoke_structured_json(
-                model,
-                MemoryExtractionResult,
-                EXTRACTION_SYSTEM,
-                {
-                    "source_message": job_data["source_content"],
-                    "existing_memories": job_data["existing_memories"],
-                },
-                {"memories": []},
-                trace_config=extraction_trace_config,
-            )
-            phase = "persistence"
-            persist_stats = self._persist_candidates(job_data, extracted)
-            try:
-                phase = "summary"
-                summary_updated = await self._update_summary(model, job_data)
-            except Exception as exc:
-                category, _, safe_error = _failure_details(exc)
-                audit(
-                    "memory.summary.failed",
-                    level=logging.ERROR,
-                    status="failed",
-                    error_type=type(exc).__name__,
-                    error_category=category,
-                    memory_phase=phase,
-                    attempt=job_data["attempt"],
-                    error=safe_error,
-                    **job_data["audit"],
+            with root_trace.activate():
+                phase = "extraction"
+                model = self.provider.get_memory_model()
+                extraction_trace_config = (
+                    {**root_trace.config, "run_name": "memory.extraction"}
+                    if root_trace.enabled else None
                 )
-                raise
-            phase = "completion"
-            with SessionLocal() as db:
-                job = db.get(MemoryJob, job_id)
-                if job:
-                    job.status = "completed"
-                    job.candidate_count = persist_stats.changed_count
-                    job.summary_updated = summary_updated
-                    job.last_error = ""
-                    db.commit()
+                extracted = await self._invoke_structured_json(
+                    model,
+                    MemoryExtractionResult,
+                    EXTRACTION_SYSTEM,
+                    {
+                        "source_message": job_data["source_content"],
+                        "existing_memories": job_data["existing_memories"],
+                    },
+                    {"memories": []},
+                    trace_config=extraction_trace_config,
+                )
+                phase = "replacement_or_create"
+                with root_trace.span(
+                    "memory.replacement_or_create",
+                    inputs={"candidate_count": len(extracted.memories)},
+                ) as replacement_span:
+                    persist_stats = self._persist_candidates(job_data, extracted)
+                    if replacement_span is not None:
+                        replacement_span.end(outputs={
+                            "created_count": persist_stats.created_count,
+                            "replaced_count": persist_stats.replaced_count,
+                            "rejected_count": persist_stats.rejected_count,
+                        })
+                try:
+                    phase = "summary"
+                    summary_updated = await self._update_summary(
+                        model,
+                        job_data,
+                        trace_config=root_trace.config if root_trace.enabled else None,
+                    )
+                except Exception as exc:
+                    category, _, safe_error = _failure_details(exc)
+                    audit(
+                        "memory.summary.failed",
+                        level=logging.ERROR,
+                        status="failed",
+                        error_type=type(exc).__name__,
+                        error_category=category,
+                        memory_phase=phase,
+                        attempt=job_data["attempt"],
+                        error=safe_error,
+                        **job_data["audit"],
+                    )
+                    raise
+                phase = "persistence"
+                with root_trace.span("memory.persist") as persist_span:
+                    self._complete_job(
+                        job_id, persist_stats.changed_count, summary_updated
+                    )
+                    if persist_span is not None:
+                        persist_span.end(outputs={
+                            "candidate_count": persist_stats.changed_count,
+                            "summary_updated": summary_updated,
+                        })
+                phase = "completion"
             audit(
                 "memory.extraction.completed",
                 status="success",
@@ -289,6 +311,15 @@ class MemoryTaskManager:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 **job_data["audit"],
             )
+            await root_trace.finish(outputs={
+                "status": "completed",
+                "candidate_count": persist_stats.changed_count,
+                "created_count": persist_stats.created_count,
+                "replaced_count": persist_stats.replaced_count,
+                "rejected_count": persist_stats.rejected_count,
+                "summary_updated": summary_updated,
+                "attempt": job_data["attempt"],
+            })
         except Exception as exc:  # noqa: BLE001 - durable worker boundary
             category, retryable, safe_error = _failure_details(exc)
             status, attempt = self._fail(job_id, safe_error, retryable=retryable)
@@ -304,6 +335,11 @@ class MemoryTaskManager:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 **job_data["audit"],
             )
+            if root_trace is not None:
+                await root_trace.finish(
+                    outputs={"status": status, "phase": phase, "attempt": attempt},
+                    error=f"{category}: {safe_error}",
+                )
 
     async def _invoke_structured_json(
         self,
@@ -390,6 +426,7 @@ class MemoryTaskManager:
                 "conversation_id": job.conversation_id,
                 "source_message_id": job.source_message_id,
                 "source_content": source.content,
+                "linked_consultation_trace_id": source.langsmith_trace_id or "",
                 "existing_memories": [
                     {
                         "memory_id": memory.id,
@@ -408,6 +445,21 @@ class MemoryTaskManager:
                     "conversation_id": job.conversation_id,
                 },
             }
+
+    @staticmethod
+    def _complete_job(
+        job_id: str,
+        candidate_count: int,
+        summary_updated: bool,
+    ) -> None:
+        with SessionLocal() as db:
+            job = db.get(MemoryJob, job_id)
+            if job:
+                job.status = "completed"
+                job.candidate_count = candidate_count
+                job.summary_updated = summary_updated
+                job.last_error = ""
+                db.commit()
 
     def _persist_candidates(
         self, job_data: dict[str, Any], result: MemoryExtractionResult
@@ -600,7 +652,13 @@ class MemoryTaskManager:
                 db.expire_all()
         return "version_conflict"
 
-    async def _update_summary(self, model, job_data: dict[str, Any]) -> bool:
+    async def _update_summary(
+        self,
+        model,
+        job_data: dict[str, Any],
+        *,
+        trace_config: dict[str, Any] | None = None,
+    ) -> bool:
         with SessionLocal() as db:
             owner_conditions = (
                 Message.tenant_id == job_data["tenant_id"],
@@ -661,13 +719,6 @@ class MemoryTaskManager:
                 ],
             }
         audit("memory.summary.started", status="started", **job_data["audit"])
-        summary_trace = self.observability.memory(
-            request_id=job_data["audit"]["request_id"],
-            tenant_id=job_data["tenant_id"],
-            user_id=job_data["user_id"],
-            conversation_id=job_data["conversation_id"],
-            job_id=job_data.get("id", job_data["audit"]["request_id"]),
-        )
         generated = await self._invoke_structured_json(
             model,
             StructuredConversationSummary,
@@ -683,8 +734,8 @@ class MemoryTaskManager:
                 "open_questions": [],
             },
             trace_config=(
-                {**summary_trace.config, "run_name": "memory.summary"}
-                if summary_trace.enabled else None
+                {**trace_config, "run_name": "memory.summary"}
+                if trace_config else None
             ),
         )
         summary_json = generated.model_dump_json()

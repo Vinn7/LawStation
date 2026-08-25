@@ -48,6 +48,7 @@ class AgentInvocationContext:
     identity: AgentInvocationIdentity
     metrics: AgentInvocationMetrics = field(default_factory=AgentInvocationMetrics)
     langsmith_trace_id: str | None = None
+    trace_config: dict[str, Any] | None = None
     evaluation_output: dict[str, Any] = field(default_factory=dict)
     persist_tool_audit: bool = True
     evaluation_case_analysis: dict[str, Any] | None = None

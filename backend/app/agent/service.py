@@ -15,6 +15,8 @@ class AgentService:
         runtime: AgentRuntime,
         ctx: RequestUserContext,
         conversation_id: str,
+        trace_config: dict | None = None,
+        trace_id: str | None = None,
     ) -> None:
         self.runtime = runtime
         self.ctx = ctx
@@ -22,7 +24,8 @@ class AgentService:
         self.tool_call_count = 0
         self.model_call_count = 0
         self.final_answer = ""
-        self.langsmith_trace_id: str | None = None
+        self.langsmith_trace_id: str | None = trace_id
+        self.trace_config = trace_config
 
     async def run(self, memory_context: str, history, question: str) -> AsyncIterator[dict]:
         messages = []
@@ -39,15 +42,30 @@ class AgentService:
                 user_id=self.ctx.user_id,
                 conversation_id=self.conversation_id,
             ),
+            trace_config=self.trace_config,
         )
         try:
-            async for item in self.runtime.stream(invocation, messages, memory_context):
+            invocation.langsmith_trace_id = self.langsmith_trace_id
+            stream = (
+                self.runtime.stream(
+                    invocation,
+                    messages,
+                    memory_context,
+                    trace_config=self.trace_config,
+                )
+                if self.trace_config is not None
+                else self.runtime.stream(invocation, messages, memory_context)
+            )
+            async for item in stream:
                 if item["event"] == "agent_final":
                     self.final_answer = item["data"]
                 else:
                     yield item
         except Exception as exc:
-            if invocation.langsmith_trace_id is None:
+            if (
+                invocation.langsmith_trace_id is None
+                and hasattr(self.runtime, "observability")
+            ):
                 invocation.langsmith_trace_id = await self.runtime.observability.force_outcome_trace(
                     request_id=self.ctx.request_id,
                     tenant_id=self.ctx.tenant_id,

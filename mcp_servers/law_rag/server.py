@@ -1,8 +1,10 @@
 import asyncio
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from backend.app.core.config import get_settings
+from backend.app.observability.langsmith import LangSmithObservability
 from mcp_servers.law_rag.engine import LawSearchEngine
 
 settings = get_settings()
@@ -15,6 +17,26 @@ mcp = FastMCP(
 )
 _engine: LawSearchEngine | None = None
 _engine_lock = asyncio.Lock()
+
+
+class MCPTracePropagationApp:
+    """Continue only signed, in-process LangSmith contexts across MCP HTTP."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.observability: LangSmithObservability | None = None
+
+    def bind(self, observability: LangSmithObservability | None) -> None:
+        self.observability = observability
+
+    async def __call__(self, scope, receive, send):
+        observability = self.observability
+        headers = dict(scope.get("headers", [])) if scope.get("type") == "http" else {}
+        if observability is not None and observability.accepts_trace_headers(headers):
+            with observability.propagated_context(headers):
+                await self.app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 async def initialize_engine() -> LawSearchEngine:
@@ -53,7 +75,7 @@ async def get_law_article(law_name: str, article_number: str) -> dict:
     }
 
 
-mcp_app = mcp.streamable_http_app()
+mcp_app = MCPTracePropagationApp(mcp.streamable_http_app())
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

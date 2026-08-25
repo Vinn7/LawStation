@@ -1,6 +1,6 @@
 # LawStation 全项目 Review 文档
 
-> Review 基线：2026-08-23 当前工作区代码。结论以代码、配置、迁移和测试交叉验证为准。
+> Review 基线：2026-08-25 当前工作区代码。结论以代码、配置、迁移和测试交叉验证为准。
 
 ## 项目定位
 
@@ -25,8 +25,9 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 8. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
 9. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
 10. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
-11. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
-12. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+11. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
+12. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
+13. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 
 ## 一句话主链路
 
@@ -40,7 +41,8 @@ flowchart LR
     TOOLS --> MCP["/mcp/"]
     MCP --> RAG["BM25 + FAISS + RRF"]
     API --> DB["SQLite"]
-    GRAPH -. 可选 .-> LS["LangSmith"]
+    API -. "可选端到端根 Trace" .-> LS["LangSmith"]
+    MCP -. "签名上下文 + RAG 子 Span" .-> LS
 ```
 
 ## Review 结论摘要
@@ -55,6 +57,7 @@ flowchart LR
 - **部分实现**：`MemorySnapshot` 已定义但未作为真实返回类型使用；线上 LLM evaluator 有配置，但没有独立在线调度器。
 - **文档偏差**：非 8000 端口启动时，默认 `MCP_LAW_SERVER_URL` 不会自动跟随 `--port` 调整。
 - **已验证**：`tools/` 是参考/遗留工具集合，正式 Agent、MCP 和 API 代码没有导入它。
+- **已验证**：启动器提供 LangSmith `config/all/off` 进程级开关；全量模式把 SSE 编排、三 Agent、MCP 和 RAG 内部阶段关联为一个咨询根 Trace，并以 Session 上限保护线上资源。
 
 ## 建议 Review 顺序
 
@@ -62,7 +65,8 @@ flowchart LR
 
 ## 本次验证结果
 
-- 后端：Conda `LawStation` 环境、临时 SQLite，`90 passed`；两条第三方依赖 warning，不影响结果。
+- 后端：Conda `LawStation` 环境、临时 SQLite，`96 passed`；两条第三方依赖 warning，不影响结果。
 - 前端：Vitest `4` 个测试文件、`13 passed`。
 - 文档：导航目标、关键 symbol、Markdown 围栏和敏感信息扫描通过。
-- 未执行：服务启动、Ollama、真实 Embedding、DeepSeek、LangSmith 上传和生产前端构建。
+- 已执行：前端 Vitest `4` 个测试文件、`13 passed`，Vite 生产构建成功。
+- 未执行：服务启动、Ollama、真实 Embedding、DeepSeek 和 LangSmith 上传。

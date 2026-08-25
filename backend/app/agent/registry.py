@@ -6,9 +6,24 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit, summary
+from backend.app.observability.langsmith import LangSmithObservability
+
+
+class MCPTraceContextInterceptor:
+    """Propagate only an active, signed LangSmith parent context to MCP HTTP."""
+
+    def __init__(self, observability: LangSmithObservability) -> None:
+        self.observability = observability
+
+    async def __call__(self, request: MCPToolCallRequest, handler):
+        headers = self.observability.trace_headers()
+        if not headers:
+            return await handler(request)
+        return await handler(request.override(headers={**(request.headers or {}), **headers}))
 
 
 @dataclass(frozen=True)
@@ -27,8 +42,10 @@ class MCPToolRegistry:
         self,
         settings: Settings | None = None,
         client: MultiServerMCPClient | None = None,
+        observability: LangSmithObservability | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        self.observability = observability
         self.client = client or MultiServerMCPClient(
             {
                 "law": {
@@ -36,6 +53,9 @@ class MCPToolRegistry:
                     "transport": "streamable_http",
                 }
             },
+            tool_interceptors=(
+                [MCPTraceContextInterceptor(observability)] if observability else []
+            ),
             handle_tool_errors=True,
         )
         self._lock = asyncio.Lock()

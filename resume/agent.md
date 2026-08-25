@@ -180,6 +180,8 @@ LLM Reviewer 检查覆盖度、证据越界、事实忠实和矛盾；代码随�
 - 不转发工具完整参数和正文，只发工具名与安全状态。
 - 最终草稿在复核前不发送。
 - LangSmith 和本地审计接收脱敏 metadata。
+- `AgentRuntime.stream` 不再创建咨询根 Trace；它接收路由层生成的 request-scoped Trace config，使 LangGraph、节点、DeepSeek 和 MCP Tool 都成为 `lawstation.consultation` 的子 Run。
+- `MCPTraceContextInterceptor` 只在当前 RunTree 存在时发送 LangSmith 分布式追踪头，并保留原请求头；工具发现和未追踪请求不传播上下文。
 
 ## 13. 测试证据
 
