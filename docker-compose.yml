@@ -5,6 +5,9 @@ services:
     environment:
       OLLAMA_AUTO_START: "false"
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      RAG_RERANK_AUTO_START: "false"
+      RAG_RERANK_BASE_URL: http://host.docker.internal:8081
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

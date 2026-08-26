@@ -20,6 +20,9 @@ def main() -> None:
     )
     for path in sorted((ROOT / "evals" / "datasets").glob("*.jsonl")):
         dataset_name = path.stem
+        if dataset_name.endswith("-candidates-v1"):
+            print(f"跳过未冻结候选集：{dataset_name}")
+            continue
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if client.has_dataset(dataset_name=dataset_name):
             dataset = client.read_dataset(dataset_name=dataset_name)

@@ -1,6 +1,6 @@
 # LawStation RAG 模块设计与实现
 
-> Review 状态：**已验证**。本文按 2026-08-23 当前实现更新；正式 Agent 经 MCP 调用 RAG，只有评测专用 `RetrievalTarget` 会直接创建 `LawSearchEngine`。
+> Review 状态：**已验证**。本文按 2026-08-25 当前实现更新；正式 Agent 经 MCP 调用 RAG，只有评测专用 `RetrievalTarget` 会直接创建 `LawSearchEngine`。
 
 ## 1. 模块定位
 
@@ -11,6 +11,7 @@ LawStation 的 RAG 模块面向中国法律咨询场景，为三 Agent 咨询链
 - 使用 BM25 处理法律名称、条号和关键词等精确匹配；
 - 使用 Dense Embedding 处理自然语言咨询与法条表述之间的语义差异；
 - 使用 RRF 融合两路召回，避免依赖单一检索算法；
+- 使用 TEI `bge-reranker-v2-m3` 对融合候选执行批量 Cross-Encoder 精排；
 - 使用本地 Ollama Embedding，避免全量建库产生云端 token 成本；
 - 启动时幂等检查索引，数据、模型或切分参数不变时不重复建库；
 - 建库中断后能够按批次恢复，失败时不破坏旧索引；
@@ -30,7 +31,8 @@ flowchart LR
     FAISS --> DENSE
     LEXICAL --> RRF["阈值过滤 + RRF 融合"]
     DENSE --> RRF
-    RRF --> MCP["search_laws / get_law_article"]
+    RRF --> RERANK["TEI BGE Cross-Encoder"]
+    RERANK --> MCP["search_laws / get_law_article"]
     MCP --> RESEARCH["LegalResearchAgent"]
     RESEARCH --> EVIDENCE["EvidencePacket"]
     EVIDENCE --> ANSWER["法律意见与可追踪引用"]
@@ -263,7 +265,7 @@ Embedding 重试策略：
 score(document) += 1 / (61 + rank)
 ```
 
-同一 chunk 同时被 BM25 和 Dense 命中时会累加两路排名得分。融合结果低于 `RAG_RRF_MIN_SCORE` 时继续过滤，最终按照融合分数排序并限制 `top_k` 在 1～20。
+同一 chunk 同时被 BM25 和 Dense 命中时会累加两路排名得分。融合结果低于 `RAG_RRF_MIN_SCORE` 时继续过滤；启用精排后先保留最多 12 个候选，精排完成后才截断为调用方要求的 `top_k`。
 
 返回结果带有：
 
@@ -279,6 +281,23 @@ index_status
 ```
 
 这些字段既支持 Agent 判断，也便于后续使用 LangSmith 数据集标定阈值。
+
+### 7.5 TEI BGE Cross-Encoder 精排
+
+`mcp_servers/law_rag/reranker.py::TEIReranker` 调用独立的 Hugging Face Text Embeddings Inference 服务。TEI 加载 `BAAI/bge-reranker-v2-m3`，一次 `/rerank` 请求批量提交查询和前 12 个 RRF 候选，直接返回 Cross-Encoder 相关性分数。
+
+关键约束：
+
+- 默认候选数 12，所有候选在一个 HTTP 请求中评分；
+- 请求使用 `truncate=true`、`raw_scores=false`、`return_text=false`；
+- 响应必须完整覆盖每个候选，且索引唯一、无越界、分数为有限的 0～1 数值；
+- 分数相同时使用 RRF 分数和稳定索引顺序打破平局；
+- 首版 `RAG_RERANK_MIN_SCORE=0`，只改变顺序，不改变既有 no-match 边界；
+- 任一候选缺失、重复、响应异常、HTTP 失败或整体超时，整批放弃并返回原始 RRF Top K；
+- 故障进入 60 秒冷却期，不会把服务异常伪装成检索空结果；
+- TEI 模型 revision 按 `/info.model_sha → .env 固定 revision → Hugging Face 缓存 ref` 解析并进入 `ranking_version` 和评测 metadata；它不进入 FAISS 指纹，更换精排模型不触发全量重建。该兼容层处理 TEI 对 BGE 返回 `model_sha=null` 的情况，但没有可验证 revision 时仍拒绝标记 ready。
+
+结果增加 `retrieval_scores.rerank`、`rerank_applied`、`ranking_version` 和精排耗时/候选数。MCP Tool Schema、EvidencePacket 与 chunk 级 Citation 均保持兼容。
 
 ## 8. 精确法条查询
 
@@ -402,22 +421,49 @@ BM25 分数和余弦相似度不在同一尺度，直接线性加权需要额外
 
 ### 当前未实现
 
-- 尚未接入 Cross-Encoder 精排；
+- BGE 阈值、候选数和 macOS Metal/生产 GPU 延迟仍需用冻结基准持续标定；
 - Jieba 使用通用词典，尚未增加法律领域词典；
 - 阈值已有配置和测试，但仍需基于真实 retrieval 数据集持续标定；
 - 法规元数据尚缺少效力状态、生效日期、发布机关和地域层级；
 - `embeddings.npy` 与 FAISS 同时保存向量，换取可验证性但占用更多磁盘空间。
 - 全量索引最后的 memmap 写入、FAISS 组装和目录切换主要在事件循环线程执行；后台建库期间可能短时影响健康检查延迟，仍需用真实全量构建压测验证。
 
-## 15. 面试表达
+## 15. 定向检索挑战集
+
+`backend/app/evaluation/challenge_datasets.py` 与
+`scripts/create_resume_challenge_datasets.py` 把简历展示所需的定向压力测试和通用回归分开：
+
+- Dense 集固定300条，不出现法名、条号或连续超过6字符的法条原文，覆盖语义改写、生活化案情、后果描述和口语噪声；
+- Reranker 候选由300条以不可变前缀方式扩充到600条，旧问题、Gold ID、顺序和内容哈希不得改变；只有 Gold 在未开启 BGE 的 Hybrid Top12 中、且至少两个预声明相邻干扰 chunk 同时命中时，才按冻结顺序选前200条；
+- 生成续跑自动重做 task_id 与当前修复任务不匹配的历史响应；冻结构建保留旧300条原记录，只向后追加新候选。盲修复导致的问题措辞漂移和新增模型元数据不会覆盖旧记录，但 Gold、task_id、源内容哈希和干扰项等不变量仍须完全一致；
+- Gold ID、来源正文 SHA、Prompt SHA、数据集 SHA、索引指纹和 BGE `model_sha` 均进入可审计产物；
+- 报告除 Recall@5/MRR 外，还比较 Hit@1、Top3、Gold 平均排名，并按类别与难度输出绝对/相对变化；
+- `human_verified=false` 是强制事实，挑战集只能说明特定困难查询上的能力，不代表真实用户总体准确率。
+
+`scripts/run_resume_rag_challenge_eval.py` 是量化评测的统一本地编排入口。正式运行前先执行6个
+RAG/报告相关 Pytest 文件和挑战集静态校验；候选不足600条时会在启动Ollama/TEI前终止并给出
+扩容命令。最终200条精排集缺失时，使用未启用 BGE 的 Hybrid Top12 自动完成资格冻结。资格检查
+处理全部600条，每25条保存与候选SHA、索引指纹、阈值和Top12配置绑定的checkpoint，并产出逐条
+结果、拒绝原因和分组汇总。随后在同一时间戳目录执行100条通用回归、300条 Dense 挑战、200条
+Reranker 挑战的六组 Baseline/Candidate，以及 casual、clarification、matched、no_match、
+tool_error、memory 各1条的 Agent Fixture 冒烟。
+
+报告同时保存 Git Commit/dirty 状态、法规 SHA、索引指纹、Embedding digest、BGE revision、
+样本哈希、硬门禁和性能告警。Dense 要求 Recall@5 不回退且 MRR/Hit@1 至少一项提升；BGE
+要求 Recall@5、Exact Article Hit、Hit@3 不回退，MRR/Hit@1 至少一项提升、Gold 平均排名改善，
+且精排应用率100%、降级率0%。Agent 冒烟的路由、Schema、引用归属、no-match、防循环、隔离和
+完成状态必须全部通过。自动生成的简历语句只引用实际报告数字，并明确表述为“从600条源法条约束
+的合成候选中，按预先冻结的Hybrid Top12与双干扰项规则筛选200条排序挑战样本”。
+
+## 16. 面试表达
 
 ### 简历描述
 
-> 设计并实现法律法规 RAG 服务：对 5.5 万余条法规执行稳定法条切分，使用本地 Ollama Qwen Embedding 与 FAISS 构建可恢复向量索引，并结合 Jieba BM25、Dense 召回、分数阈值和 RRF 融合提供混合检索；通过 staging、批次 checkpoint、模型 digest 指纹和原子切换实现幂等建库与故障恢复。检索能力以 MCP 标准工具暴露给 LegalResearchAgent，并以 chunk 级 EvidencePacket 和确定性引用校验约束模型，正常区分 matched、no_match 和工具异常，避免虚构法条。
+> 设计并实现法律法规 RAG 服务：对 5.5 万余条法规执行稳定法条切分，使用本地 Ollama Qwen Embedding、FAISS、BM25 与 RRF 完成混合召回，并通过 TEI 部署 BGE Cross-Encoder 对候选进行批量精排；以响应完整性校验、阶段超时、冷却和 RRF fail-open 保证精排故障不影响检索。通过 staging、批次 checkpoint、模型 digest 指纹和原子切换实现幂等建库与恢复，以 chunk 级 EvidencePacket 和确定性引用校验约束模型引用。
 
 ### 口头回答
 
-> 这个项目的 RAG 我分成离线建库和在线检索两部分。离线侧按法条切分，长法条生成稳定 chunk ID；模型、数据和切分参数共同形成指纹，相同指纹直接加载，不一致才后台重建。全量 Embedding 使用本地 Ollama，批次结果原子落盘，进程中断后只补缺失批次，完整索引通过校验后才热切换。在线侧同时执行 BM25 和 FAISS Dense 搜索，先做有效分数过滤，再用 RRF 融合。Agent 只负责选择工具返回的 chunk ID，法条正文由服务端从 ToolMessage 重建，最终回答只能引用 EvidencePacket 中实际使用的 chunk，所以检索结果、法律结论和引用之间是可追踪的。
+> 这个项目的 RAG 分成离线建库和在线检索。离线侧按法条生成稳定 chunk ID，用数据、模型和切分参数形成指纹，并通过 checkpoint 与原子切换完成可恢复建库。在线侧先做 BM25 与 FAISS Dense 召回和 RRF 融合，再把前 12 个候选一次提交给 TEI 中的 BGE Cross-Encoder。服务端严格校验候选索引和分数完整性，任一异常就整批回退 RRF，避免部分分数破坏排序。最终 Agent 只能选择真实 chunk ID，服务端再重建 EvidencePacket 和 Citation。
 
 ### 可继续追问的亮点
 

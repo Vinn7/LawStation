@@ -92,6 +92,7 @@ def main() -> None:
     os.chdir(ROOT)
     from backend.app.core.config import get_settings
     from backend.app.core.ollama import OllamaProcessManager
+    from backend.app.core.tei import TEIRerankerProcessManager
 
     settings = get_settings()
     args = parse_args(settings)
@@ -119,6 +120,11 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("缺少 Python 依赖，请先执行 `conda env update -f environment.yml --prune`") from exc
     ollama = OllamaProcessManager(settings) if settings.embedding_provider == "ollama" else None
+    tei_reranker = (
+        TEIRerankerProcessManager(settings)
+        if settings.rag_rerank_enabled and settings.rag_rerank_provider == "tei"
+        else None
+    )
     try:
         if ollama is not None:
             try:
@@ -127,9 +133,36 @@ def main() -> None:
                 raise SystemExit(f"Ollama 启动检查失败：{exc}") from exc
             ownership = "由 LawStation 管理" if runtime.managed else "复用已有服务"
             print(f"Ollama 已就绪：{runtime.model}（{ownership}）")
+            if settings.rag_rerank_enabled and settings.rag_rerank_provider == "ollama":
+                if runtime.reranker_available:
+                    print(f"Ollama Reranker 已就绪：{runtime.reranker_model}")
+                else:
+                    print(
+                        "Ollama Reranker 未就绪，将降级使用 RRF："
+                        f"{runtime.reranker_error}"
+                    )
+        if tei_reranker is not None:
+            try:
+                reranker_runtime = tei_reranker.ensure_ready()
+            except Exception as exc:
+                if settings.rag_rerank_required:
+                    raise SystemExit(f"TEI Reranker 启动检查失败：{exc}") from exc
+                print(f"TEI Reranker 未就绪，将降级使用 RRF：{exc}")
+            else:
+                ownership = (
+                    "由 LawStation 管理"
+                    if reranker_runtime.managed else "复用已有服务"
+                )
+                print(
+                    "TEI Reranker 已就绪："
+                    f"{reranker_runtime.model}@{reranker_runtime.model_sha[:12]}"
+                    f"（{ownership}）"
+                )
         print(f"LawStation 正在启动：http://127.0.0.1:{args.port}（配置来源：.env）")
         uvicorn.run("backend.app.main:app", host=args.host, port=args.port, reload=False)
     finally:
+        if tei_reranker is not None:
+            tei_reranker.close()
         if ollama is not None:
             ollama.close()
 

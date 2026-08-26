@@ -1,0 +1,14 @@
+{
+  "dataset": "lawstation-dense-challenge-v1",
+  "dataset_sha256": "31bda76e9e14719c42b4cf6baff864e721620797d563c34ca3ceac8f81f77f68",
+  "sample_count": 300,
+  "source_file": "law.json",
+  "source_sha256": "8d1b4832c56c90d0cf8782aae70ee9961199b3d16ea4946933639485c21b8f86",
+  "selection_rule": "all_valid_codex_dense_tasks_before_experiment",
+  "prompt_version": "resume-rag-challenge-v1",
+  "prompt_sha256": "1e6c283e7a15045b2d9b6c36ff150e89165d1471d10459982c79d8b7bf574794",
+  "human_verified": false,
+  "generator": "codex",
+  "generator_model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh"
+}

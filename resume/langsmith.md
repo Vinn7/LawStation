@@ -3,6 +3,7 @@
 > Review 状态：进程级线上开关、咨询端到端根 Trace、签名 MCP/RAG 传播、记忆 Job 根 Trace、反馈同步、离线 evaluator、资源预算和时间戳报告均为**已验证**；独立的线上 LLM evaluator 调度器为**部分实现**，当前只有配置项，没有持续执行 Worker。
 
 实际配置、命令、报告解读及简历指标采用规则见 [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)。
+2026-08-25 的 100 条本地 RAG 消融和 Agent Smoke 实际结果见 [量化评测实测结果](eval-results.md)；该文档明确区分可用于简历的完整本地指标与尚未完成的云端 Reviewer 对比。
 
 ## 项目亮点
 
@@ -61,7 +62,15 @@ flowchart TD
 document/chunk ID 的检索回归集。检索、组件和 live 三种模式分别隔离 RAG、Agent 编排与
 真实 MCP 链路；源数据派生集明确不冒充律师人工标注。
 
-确定性指标覆盖路由与 Schema、Recall@5/MRR、引用归属、`no_match` 安全、工具轨迹、循环上限、最新事实覆盖和租户隔离。独立、可配置的非 Thinking Judge 只依据问题、EvidencePacket 和回答，评价证据一致性、事实忠实、风险校准和帮助程度。
+另有一条简历挑战集流水线：从真实 chunk 固定抽样，使用 Codex xhigh 分批生成300条语义检索题
+和精排候选；问题不得出现法名、条号或连续超过6字符的原文。精排样本只有在 Gold 进入未启用
+BGE 的 Hybrid Top12，且至少两个预声明相邻法条同时出现时，才能冻结进200条 Reranker 集。
+生成器与入选器都看不到 Candidate 结果，因此它是有明确适用范围的压力测试，而不是事后挑选成功案例。
+
+确定性指标覆盖路由与 Schema、Recall@5/MRR、Hit@1、Top3、Gold 平均排名、引用归属、
+`no_match` 安全、工具轨迹、循环上限、最新事实覆盖和租户隔离；检索报告同时按问题类别和
+难度分组，并用内容哈希对齐最多3条定性改善案例。独立、可配置的非 Thinking Judge只依据
+问题、EvidencePacket 和回答，评价证据一致性、事实忠实、风险校准和帮助程度。
 
 通过 `BM25-only vs BM25 + Dense + RRF` 和 `始终 LLM Reviewer vs 确定性快速复核`
 两组单变量消融实验，报告样本数、延迟、Token 和安全指标。评测采用四级渐进策略：日常用
@@ -72,6 +81,10 @@ document/chunk ID 的检索回归集。检索、组件和 live 三种模式分�
 少量代表性三 Agent Trace。LLM Judge 只处理确定性规则无法判断的边界样本，一次请求同时返回
 8 个质量维度。这样的设计把可重复工程回归与昂贵语义评审分开，避免为了展示可观测性而消耗
 大量 Trace 和模型额度。
+
+Learn/Smoke 可使用 `LANGSMITH_TEST_CACHE`，项目通过 `langsmith[vcr]` 显式安装缓存所需的
+`vcrpy`。上传的 Compare/Release 会在 `aevaluate` 作用域内强制关闭并在结束后恢复测试缓存，
+避免 Candidate 回放 Baseline 响应，从而污染真实延迟、Token 和模型调用对比。
 
 每次评测使用 `YYYYMMDD-HHMMSS-ffffff-<profile>` 独立目录归档 JSON、CSV、Manifest 和
 Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成产物，最近运行与最近成功运行使用

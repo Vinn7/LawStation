@@ -16,10 +16,11 @@ conda activate LawStation
 
 环境已存在时使用 `conda env update -f environment.yml --prune` 同步依赖。应用配置和密钥全部放在根目录 `.env`，不使用 Conda 环境变量保存业务配置。
 
-在 `.env` 填写 `DEEPSEEK_API_KEY`。Dense 检索默认使用本机 Ollama 的 `qwen3-embedding:0.6b`，请先安装 Ollama 并下载模型：
+在 `.env` 填写 `DEEPSEEK_API_KEY`。Dense 检索默认使用本机 Ollama 的 `qwen3-embedding:0.6b`，精排默认使用本机 TEI 的 `BAAI/bge-reranker-v2-m3`。请先安装运行时并下载 Embedding 模型：
 
 ```bash
 ollama pull qwen3-embedding:0.6b
+brew install text-embeddings-inference
 ```
 
 无需手工执行 `ollama run` 或长期保持 `ollama serve`。统一启动器会复用已运行的 Ollama；不可达时自动执行 `ollama serve`、校验精确模型标签与 digest，并通过 `/api/embed` 预热 1024 维模型。Ollama、模型或预热不可用时启动会明确失败。默认法规数据源是全量 `data/knowledge/law/law.json`。启动时会检查索引指纹：有效索引直接复用，缺失或过期时后台构建，构建期间自动使用全量 BM25，完成后热切换为 BM25 + FAISS。
@@ -39,7 +40,18 @@ conda activate LawStation
 python run.py
 ```
 
-启动器会在前端缺失或过期时自动安装/构建前端，确保 Ollama Embedding 可用，然后启动唯一的 Uvicorn 进程。由本次启动器创建的 Ollama 会随程序退出；启动前已存在的外部 Ollama 不受影响。访问：
+启动器会在前端缺失或过期时自动安装/构建前端，确保 Ollama Embedding 可用，再启动或复用 TEI BGE Reranker，最后启动唯一的 Uvicorn 进程。TEI 首次启动会把模型下载到 `data/models/huggingface`。由本次启动器创建的 Ollama 和 TEI 会随程序退出；启动前已存在的外部服务不受影响。访问：
+
+部分 TEI 版本对 BGE 的 `/info` 返回 `model_sha=null`。可在 `.env` 使用 `RAG_RERANK_MODEL_REVISION=<Hugging Face commit>` 固定版本；程序会优先使用服务返回值，其次使用该配置，最后读取项目模型缓存的 `refs/main`，并将解析结果用于 `ranking_version`。
+
+需要在前台单独观察或调试 Reranker 时，可使用仓库中与当前 `.env` 参数一致的手动启动脚本：
+
+```bash
+cd /Users/Admin1/Files/LawStation
+./scripts/start_tei_reranker.sh
+```
+
+该脚本会占用当前终端，按 `Ctrl+C` 停止。另开终端执行 `python run.py` 时，启动器会复用这个外部 TEI，LawStation 退出时不会关闭它。若修改模型、revision、端口或批处理配置，需要同步更新脚本中的命令参数。
 
 启动时会自动运行 Alembic 数据库迁移。首次升级分层记忆结构前，现有 SQLite 会备份为 `data/runtime/lawstation.db.pre-memory-v2.bak`。
 
@@ -65,7 +77,7 @@ python run.py --host 0.0.0.0 --port 8000
 docker compose up --build
 ```
 
-Compose 只启动一个 `lawstation` 容器并暴露 8000 端口。容器不负责启动 Ollama，而是通过 `host.docker.internal:11434` 使用宿主机 Ollama；运行 Compose 前须在宿主机启动 Ollama 并准备好模型。
+Compose 只启动一个 `lawstation` 容器并暴露 8000 端口。容器不负责启动 Ollama 或 TEI，而是通过 `host.docker.internal:11434` 和 `host.docker.internal:8081` 使用宿主服务；运行 Compose 前须准备好两个服务。
 
 ## 索引与审计日志
 
@@ -78,9 +90,13 @@ python scripts/build_index.py --force
 
 全量建库默认按最多 8 条一批调用 Ollama `/api/embed`，不消耗 DashScope token。索引指纹包含 Ollama provider、模型标签、模型 digest、查询指令版本和数据/切分配置；仅同指纹批次可以恢复。已成功批次保存在指纹专属 staging 目录，遇到中断或可重试的限流、超时和服务错误时可在本次或下次启动继续；只有完整索引通过校验后才会原子替换当前 FAISS 索引。
 
-查询阶段会先应用 `law_name` 过滤，再执行 BM25 与 Dense 排序，并通过 `RAG_BM25_MIN_SCORE`、`RAG_DENSE_MIN_SCORE` 和 `RAG_RRF_MIN_SCORE` 排除无效候选。引用以 `chunk_id` 为证据边界，最终只展示回答实际使用的法条片段。完全没有有效候选时正常进入 `no_match`，不会被当作工具失败。
+查询阶段会先应用 `law_name` 过滤，再执行 BM25 与 Dense 召回、RRF 融合，并把前 12 个候选一次提交给 TEI `BAAI/bge-reranker-v2-m3` 做 Cross-Encoder 精排。响应必须完整覆盖所有候选且分数有效，否则整批降级到原始 RRF，不会被错误解释为 `no_match`。引用以 `chunk_id` 为证据边界，最终只展示回答实际使用的法条片段。
 
-Ollama 进程输出追加到 `data/logs/ollama.log`。若模型不存在，请先执行 `ollama pull qwen3-embedding:0.6b`，启动器不会自动下载模型。
+Ollama 和 TEI 进程输出分别追加到 `data/logs/ollama.log` 与 `data/logs/reranker.log`。Ollama 模型需要预先下载；TEI 首次启动会自动下载 BGE 模型：
+
+```bash
+ollama pull qwen3-embedding:0.6b
+```
 
 控制台审计事件同时以 JSON Lines 追加到 `data/logs/lawstation.log`。默认单文件 20 MB、保留 10 个备份；日志只保存脱敏摘要和工具结果标识，不记录密钥或完整法条正文。
 
@@ -120,6 +136,34 @@ python scripts/run_langsmith_eval.py --profile learn
 python scripts/run_langsmith_eval.py --profile smoke
 python scripts/run_staged_langsmith_eval.py --profile compare --plan-only
 ```
+
+简历导向的 RAG 压力测试使用独立、明确有偏的挑战集，不能替代通用回归集：
+
+```bash
+# 从 law.json 固定抽样；保留旧候选并扩充至600条（共18个批次）
+python scripts/create_resume_challenge_datasets.py prepare \
+  --dense-size 300 --rerank-candidate-size 600 --seed 42
+# 显式消耗 Codex 额度，以 xhigh 生成问题；支持断点续跑
+python scripts/create_resume_challenge_datasets.py generate-codex
+# 校验泄漏、重复和真实 Gold ID，冻结300条 Dense 与600条精排候选
+python scripts/create_resume_challenge_datasets.py build
+# 可单独在真实 Hybrid Top 12 上冻结满足“Gold + 至少两个预声明干扰项”的200条精排集
+python scripts/create_resume_challenge_datasets.py qualify-reranker
+# 只查看六组 RAG 实验、6条 Agent 冒烟、资源上限和准备状态；不创建报告或调用外部服务
+python scripts/run_resume_rag_challenge_eval.py --plan-only
+# 一键执行模块回归、数据校验、缺失时自动资格冻结、三组消融与 Agent 冒烟
+python scripts/run_resume_rag_challenge_eval.py
+```
+
+Dense 挑战集固定300条语义改写、生活化案情、后果描述和噪声查询；Reranker 从600条候选中按
+“Gold 进入未精排 Hybrid Top12 且至少两个预声明干扰项同时命中”选择前200条正式排序题。
+原300条候选是扩容后的不可变前缀，只新增6个 Codex 批次。生成器看不到任何
+Baseline/Candidate 结果；资格检查每25条原子保存 checkpoint，并输出完整诊断。报告增加 Hit@1、Top3、Gold 平均
+排名、分类/难度分组、最多3条定性改善案例、硬门禁和基于实测数字生成的简历表述。最终200条
+精排集缺失时，正式入口只在600条候选已冻结后使用未启用 BGE 的 Hybrid 进行资格冻结；可用
+`--no-auto-qualify` 禁止。默认还会运行6类 Fixture Agent 冒烟，可用 `--skip-agent-smoke`
+关闭；冒烟会少量调用 DeepSeek，但不会上传 LangSmith或运行 Judge。所有样本标记
+`human_verified=false`，简历必须称为“Codex 生成、真实法规 ID 约束的源数据派生合成挑战集”。
 
 默认 `learn` 使用固定输出讲解确定性指标，不访问 LangSmith、DeepSeek 或 Ollama；`smoke`
 只运行 6 条分层样本且 `upload_results=false`。云端 Compare 默认仅上传 30 条根 Trace、调用

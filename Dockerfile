@@ -8,7 +8,10 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 ENV OLLAMA_AUTO_START=false \
-    OLLAMA_BASE_URL=http://host.docker.internal:11434
+    OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+    OLLAMA_MAX_LOADED_MODELS=2 \
+    RAG_RERANK_AUTO_START=false \
+    RAG_RERANK_BASE_URL=http://host.docker.internal:8081
 COPY pyproject.toml ./
 COPY backend ./backend
 COPY mcp_servers ./mcp_servers

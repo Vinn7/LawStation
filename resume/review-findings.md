@@ -104,7 +104,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 
 1. **索引合并可能阻塞事件循环**：批次 Embedding 是异步的，但 memmap 写入、FAISS 增量组装、manifest 和目录替换主要在事件循环线程执行。
 2. **带 law_name 的 Dense 查询成本**：为保证过滤召回，当前先搜全量 FAISS 再过滤，候选法律较小时仍扫描整个向量索引。
-3. **通用分词和无精排**：Jieba 未加法律词典，没有 Cross-Encoder。
+3. **通用分词和精排环境差异**：Jieba 未加法律词典；BGE 已通过 TEI 批量精排，但 macOS Metal 与生产 GPU 的阈值和 p95 仍需分别标定。
 4. **单机状态**：并发锁、Memory Worker、FAISS 和 SSE runtime 均不能跨进程共享。
 5. **依赖可复现性**：前端使用 `latest`，Python 没有完全冻结 lock。
 
@@ -123,7 +123,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 
 - 已有生产级认证、RBAC 或真正多租户 SaaS。
 - 三个 Agent 是独立微服务。
-- 已接入 Cross-Encoder 精排。
+- 已接入 TEI `BAAI/bge-reranker-v2-m3` Cross-Encoder，并建立不读取 Candidate 结果的相邻法条挑战集资格流水线；在200条冻结集完成同样本消融前，仍不能宣称真实基准优于 RRF。
 - 已支持浏览器刷新后的任务恢复。
 - 所有回答都有律师人工校验。
 - 评测小样本分数代表生产准确率。

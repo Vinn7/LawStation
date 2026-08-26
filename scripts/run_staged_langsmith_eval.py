@@ -67,6 +67,7 @@ def reusable_report(
     seed: int,
     rag_mode: str,
     review_mode: str,
+    rerank_mode: str = "off",
 ) -> dict[str, Any] | None:
     resolved_seed = effective_seed(seed)
     expected = select_cases(
@@ -88,6 +89,7 @@ def reusable_report(
             and actual_hashes == expected_hashes
             and report.get("rag_mode") == rag_mode
             and report.get("review_mode") == review_mode
+            and report.get("rerank_mode", "off") == rerank_mode
             and metadata.get("graph_version") == "three-agent-v2-chunk-evidence-fast-review"
             and metadata.get("prompt_version") == "legal-consultation-v2-no-match-safe"
             and not report.get("missing_required_metrics")
@@ -126,11 +128,17 @@ def compare(
         relative = None
         if absolute is not None and float(before) != 0:
             relative = round(absolute / abs(float(before)), 6)
+        direction = "lower" if key == "retrieval_gold_rank" else "higher"
+        improvement = None
+        if absolute is not None:
+            improvement = -absolute if direction == "lower" else absolute
         metrics[key] = {
             "baseline": before,
             "candidate": after,
             "absolute_delta": absolute,
             "relative_delta": relative,
+            "direction": direction,
+            "improvement_delta": improvement,
         }
     runtime = {}
     runtime_keys = sorted(
@@ -140,12 +148,74 @@ def compare(
         before = baseline.get("runtime_metrics", {}).get(key)
         after = candidate.get("runtime_metrics", {}).get(key)
         runtime[key] = {"baseline": before, "candidate": after}
+
+    def grouped_delta(group_key: str) -> dict[str, Any]:
+        grouped: dict[str, Any] = {}
+        baseline_groups = baseline.get(group_key, {})
+        candidate_groups = candidate.get(group_key, {})
+        for group in sorted(set(baseline_groups) | set(candidate_groups)):
+            grouped[group] = {}
+            keys = set(baseline_groups.get(group, {})) | set(candidate_groups.get(group, {}))
+            for key in sorted(keys):
+                before = baseline_groups.get(group, {}).get(key, {}).get("mean")
+                after = candidate_groups.get(group, {}).get(key, {}).get("mean")
+                absolute = (
+                    None if before is None or after is None else round(float(after) - float(before), 6)
+                )
+                relative = None
+                if absolute is not None and float(before) != 0:
+                    relative = round(absolute / abs(float(before)), 6)
+                direction = "lower" if key == "retrieval_gold_rank" else "higher"
+                grouped[group][key] = {
+                    "baseline": before,
+                    "candidate": after,
+                    "absolute_delta": absolute,
+                    "relative_delta": relative,
+                    "direction": direction,
+                    "improvement_delta": (
+                        None
+                        if absolute is None
+                        else (-absolute if direction == "lower" else absolute)
+                    ),
+                }
+        return grouped
+
+    baseline_examples = {
+        item.get("content_sha256"): item
+        for item in baseline.get("example_results", [])
+        if item.get("content_sha256")
+    }
+    qualitative_cases = []
+    for item in candidate.get("example_results", []):
+        digest = item.get("content_sha256")
+        before = baseline_examples.get(digest)
+        if before is None:
+            continue
+        before_mrr = before.get("evaluations", {}).get("retrieval_mrr", 0)
+        after_mrr = item.get("evaluations", {}).get("retrieval_mrr", 0)
+        if after_mrr > before_mrr:
+            qualitative_cases.append({
+                "content_sha256": digest,
+                "category": item.get("category"),
+                "difficulty": item.get("difficulty"),
+                "question": item.get("question"),
+                "baseline_mrr": before_mrr,
+                "candidate_mrr": after_mrr,
+                "baseline_ranked_chunk_ids": before.get("ranked_chunk_ids", []),
+                "candidate_ranked_chunk_ids": item.get("ranked_chunk_ids", []),
+            })
+    qualitative_cases.sort(
+        key=lambda item: item["candidate_mrr"] - item["baseline_mrr"], reverse=True
+    )
     return {
         "baseline_experiment": baseline.get("experiment_name"),
         "candidate_experiment": candidate.get("experiment_name"),
         "baseline_run_count": baseline.get("run_count"),
         "candidate_run_count": candidate.get("run_count"),
         "metrics": metrics,
+        "metrics_by_category": grouped_delta("metrics_by_category"),
+        "metrics_by_difficulty": grouped_delta("metrics_by_difficulty"),
+        "qualitative_improvement_cases": qualitative_cases[:3],
         "runtime_metrics": runtime,
         "project_stats": {
             "baseline": baseline.get("project_stats", {}),
@@ -166,9 +236,28 @@ def write_comparison(report_run: ReportRun, name: str, value: dict[str, Any]) ->
     ]
     report_run.write_csv(
         Path(name).with_suffix(".csv").name,
-        ["metric", "baseline", "candidate", "absolute_delta", "relative_delta"],
+        [
+            "metric", "baseline", "candidate", "absolute_delta", "relative_delta",
+            "direction", "improvement_delta",
+        ],
         rows,
     )
+    grouped_rows = []
+    for dimension in ("metrics_by_category", "metrics_by_difficulty"):
+        for group, metrics in sorted(value.get(dimension, {}).items()):
+            grouped_rows.extend(
+                {"dimension": dimension, "group": group, "metric": metric, **values}
+                for metric, values in sorted(metrics.items())
+            )
+    if grouped_rows:
+        report_run.write_csv(
+            Path(name).with_suffix("").name + "-groups.csv",
+            [
+                "dimension", "group", "metric", "baseline", "candidate",
+                "absolute_delta", "relative_delta", "direction", "improvement_delta",
+            ],
+            grouped_rows,
+        )
 
 
 def materialize_reused_report(
@@ -204,6 +293,7 @@ def run_eval(
     seed: int = 0,
     profile: str = "compare",
     report_run: ReportRun,
+    rerank_mode: str = "off",
 ) -> dict[str, Any]:
     command = [
         PYTHON,
@@ -211,6 +301,7 @@ def run_eval(
         "--dataset", dataset,
         "--mode", mode,
         "--rag-mode", rag_mode,
+        "--rerank-mode", rerank_mode,
         "--review-mode", review_mode,
         "--repetitions", str(repetitions),
         "--concurrency", "2",
@@ -263,7 +354,9 @@ def wait_for_service(port: int, timeout: float = 120.0) -> dict[str, Any]:
     raise RuntimeError(f"LawStation 未在限定时间内进入 Dense ready：{last_error}")
 
 
-def start_service(rag_mode: str) -> tuple[subprocess.Popen, Any]:
+def start_service(
+    rag_mode: str, rerank_mode: str = "off"
+) -> tuple[subprocess.Popen, Any]:
     settings = get_settings()
     if port_in_use(settings.app_port):
         raise RuntimeError(f"端口 {settings.app_port} 已被占用；为避免结束外部服务，实验停止")
@@ -272,6 +365,7 @@ def start_service(rag_mode: str) -> tuple[subprocess.Popen, Any]:
     handle = log_path.open("a", encoding="utf-8")
     env = os.environ.copy()
     env["RAG_RETRIEVAL_MODE"] = rag_mode
+    env["RAG_RERANK_ENABLED"] = "true" if rerank_mode == "on" else "false"
     process = subprocess.Popen(
         [PYTHON, "run.py", "--no-build"],
         cwd=ROOT,

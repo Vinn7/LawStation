@@ -1,0 +1,22 @@
+{
+  "dataset": "lawstation-reranker-challenge-v1",
+  "dataset_sha256": "931d05a1d10ba4c4082d0134d30d568235c3da5406782030b33205cbc7a086b2",
+  "sample_count": 200,
+  "source_file": "law.json",
+  "source_sha256": "8d1b4832c56c90d0cf8782aae70ee9961199b3d16ea4946933639485c21b8f86",
+  "selection_rule": "gold_in_hybrid_top12_and_at_least_2_declared_distractors",
+  "prompt_version": "resume-rag-challenge-v1",
+  "prompt_sha256": "1e6c283e7a15045b2d9b6c36ff150e89165d1471d10459982c79d8b7bf574794",
+  "human_verified": false,
+  "generator": "codex",
+  "generator_model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh",
+  "candidate_dataset": "lawstation-reranker-challenge-candidates-v1",
+  "candidate_dataset_sha256": "358852283a4c74d2df5d948152a4605033d65f0dc9f77b9b13f8cc37c4bcd097",
+  "candidate_count": 600,
+  "qualified_count": 212,
+  "qualification_fingerprint": "e9c316218cdd4051fab3868f715ba1b359e781314b6796b8813b650d1c99d4b9",
+  "index_fingerprint": "9c95a6fe9f682fd3ca41d097e8b7463180503620d39e4b724a381f9fde718f0d",
+  "retrieval_mode": "hybrid",
+  "rerank_enabled_during_qualification": false
+}

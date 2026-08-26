@@ -210,3 +210,45 @@ def test_reusable_report_requires_matching_sample_and_versions(monkeypatch, tmp_
         rag_mode="hybrid",
         review_mode="auto",
     ) is None
+
+
+def test_comparison_includes_grouped_metrics_and_qualitative_cases():
+    baseline = {
+        "metrics": {"retrieval_mrr": {"mean": 0.5}},
+        "metrics_by_category": {
+            "adjacent_article": {"retrieval_mrr": {"mean": 0.4}}
+        },
+        "metrics_by_difficulty": {"hard": {"retrieval_mrr": {"mean": 0.5}}},
+        "example_results": [{
+            "content_sha256": "case-1",
+            "category": "adjacent_article",
+            "difficulty": "hard",
+            "question": "测试问题",
+            "ranked_chunk_ids": ["other", "gold"],
+            "evaluations": {"retrieval_mrr": 0.5},
+        }],
+    }
+    candidate = {
+        "metrics": {"retrieval_mrr": {"mean": 1.0}},
+        "metrics_by_category": {
+            "adjacent_article": {"retrieval_mrr": {"mean": 1.0}}
+        },
+        "metrics_by_difficulty": {"hard": {"retrieval_mrr": {"mean": 1.0}}},
+        "example_results": [{
+            "content_sha256": "case-1",
+            "category": "adjacent_article",
+            "difficulty": "hard",
+            "question": "测试问题",
+            "ranked_chunk_ids": ["gold", "other"],
+            "evaluations": {"retrieval_mrr": 1.0},
+        }],
+    }
+
+    result = run_staged_langsmith_eval.compare(baseline, candidate)
+
+    assert result["metrics"]["retrieval_mrr"]["relative_delta"] == 1.0
+    assert result["metrics"]["retrieval_mrr"]["direction"] == "higher"
+    assert result["metrics_by_category"]["adjacent_article"]["retrieval_mrr"][
+        "candidate"
+    ] == 1.0
+    assert result["qualitative_improvement_cases"][0]["question"] == "测试问题"

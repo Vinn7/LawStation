@@ -18,6 +18,10 @@ class OllamaRuntimeInfo:
     managed: bool
     model: str
     digest: str
+    reranker_available: bool = False
+    reranker_model: str = ""
+    reranker_digest: str = ""
+    reranker_error: str = ""
 
 
 _runtime_info: OllamaRuntimeInfo | None = None
@@ -33,6 +37,10 @@ def ollama_runtime_status() -> dict:
         "managed": False,
         "model": "",
         "digest": "",
+        "reranker_available": False,
+        "reranker_model": "",
+        "reranker_digest": "",
+        "reranker_error": "",
     }
 
 
@@ -99,6 +107,9 @@ class OllamaProcessManager:
         environment.update({
             "OLLAMA_HOST": f"{listen_host}:{port}",
             "OLLAMA_KEEP_ALIVE": self.settings.ollama_keep_alive,
+            "OLLAMA_MAX_LOADED_MODELS": str(
+                getattr(self.settings, "ollama_max_loaded_models", 2)
+            ),
             "OLLAMA_NO_CLOUD": "1",
         })
         return environment
@@ -138,7 +149,8 @@ class OllamaProcessManager:
             f"等待 Ollama 启动超过 {self.settings.ollama_startup_timeout_seconds:g} 秒"
         )
 
-    def _model_info(self) -> tuple[str, str]:
+    def _model_info(self, model_name: str | None = None) -> tuple[str, str]:
+        expected_model = model_name or self.settings.embedding_model
         models = self._get_json("/api/tags").get("models")
         if not isinstance(models, list):
             raise TypeError("Ollama /api/tags 未返回模型列表")
@@ -146,11 +158,11 @@ class OllamaProcessManager:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or item.get("model") or "")
-            if name == self.settings.embedding_model:
+            if name == expected_model:
                 return name, str(item.get("digest") or "")
         raise RuntimeError(
-            f"未找到 {self.settings.embedding_model}，请先执行："
-            f"ollama pull {self.settings.embedding_model}"
+            f"未找到 {expected_model}，请先执行："
+            f"ollama pull {expected_model}"
         )
 
     def _warmup(self) -> None:
@@ -170,6 +182,36 @@ class OllamaProcessManager:
         if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in vector):
             raise RuntimeError("Ollama 模型预热返回了无效向量")
 
+    def _warmup_reranker(self) -> None:
+        from mcp_servers.law_rag.reranker import (
+            build_rerank_prompt,
+            extract_yes_no_score,
+        )
+
+        def score(document: str) -> float:
+            result = self._post_json("/api/generate", {
+                "model": self.settings.rag_rerank_model,
+                "prompt": build_rerank_prompt("用人单位未签书面劳动合同", document),
+                "raw": True,
+                "stream": False,
+                "think": False,
+                "logprobs": True,
+                "top_logprobs": self.settings.rag_rerank_top_logprobs,
+                "keep_alive": self.settings.rag_rerank_keep_alive,
+                "options": {
+                    "temperature": 0,
+                    "seed": 42,
+                    "num_predict": 1,
+                    "num_ctx": 2048,
+                },
+            })
+            return extract_yes_no_score(result)
+
+        positive = score("劳动合同法 第八十二条 未订立书面劳动合同应支付二倍工资")
+        negative = score("海商法 船舶碰撞损害赔偿")
+        if not positive > negative:
+            raise RuntimeError("Ollama Reranker 预热相关性校验未通过")
+
     def ensure_ready(self) -> OllamaRuntimeInfo:
         global _runtime_info
 
@@ -188,11 +230,39 @@ class OllamaProcessManager:
         if not digest:
             raise RuntimeError(f"Ollama 未返回模型 {model} 的 digest")
         self._warmup()
+        reranker_available = False
+        reranker_model = ""
+        reranker_digest = ""
+        reranker_error = ""
+        if (
+            getattr(self.settings, "rag_rerank_enabled", False)
+            and getattr(self.settings, "rag_rerank_provider", "ollama") == "ollama"
+        ):
+            try:
+                reranker_model, reranker_digest = self._model_info(
+                    self.settings.rag_rerank_model
+                )
+                if not reranker_digest:
+                    raise RuntimeError(
+                        f"Ollama 未返回模型 {reranker_model} 的 digest"
+                    )
+                self._warmup_reranker()
+                reranker_available = True
+            except Exception as exc:
+                reranker_error = str(exc)
+                if getattr(self.settings, "rag_rerank_required", False):
+                    raise RuntimeError(f"Ollama Reranker 启动检查失败：{exc}") from exc
         _runtime_info = OllamaRuntimeInfo(
             available=True,
             managed=self._owned_process,
             model=model,
             digest=digest,
+            reranker_available=reranker_available,
+            reranker_model=reranker_model or getattr(
+                self.settings, "rag_rerank_model", ""
+            ),
+            reranker_digest=reranker_digest,
+            reranker_error=reranker_error,
         )
         return _runtime_info
 

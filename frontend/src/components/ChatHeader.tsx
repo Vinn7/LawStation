@@ -8,6 +8,8 @@ interface ChatHeaderProps {
 }
 
 function indexLabel(index: IndexStatus): string {
+  if (index.status === 'ready' && index.reranker_status === 'ready') return '混合检索 + 精排已就绪';
+  if (index.status === 'ready' && ['degraded', 'cooldown'].includes(index.reranker_status ?? '')) return '精排降级，使用 RRF';
   if (index.status === 'ready') return index.dense_enabled ? '混合检索已就绪' : '法规库已就绪';
   if (index.status === 'degraded') return '仅使用 BM25';
   if (index.status === 'failed') return '法规索引异常';

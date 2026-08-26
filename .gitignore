@@ -11,5 +11,8 @@ data/runtime/*
 data/indexes/*
 !data/indexes/.gitkeep
 data/logs/
+data/models/huggingface/
 evals/reports/runs/*
 !evals/reports/runs/.gitkeep
+evals/generation/*
+!evals/generation/.gitkeep

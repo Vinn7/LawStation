@@ -18,7 +18,10 @@ def settings(tmp_path):
         ollama_shutdown_timeout_seconds=1,
         ollama_request_timeout_seconds=2,
         ollama_keep_alive="30m",
+        ollama_max_loaded_models=2,
         ollama_log_path=str(tmp_path / "logs" / "ollama.log"),
+        rag_rerank_enabled=False,
+        rag_rerank_provider="ollama",
     )
 
 
@@ -97,6 +100,7 @@ def test_start_uses_serve_and_filters_secrets(tmp_path, monkeypatch):
     assert "DEEPSEEK_API_KEY" not in captured["env"]
     assert "LANGSMITH_API_KEY" not in captured["env"]
     assert captured["env"]["OLLAMA_NO_CLOUD"] == "1"
+    assert captured["env"]["OLLAMA_MAX_LOADED_MODELS"] == "2"
     manager._owned_process = False
     manager.close()
 
@@ -146,3 +150,93 @@ def test_owned_process_is_killed_after_shutdown_timeout(tmp_path, monkeypatch):
         (789, ollama_module.signal.SIGTERM),
         (789, ollama_module.signal.SIGKILL),
     ]
+
+
+def test_optional_reranker_is_warmed_in_same_ollama_service(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    config.rag_rerank_enabled = True
+    config.rag_rerank_required = False
+    config.rag_rerank_model = "dengcao/Qwen3-Reranker-0.6B:latest"
+    manager = ollama_module.OllamaProcessManager(config)
+    monkeypatch.setattr(manager, "_is_available", lambda: True)
+
+    def model_info(model_name=None):
+        if model_name:
+            return model_name, "reranker-digest"
+        return config.embedding_model, "embedding-digest"
+
+    monkeypatch.setattr(manager, "_model_info", model_info)
+    monkeypatch.setattr(manager, "_warmup", lambda: None)
+    warmed = []
+    monkeypatch.setattr(manager, "_warmup_reranker", lambda: warmed.append(True))
+    runtime = manager.ensure_ready()
+    assert warmed == [True]
+    assert runtime.reranker_available is True
+    assert runtime.reranker_digest == "reranker-digest"
+    manager.close()
+
+
+def test_optional_reranker_failure_does_not_block_embedding_startup(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    config.rag_rerank_enabled = True
+    config.rag_rerank_required = False
+    config.rag_rerank_model = "missing-reranker"
+    manager = ollama_module.OllamaProcessManager(config)
+    monkeypatch.setattr(manager, "_is_available", lambda: True)
+
+    def model_info(model_name=None):
+        if model_name:
+            raise RuntimeError("missing")
+        return config.embedding_model, "embedding-digest"
+
+    monkeypatch.setattr(manager, "_model_info", model_info)
+    monkeypatch.setattr(manager, "_warmup", lambda: None)
+    runtime = manager.ensure_ready()
+    assert runtime.available is True
+    assert runtime.reranker_available is False
+    assert runtime.reranker_error == "missing"
+    manager.close()
+
+
+def test_required_reranker_failure_blocks_startup(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    config.rag_rerank_enabled = True
+    config.rag_rerank_required = True
+    config.rag_rerank_model = "missing-reranker"
+    manager = ollama_module.OllamaProcessManager(config)
+    monkeypatch.setattr(manager, "_is_available", lambda: True)
+
+    def model_info(model_name=None):
+        if model_name:
+            raise RuntimeError("missing")
+        return config.embedding_model, "embedding-digest"
+
+    monkeypatch.setattr(manager, "_model_info", model_info)
+    monkeypatch.setattr(manager, "_warmup", lambda: None)
+    with pytest.raises(RuntimeError, match="Reranker 启动检查失败"):
+        manager.ensure_ready()
+    manager.close()
+
+
+def test_tei_reranker_is_not_checked_by_ollama_manager(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    config.rag_rerank_enabled = True
+    config.rag_rerank_provider = "tei"
+    config.rag_rerank_required = True
+    manager = ollama_module.OllamaProcessManager(config)
+    monkeypatch.setattr(manager, "_is_available", lambda: True)
+    monkeypatch.setattr(
+        manager,
+        "_model_info",
+        lambda model_name=None: (
+            pytest.fail("不应检查 TEI 模型")
+            if model_name else (config.embedding_model, "embedding-digest")
+        ),
+    )
+    monkeypatch.setattr(manager, "_warmup", lambda: None)
+    monkeypatch.setattr(
+        manager, "_warmup_reranker", lambda: pytest.fail("不应预热 TEI 模型")
+    )
+    runtime = manager.ensure_ready()
+    assert runtime.reranker_available is False
+    manager.close()

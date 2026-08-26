@@ -22,5 +22,17 @@
     "size": 2,
     "categories": ["matched", "no_match"],
     "upload": true
+  },
+  "dense-resume-challenge-300": {
+    "dataset": "lawstation-dense-challenge-v1",
+    "size": 300,
+    "categories": ["semantic_paraphrase", "everyday_scenario", "consequence_only", "colloquial_noise"],
+    "upload": false
+  },
+  "reranker-resume-challenge-200": {
+    "dataset": "lawstation-reranker-challenge-v1",
+    "size": 200,
+    "categories": ["adjacent_article", "general_vs_exception", "definition_vs_liability", "subject_or_condition"],
+    "upload": false
   }
 }

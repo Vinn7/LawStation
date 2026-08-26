@@ -52,7 +52,8 @@ flowchart TB
     RAG -. "BM25/Embedding/FAISS/RRF 子 Span" .-> OBS
     RAG --> LAW["law.json"]
     RAG --> INDEX["FAISS 文件索引"]
-    RAG --> OLLAMA["Ollama Embedding"]
+    RAG --> OLLAMA["Ollama: Qwen Embedding"]
+    RAG --> TEI["TEI: BGE Cross-Encoder Reranker"]
 ```
 
 ### 运行边界
@@ -67,7 +68,7 @@ flowchart TB
 | RAG | 法规加载、索引构建、混合召回、精确查询 | `LawSearchEngine` |
 | Memory | 上下文选择、异步提取、摘要和替换 | `MemoryService`、`MemoryTaskManager` |
 | Data | 所有权约束、原始消息、审计和迁移 | `OwnedRepository`、`db/models.py` |
-| Evaluation | 进程级追踪开关、端到端/跨 MCP Trace、确定性指标、Judge、预算和报告 | `LangSmithObservability`、`ReportRun` |
+| Evaluation | 进程级追踪、确定性指标、Judge、预算、Codex 源法条挑战集、资格冻结和分组报告 | `LangSmithObservability`、`ReportRun`、`prepare_source_pack` |
 
 ## 3. 顶层目录职责
 
@@ -77,7 +78,7 @@ flowchart TB
 | `backend/app/agent/` | LangChain/LangGraph Agent Runtime | 是 |
 | `backend/app/services/` | 记忆和所有权 Repository | 是 |
 | `backend/app/db/` | SQLAlchemy、连接和迁移入口 | 是 |
-| `backend/app/core/` | 配置、日志、身份、Ollama、预算 | 是 |
+| `backend/app/core/` | 配置、日志、身份、Ollama/TEI 进程管理、预算 | 是 |
 | `backend/app/observability/` | LangSmith 生产追踪 | 配置开启时进入 |
 | `backend/app/evaluation/` | 离线评测与报告公共模块 | 评测命令进入，正常咨询不进入 |
 | `mcp_servers/law_rag/` | 法规 MCP 与 RAG 引擎 | 是 |
@@ -148,12 +149,18 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 | Agent | LangChain `create_agent` + LangGraph `StateGraph` | `backend/app/agent/graph.py` |
 | 主模型 | DeepSeek OpenAI-compatible API | `LLMProvider.get_chat_model` |
 | Embedding | Ollama `qwen3-embedding:0.6b`，保留 DashScope Provider | `create_embedding_provider` |
+| 精排 | TEI `BAAI/bge-reranker-v2-m3`，原生 `/rerank` | `TEIReranker.rerank` |
+
+TEI 的模型版本采用显式 revision pin：服务返回 `model_sha` 时直接使用，否则回退到 `.env` 固定 revision或项目 Hugging Face 缓存 ref；既兼容 TEI 1.9.x 的空字段，又避免把未确定版本的服务标记为 ready。
+
+`scripts/start_tei_reranker.sh` 提供前台手动调试边界；它启动的 TEI 属于外部进程，`run.py` 只复用、不接管其关闭生命周期。
 | 稀疏检索 | Jieba + rank-bm25 | `LawSearchEngine._lexical` |
 | 稠密检索 | FAISS `IndexFlatIP` | `LawSearchEngine._build` |
 | 协议 | FastMCP Streamable HTTP | `mcp_servers/law_rag/server.py` |
 | 数据库 | SQLite + SQLAlchemy 2 + Alembic | `db/session.py`、`alembic/` |
 | 流式传输 | POST + SSE + heartbeat | `stream_message`、`with_sse_heartbeat` |
 | 观测 | JSONL 审计 + 可选 LangSmith | `core/logging.py`、`observability/langsmith.py` |
+| 定向评测 | 600条候选的不可变前缀扩容 + task_id不匹配响应自动续跑 + Gold不变量保护 + Hybrid Top12双干扰资格冻结 + 本地消融/Agent安全门禁 | `evaluation/challenge_datasets.py`、`create_resume_challenge_datasets.py`、`run_resume_rag_challenge_eval.py` |
 
 ## 7. 架构评价
 
@@ -169,4 +176,4 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - 身份仅为演示用户选择，不能视为生产认证。
 - SQLite、进程内信号量、单 Worker 和浏览器内任务缓存限定了单机部署。
 - 正文是“复核后分片输出”，不是模型实时 token 输出。
-- 没有 Cross-Encoder、分布式任务队列或跨刷新流恢复。
+- 本地运行增加一个由统一入口管理的 TEI 子进程；没有分布式任务队列或跨刷新流恢复。

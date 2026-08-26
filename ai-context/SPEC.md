@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：2.8
-> 基线日期：2026-08-24
+> 版本：3.4
+> 基线日期：2026-08-25
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -30,7 +30,7 @@ LawStation 是面向中国法律咨询场景的多用户对话 Agent。系统通
 - **[已实现]** 用户会话、消息、摘要和长期记忆具备服务端所有权过滤。
 - **[已实现]** 对话、工具和索引关键事件写入控制台及本地轮转日志。
 - **[待实现]** 正式登录、JWT、RBAC 和生产级租户管理。
-- **[待实现]** Cross-Encoder 精排。
+- **[已实现]** TEI `BAAI/bge-reranker-v2-m3` Cross-Encoder 批量精排；异常时整批降级 RRF。
 - **[待实现]** 多机部署和分布式数据存储。
 
 ## 3. 总体架构
@@ -46,6 +46,7 @@ flowchart LR
     AGENT -->|"Streamable HTTP"| MCP["内嵌 Law RAG MCP Server"]
     MCP --> BM25["jieba + BM25"]
     MCP --> DENSE["Ollama qwen3-embedding:0.6b + FAISS"]
+    MCP --> RERANK["TEI bge-reranker-v2-m3"]
     BM25 --> LAW["law_sample.json / law.json"]
     DENSE --> LAW
     API --> LOG["JSONL 轮转审计日志"]
@@ -74,7 +75,7 @@ flowchart LR
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
 | `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
 | `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `LegalConsultationGraph`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
-| `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`audit`、`redact` |
+| `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama/TEI 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`TEIRerankerProcessManager`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
 | `backend/app/observability/` | LangSmith 客户端、进程级模式、根 Trace/预算、身份哈希、内容过滤和反馈同步 | `LangSmithObservability`、`RootTrace`、`SessionTraceBudget` |
@@ -116,13 +117,14 @@ python run.py
 4. 需要构建时，优先以 `npm ci` 安装锁定依赖，然后执行 `npm run build`。
 5. `OllamaProcessManager.ensure_ready` 探测外部 Ollama；不可达且允许自动启动时执行非交互式 `ollama serve`。
 6. 精确校验 `qwen3-embedding:0.6b` 标签和 digest，并调用 `/api/embed` 预热、验证 1024 维向量；任一步失败均阻止启动。
-7. 启动唯一 Uvicorn 进程。
-8. `backend.app.main::lifespan` 初始化日志、数据库和演示用户。
-9. `initialize_engine` 同步加载法规和 BM25，验证当前 provider/model digest 对应的 Dense 索引；必要时后台建库。
-10. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
-11. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
-12. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
-13. 停止时清理 Agent Runtime、取消后台索引任务并关闭检索引擎和 MCP session manager；仅关闭本次入口创建的 Ollama 进程组，不影响外部 Ollama。
+7. `TEIRerankerProcessManager.ensure_ready` 启动或复用 TEI，验证 BGE 模型、类型和 SHA，再执行正负法条预热；失败默认降级 RRF。
+8. 启动唯一 Uvicorn 进程。
+9. `backend.app.main::lifespan` 初始化日志、数据库和演示用户。
+10. `initialize_engine` 同步加载法规和 BM25，验证当前 provider/model digest 对应的 Dense 索引；必要时后台建库。
+11. 创建应用级 `MCPToolRegistry`、`LLMProvider` 和 `AgentRuntime`；此时不通过 HTTP 自调用 MCP。
+12. 进入 `mcp.session_manager.run()`，确保 MCP 嵌入式 ASGI 生命周期有效。
+13. 首个聊天请求 single-flight 发现 MCP 工具并编译三 Agent LangGraph，后续请求复用只读图结构。
+14. 停止时清理应用资源，并只关闭本次入口创建的 TEI 与 Ollama 进程组，不影响外部服务。
 
 启动参数：`--rebuild`、`--no-build`、`--host`、`--port`、`--langsmith-trace-all`、`--langsmith-trace-limit`、`--no-langsmith-trace`。生产/常规开发不默认开启 Uvicorn reload，防止重复初始化索引和 MCP session manager。
 
@@ -290,6 +292,7 @@ get_law_article(law_name: string, article_number: string)
 | Dense Embedding | 本机 Ollama、`qwen3-embedding:0.6b`、1024 维 | 文档直接向量化；查询使用法律检索指令前缀；不消耗云端 Embedding token |
 | 向量索引 | FAISS `IndexFlatIP` | 归一化向量的内积/余弦近邻搜索 |
 | 混合融合 | Reciprocal Rank Fusion | 合并 BM25 与 Dense 排名 |
+| 法条精排 | Hugging Face TEI + `BAAI/bge-reranker-v2-m3` | 通过 `/rerank` 一次批量提交 RRF 候选并返回 Cross-Encoder 相关性分数 |
 | 数据库 | SQLite + SQLAlchemy 2.x + Alembic | 用户、会话、消息、分层记忆、后台任务、审计与版本化迁移 |
 | 配置 | pydantic-settings + 根目录 `.env` | 类型化读取全部应用环境变量 |
 | 前端 | React + TypeScript + Vite | 响应式单页法律咨询工作台和同源 API 消费 |
@@ -302,7 +305,7 @@ get_law_article(law_name: string, article_number: string)
 
 ### 10.1 明确延期的技术
 
-- Cross-Encoder 精排。
+- 将 TEI Reranker 合并回单进程运行时；当前保持独立本地推理进程以使用原生 Cross-Encoder。
 - Redis 或其他缓存服务。
 - MQ。
 - 独立业务 RPC 服务。
@@ -331,6 +334,7 @@ OLLAMA_STARTUP_TIMEOUT_SECONDS
 OLLAMA_SHUTDOWN_TIMEOUT_SECONDS
 OLLAMA_REQUEST_TIMEOUT_SECONDS
 OLLAMA_KEEP_ALIVE
+OLLAMA_MAX_LOADED_MODELS
 OLLAMA_EMBEDDING_BATCH_SIZE
 OLLAMA_LOG_PATH
 OLLAMA_QUERY_INSTRUCTION
@@ -379,6 +383,28 @@ INDEX_EMBEDDING_RETRY_MAX_SECONDS
 RAG_BM25_MIN_SCORE
 RAG_DENSE_MIN_SCORE
 RAG_RRF_MIN_SCORE
+RAG_RETRIEVAL_MODE
+RAG_RERANK_ENABLED
+RAG_RERANK_PROVIDER
+RAG_RERANK_MODEL
+RAG_RERANK_BASE_URL
+RAG_RERANK_AUTO_START
+RAG_RERANK_COMMAND
+RAG_RERANK_MODEL_CACHE
+RAG_RERANK_STARTUP_TIMEOUT_SECONDS
+RAG_RERANK_SHUTDOWN_TIMEOUT_SECONDS
+RAG_RERANK_LOG_PATH
+RAG_RERANK_MAX_CLIENT_BATCH_SIZE
+RAG_RERANK_MAX_BATCH_REQUESTS
+RAG_RERANK_CANDIDATE_COUNT
+RAG_RERANK_CONCURRENCY
+RAG_RERANK_MIN_SCORE
+RAG_RERANK_STAGE_TIMEOUT_SECONDS
+RAG_RERANK_REQUEST_TIMEOUT_SECONDS
+RAG_RERANK_TOP_LOGPROBS
+RAG_RERANK_KEEP_ALIVE
+RAG_RERANK_RETRY_SECONDS
+RAG_RERANK_REQUIRED
 SSE_HEARTBEAT_SECONDS
 ```
 
@@ -419,6 +445,15 @@ SSE_HEARTBEAT_SECONDS
 - Ollama 子进程环境只传递基础系统变量和 `OLLAMA_*` 配置，不得传递 DeepSeek、DashScope、LangSmith 等密钥。
 - Docker 内禁止自动启动 Ollama，统一访问宿主 `host.docker.internal:11434`；不可达或模型缺失时阻止容器应用启动。
 
+### 12.4 TEI Reranker 运行边界
+
+- Reranker 由独立 TEI 进程承载；本机入口可自动启动或复用回环地址上的 TEI，Docker 只访问宿主 `host.docker.internal:8081`。
+- TEI 必须精确返回配置模型和 Reranker 类型。模型 revision 按 `/info.model_sha`、`RAG_RERANK_MODEL_REVISION`、项目 Hugging Face 缓存 `refs/<revision>` 的顺序解析；兼容 TEI 对部分模型返回 `model_sha=null`，但不得在没有任何可验证 revision 时伪造版本或标记 ready。
+- 解析得到的模型 revision 必须进入检索结果的 `ranking_version`、状态接口、LangSmith Trace 与评测报告；它不属于向量索引指纹，更换 Reranker 不得触发 FAISS 重建。托管 TEI 时若配置了 `RAG_RERANK_MODEL_REVISION`，启动命令必须通过 `--revision` 固定同一版本。
+- `/rerank` 必须一次批量接收 RRF 候选；缺失、重复或越界索引、非法分数、请求超时或响应异常时必须整批降级到 RRF，不得使用部分分数，也不得制造错误 `no_match`。
+- 只允许关闭本次入口创建的 TEI 进程组；外部 TEI 不得关闭。Reranker 不可用且 `RAG_RERANK_REQUIRED=false` 时继续启动并标记 degraded；Embedding 仍是正式入口的强依赖。
+- `scripts/start_tei_reranker.sh` 是 TEI 的前台手动调试入口，命令参数必须与 `.env` 的模型、revision、端口、缓存和批处理配置保持一致；由该脚本启动的 TEI 视为外部进程，`run.py` 只能复用、不得关闭。
+
 ## 13. 审计、安全与隐私
 
 ### 13.1 日志要求
@@ -446,12 +481,15 @@ SSE_HEARTBEAT_SECONDS
 - **[已实现]** 全量模式在前端构建、Ollama 和 Uvicorn 前严格校验 API Key、HMAC、Workspace 及远端鉴权；启动后导出故障 fail-open。达到 Session 上限后停止创建新 Trace，只记录一次告警，业务继续。
 - **[已实现]** `backend/app/api/routes.py::stream_message` 持有 `lawstation.consultation` 根 Run，覆盖会话预占、排队、用户消息/MemorySnapshot、三 Agent Graph、回答持久化和记忆任务入队；heartbeat 和回答字符分片不得产生 Span。咨询根 Trace ID 写入用户及助手消息。
 - **[已实现]** LangGraph、DeepSeek 与 MCP Tool 继承请求级 Trace config。MCP Client Interceptor 只在当前父 Run 存在时传播 `langsmith-trace`/`baggage`，MCP Server 还必须验证进程内随机 Bridge Token；普通或伪造外部 MCP 请求不得注入咨询 Trace。
+- **[已实现]** Learn/Smoke 评测可使用 `LANGSMITH_TEST_CACHE`；Python 依赖通过 `langsmith[vcr]` 安装 `vcrpy`。上传的 Compare/Release 在 `aevaluate` 作用域内强制移除并随后恢复该环境变量，禁止 VCR 回放污染 Baseline/Candidate 的真实延迟、Token 和模型调用对比。
 - **[已实现]** RAG 以 `law_rag.search_laws` retriever 为父 Span，并记录 filter、BM25、query embedding、FAISS、RRF 和 get_article；不得上传原始向量、FAISS 对象或密钥，Dense 追踪候选明细限制为 100 条但不得改变实际检索结果。
 - **[已实现]** 每个 Memory Job 只创建一个独立 `lawstation.memory` 根 Trace，提取、替换/创建、增量摘要和持久化为子 Span；通过来源消息的咨询 Trace ID、会话哈希和来源消息哈希关联。重试 attempt 可形成新根 Trace，但同一进程同一 attempt 不得重复创建。
 - **[已实现]** 采样基于 `request_id` 稳定哈希，生产成功请求默认采样 2%；高风险、工具不可用和失败的未采样请求可补充 summary trace，但生产 Trace 月度预算耗尽后停止上报。LangSmith 异常或预算耗尽不得中断业务。
 - **[已实现]** 租户、用户、会话标识以 HMAC-SHA256 上报；API Key、Authorization、Cookie、数据库 URL 和 `reasoning_content` 强制过滤。正文由 `LANGSMITH_CAPTURE_CONTENT` 控制。
 - **[已实现]** `evals/datasets/` 保存 60 条合成 E2E、30 条分层 Agent 基准和 100 条引用真实 document/chunk ID 的源数据派生检索集；retrieval/component/live 分别隔离评估 RAG、Agent 编排和真实 MCP 链路。源数据派生集必须标记 `human_verified=false`，不得冒充律师人工标注。
-- **[已实现]** 评估器覆盖路由、Schema、召回、引用、no_match、轨迹、循环、最新事实和隔离；独立非 Thinking Judge 输出结构化评分。
+- **[已实现]** 简历挑战集流水线从真实法规 chunk 生成不泄漏法名、条号和长原文的 Codex xhigh 任务；300条 Dense 集直接冻结，Reranker 使用600条候选，只有 Gold 进入未开启BGE的 Hybrid Top12 且至少两个预声明相邻干扰 chunk 同时召回时，才能按候选冻结顺序进入前200条正式精排集。原300条候选必须作为不可变前缀保留，生成与资格检查均不得读取 BGE 实验结果。
+- **[已实现]** Reranker 资格检查处理全部候选并每25条原子保存 checkpoint；checkpoint 绑定候选SHA、索引指纹、检索阈值、Top12和禁用精排配置。成功或不足200条都必须保存逐条资格结果、失败原因与分类汇总；配置不一致时不得复用旧进度。
+- **[已实现]** 评估器覆盖路由、Schema、Recall@5、MRR、Hit@1、Top3、Gold 排名、chunk 命中、引用、no_match、轨迹、循环、最新事实和隔离；报告按 category/difficulty 分组并保留最多3条定性改善案例。独立非 Thinking Judge 输出结构化评分。
 - **[已实现]** 评测采用 learn、smoke、compare、release 四级渐进模式；默认 learn 不访问外部服务，smoke 不上传 Trace，云端上传必须显式确认。Compare 默认只执行 10 条检索、3 条 Reviewer 和 2 条 E2E 双组见证样本。
 - **[已实现]** 月度预算账本分别限制评测 Trace、生产 Trace、Agent 模型和 Judge 调用；运行前可用 `--plan-only` 查看样本哈希、最坏调用量和剩余额度，在线 LLM evaluator 默认关闭。
 - **[已实现]** 完整本地确定性 RAG 指标通过数据集 SHA256、索引指纹和 Git Commit 作为可复现事实源；LangSmith 负责小样本 Trace 见证。Agent/Judge 数字必须标注样本量，任何报告不得把小样本结果描述为生产准确率。
@@ -552,7 +590,7 @@ SSE_HEARTBEAT_SECONDS
 
 ### P2：检索与部署演进
 
-- 接入 Cross-Encoder 精排并保留可关闭配置。
+- 基于冻结检索集标定 BGE Cross-Encoder 阈值、候选数和 p95 延迟，并持续验证 macOS Metal 与生产 GPU 环境的性能差异。
 - 支持更多法规元数据过滤和法条版本/效力状态。
 - 评估多进程部署下索引构建协调、SQLite 并发限制和迁移方案。
 - 多进程部署前将 SQLite 后台任务抢占升级为数据库原子租约，避免多个 worker 重复处理。
@@ -604,3 +642,9 @@ SSE_HEARTBEAT_SECONDS
 - **2.7 / 2026-08-23**：评测报告改为新加坡时区的逐次时间戳目录；增加原子 Manifest、最近运行索引、中断归档、同目录 staged 产物及严格 Baseline 跨运行复用校验。
 - **2.8 / 2026-08-24**：将 `resume/` 文档同步设为所有功能变更的强制交付门禁；每次变更必须更新受影响模块分册并同步更新或明确核验架构总览，文档结论必须以实际代码和测试为依据。
 - **2.9 / 2026-08-25**：增加 `config/all/off` 进程级 LangSmith 开关、严格启动预检、Session 根 Trace 上限、SSE 端到端咨询 RunTree、签名 MCP 分布式传播、RAG 内部检索 Span，以及每个 Memory Job 单根 Trace 收敛。
+- **3.0 / 2026-08-25**：默认精排从 Ollama Qwen 生成式 Pairwise 改为独立 TEI `BAAI/bge-reranker-v2-m3` Cross-Encoder；统一入口负责自动下载、启动、预热、降级与托管进程关闭，旧 Ollama Provider 保留为显式回滚路径。
+- **3.1 / 2026-08-25**：增加简历导向但透明披露偏差的 Dense/Reranker 挑战集流水线、Codex xhigh 分批生成与严格泄漏校验、Hybrid Top12 预资格冻结，以及 Hit@1/Top3/Gold 排名和分组对比报告；原100条通用回归集继续保留。
+- **3.2 / 2026-08-25**：兼容 TEI 对 BGE 返回 `model_sha=null`；增加显式 `RAG_RERANK_MODEL_REVISION` pin 和项目 Hugging Face 缓存 ref 回退，托管启动同步传递 `--revision`，未获得可验证 revision 时仍保持降级。
+- **3.3 / 2026-08-25**：将简历导向量化评测收敛为单一编排入口；默认执行模块回归、挑战集校验、缺失时的 Hybrid Top12 资格冻结、通用/Dense/Reranker 三组消融和6类 Agent 冒烟，并归档实验快照、硬门禁、分组对比及仅基于实测数字生成的简历表述；保持零 LangSmith Trace、零 Judge，Agent 冒烟只允许少量 DeepSeek 调用。
+- **3.4 / 2026-08-26**：针对300条精排候选仅115条通过双干扰项资格的问题，将候选池以不可变前缀方式扩充到600条；资格检查改为全候选诊断、每25条断点续跑和严格指纹校验，正式评测在模型服务启动前拒绝不足600条的候选池，仍保持200条目标和原双干扰项规则不变。
+  生成续跑会自动重做 task_id 与当前修复任务不匹配的旧响应；冻结构建允许盲修复造成的问题措辞漂移和新增 `generator_model` 等非语义元数据，但会继续校验 Gold、task_id、源内容哈希和干扰项等不变量，旧300条记录仍原样保留，只追加新候选。

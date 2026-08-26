@@ -41,6 +41,14 @@ export interface IndexStatus {
   progress?: number;
   dense_enabled?: boolean;
   source_file?: string;
+  reranker_enabled?: boolean;
+  reranker_status?: 'disabled' | 'checking' | 'ready' | 'degraded' | 'cooldown';
+  reranker_provider?: string;
+  reranker_model?: string;
+  reranker_model_digest?: string;
+  reranker_managed?: boolean;
+  reranker_candidate_count?: number;
+  reranker_message?: string;
 }
 
 export interface ToolActivity {

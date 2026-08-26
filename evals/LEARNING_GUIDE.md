@@ -71,6 +71,63 @@ Baseline 和 Candidate 必须保持以下内容一致：
 
 例如比较 BM25 与 Hybrid 时，只改变 `rag_mode`；比较 Reviewer Fast Path 时，只改变 `review_mode`。
 
+比较精排时使用同一份 Hybrid 结果作为输入，只改变 `rerank_mode`：
+
+```bash
+# Baseline：BM25 + Dense + RRF
+python scripts/run_langsmith_eval.py --profile compare \
+  --mode retrieval --rag-mode hybrid --rerank-mode off
+
+# Candidate：BM25 + Dense + RRF + TEI BGE Cross-Encoder
+python scripts/run_langsmith_eval.py --profile compare \
+  --mode retrieval --rag-mode hybrid --rerank-mode on
+```
+
+正式报告必须核对模型 digest、`rerank_applied_rate`、降级率、平均候选数、
+TEI compute token（服务提供时）以及精排 p50/p95。开启 `--fail-on-threshold` 后，精排未覆盖全部
+matched 样本、发生降级或 p95 超过 3 秒都会使实验门禁失败。当前实现是基于
+TEI `/rerank` 的 `BAAI/bge-reranker-v2-m3` Cross-Encoder 批量打分；报告必须固定
+TEI 返回的 `model_sha`，避免混用不同模型版本。
+
+### 简历挑战集
+
+通用100条回归集用于检查没有明显退化；定向展示使用两个独立集合：
+
+```bash
+python scripts/create_resume_challenge_datasets.py prepare \
+  --dense-size 300 --rerank-candidate-size 600 --seed 42
+python scripts/create_resume_challenge_datasets.py generate-codex
+python scripts/create_resume_challenge_datasets.py build
+python scripts/create_resume_challenge_datasets.py qualify-reranker
+```
+
+扩容把原300条候选作为不可变前缀保留，只新增300条和6个Codex批次。资格筛选处理全部600条，
+每25条保存一次与候选SHA、索引指纹和检索参数绑定的checkpoint；最终仍只按冻结顺序选择前200条
+满足Gold进入Hybrid Top12且至少两个预声明干扰项命中的样本，不使用BGE结果筛选。
+
+Dense 集比较 BM25 与 Hybrid，重点读取 Recall@5；Reranker 集比较 Hybrid RRF 与
+Hybrid+BGE，重点读取 `retrieval_hit_at_1`、`retrieval_hit_at_3`、`retrieval_mrr` 和
+`retrieval_gold_rank`。报告的 `metrics_by_category`、`metrics_by_difficulty` 和
+`qualitative_improvement_cases` 用于解释差异，不能用于实验后删除 Candidate 失败样本。
+其中 Gold Rank 明确标记 `direction=lower`，其 `pass_rate` 不计算，避免把名次数值越大误读为越好。
+两个集合均为 `human_verified=false` 的源数据派生合成挑战集，不代表真实用户总体准确率。
+
+完整本地量化套件使用统一入口：
+
+```bash
+# 完全只读：显示数据状态、六组检索、Agent冒烟和资源上限
+python scripts/run_resume_rag_challenge_eval.py --plan-only
+
+# 执行模块回归与数据校验；必要时资格冻结200条精排集；随后运行三组消融和6类Agent冒烟
+python scripts/run_resume_rag_challenge_eval.py
+```
+
+正式套件产生1,200次检索；资格冻结最多额外执行600次 Hybrid 检索。RAG 部分不调用
+DeepSeek，6条 Agent Fixture 冒烟最多按 `AGENT_MAX_MODEL_CALLS` 形成36次模型调用；整个套件不上传
+LangSmith且不调用 Judge。`experiment-snapshot.json` 固定 Git、法规 SHA、索引和模型版本，
+`suite-gates.json` 区分质量失败与仅需披露的 p95 性能告警，`EVAL_REPORT.md` 只根据报告实测数字
+生成带数据边界的简历表述。
+
 先查看资源计划：
 
 ```bash

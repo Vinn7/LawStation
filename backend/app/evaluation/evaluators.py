@@ -100,6 +100,35 @@ def retrieval_mrr(run: Any, example: Any) -> dict[str, Any]:
     return _feedback("retrieval_mrr", 0.0)
 
 
+def _document_hit_at(run: Any, example: Any, k: int) -> dict[str, Any]:
+    expected = {str(item) for item in _reference(example).get("expected_document_ids", [])}
+    if not expected:
+        return _feedback(f"retrieval_hit_at_{k}", 1.0, "no reference documents")
+    actual = set(_ranked_documents(run)[:k])
+    return _feedback(f"retrieval_hit_at_{k}", bool(expected & actual))
+
+
+def retrieval_hit_at_1(run: Any, example: Any) -> dict[str, Any]:
+    return _document_hit_at(run, example, 1)
+
+
+def retrieval_hit_at_3(run: Any, example: Any) -> dict[str, Any]:
+    return _document_hit_at(run, example, 3)
+
+
+def retrieval_gold_rank(run: Any, example: Any) -> dict[str, Any]:
+    """Return the first Gold rank; one past the returned list means a miss."""
+
+    expected = {str(item) for item in _reference(example).get("expected_document_ids", [])}
+    if not expected:
+        return {"key": "retrieval_gold_rank", "score": None, "comment": "no reference documents"}
+    ranked = _ranked_documents(run)
+    for index, document_id in enumerate(ranked, 1):
+        if document_id in expected:
+            return _feedback("retrieval_gold_rank", float(index))
+    return _feedback("retrieval_gold_rank", float(len(ranked) + 1), "gold not returned")
+
+
 def exact_article_hit(run: Any, example: Any) -> dict[str, Any]:
     expected = {str(item) for item in _reference(example).get("expected_chunk_ids", [])}
     if not expected:
@@ -193,6 +222,9 @@ DETERMINISTIC_EVALUATORS = [
     retrieval_status_correctness,
     retrieval_recall_at_k,
     retrieval_mrr,
+    retrieval_hit_at_1,
+    retrieval_hit_at_3,
+    retrieval_gold_rank,
     exact_article_hit,
     citation_grounding,
     citation_precision,

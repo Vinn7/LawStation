@@ -26,8 +26,9 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 9. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
 10. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
 11. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
-12. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
-13. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+12. [量化评测实测结果](eval-results.md)：100 条本地 RAG 消融、Agent Smoke、证据边界和可用简历表述。
+13. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
+14. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 
 ## 一句话主链路
 
@@ -65,7 +66,7 @@ flowchart LR
 
 ## 本次验证结果
 
-- 后端：Conda `LawStation` 环境、临时 SQLite，`96 passed`；两条第三方依赖 warning，不影响结果。
+- 后端：Conda `LawStation` 环境、临时 SQLite，`97 passed`；两条第三方依赖 warning，不影响结果。
 - 前端：Vitest `4` 个测试文件、`13 passed`。
 - 文档：导航目标、关键 symbol、Markdown 围栏和敏感信息扫描通过。
 - 已执行：前端 Vitest `4` 个测试文件、`13 passed`，Vite 生产构建成功。

@@ -55,6 +55,9 @@ REQUIRED_BY_MODE = {
         "retrieval_status_correctness",
         "retrieval_recall_at_k",
         "retrieval_mrr",
+        "retrieval_hit_at_1",
+        "retrieval_hit_at_3",
+        "retrieval_gold_rank",
         "exact_article_hit",
     },
     "component": {
@@ -104,7 +107,9 @@ PROFILE_DEFAULTS = {
 }
 
 
-def metadata(mode: str, rag_mode: str, review_mode: str) -> dict:
+def metadata(
+    mode: str, rag_mode: str, review_mode: str, rerank_mode: str = "off"
+) -> dict:
     settings = get_settings()
     try:
         commit = subprocess.check_output(
@@ -126,6 +131,8 @@ def metadata(mode: str, rag_mode: str, review_mode: str) -> dict:
         "embedding_model": settings.embedding_model,
         "law_data_version": manifest.get("fingerprint", "unknown"),
         "rag_mode": rag_mode,
+        "rerank_mode": rerank_mode,
+        "reranker_model": settings.rag_rerank_model if rerank_mode == "on" else "disabled",
         "review_mode": review_mode,
     }
 
@@ -152,6 +159,32 @@ def _row_outputs(row: dict[str, Any]) -> dict[str, Any]:
     return row.get("outputs", {}) or {}
 
 
+def _row_example(row: dict[str, Any]) -> Any | None:
+    return row.get("example") or row.get("reference_example")
+
+
+def _example_metadata(example: Any | None) -> dict[str, Any]:
+    if example is None:
+        return {}
+    value = getattr(example, "metadata", None)
+    if isinstance(value, dict):
+        return value
+    if isinstance(example, dict) and isinstance(example.get("metadata"), dict):
+        return example["metadata"]
+    return {}
+
+
+def _example_inputs(example: Any | None) -> dict[str, Any]:
+    if example is None:
+        return {}
+    value = getattr(example, "inputs", None)
+    if isinstance(value, dict):
+        return value
+    if isinstance(example, dict) and isinstance(example.get("inputs"), dict):
+        return example["inputs"]
+    return {}
+
+
 def _summary(values: list[float]) -> dict[str, float | int]:
     return {
         "sample_count": len(values),
@@ -159,6 +192,27 @@ def _summary(values: list[float]) -> dict[str, float | int]:
         "standard_deviation": round(statistics.pstdev(values), 6) if len(values) > 1 else 0.0,
         "pass_rate": round(sum(value >= 1.0 for value in values) / len(values), 6),
     }
+
+
+def _metric_summary(key: str, values: list[float]) -> dict[str, Any]:
+    result: dict[str, Any] = _summary(values)
+    result["direction"] = "lower" if key == "retrieval_gold_rank" else "higher"
+    if key == "retrieval_gold_rank":
+        result["pass_rate"] = None
+    return result
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return round(ordered[lower], 6)
+    weight = position - lower
+    return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 6)
 
 
 def _project_stats(
@@ -200,7 +254,9 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     with csv_temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["metric", "sample_count", "mean", "standard_deviation", "pass_rate"],
+            fieldnames=[
+                "metric", "sample_count", "mean", "standard_deviation", "pass_rate", "direction"
+            ],
         )
         writer.writeheader()
         for metric, values in sorted(payload.get("metrics", {}).items()):
@@ -262,7 +318,8 @@ def _run_learn(args) -> dict[str, Any]:
         evaluations = []
         for evaluator in DETERMINISTIC_EVALUATORS:
             result = evaluator(run, example)
-            scores.setdefault(result["key"], []).append(float(result["score"]))
+            if result.get("score") is not None:
+                scores.setdefault(result["key"], []).append(float(result["score"]))
             evaluations.append(result)
         details.append({
             "content_sha256": case_hash(case),
@@ -288,7 +345,7 @@ def _run_learn(args) -> dict[str, Any]:
             "cache_hits": 0,
             "estimated_token_usage": 0,
         },
-        "metrics": {key: _summary(values) for key, values in scores.items()},
+        "metrics": {key: _metric_summary(key, values) for key, values in scores.items()},
         "batch": batch_manifest(dataset, cases, seed),
         "details": details,
     }
@@ -377,6 +434,17 @@ def _tracing_disabled():
                 os.environ[key] = value
 
 
+@contextmanager
+def _formal_eval_cache_disabled():
+    """Prevent VCR replay from contaminating uploaded latency/token comparisons."""
+    previous = os.environ.pop("LANGSMITH_TEST_CACHE", None)
+    try:
+        yield
+    finally:
+        if previous is not None:
+            os.environ["LANGSMITH_TEST_CACHE"] = previous
+
+
 async def _local_evaluate(
     target,
     examples: list[Any],
@@ -385,8 +453,10 @@ async def _local_evaluate(
     repetitions: int,
     cache_dir: Path,
     cache_metadata: dict[str, Any],
+    use_cache: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    if use_cache:
+        cache_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     cache_hits = 0
     with _tracing_disabled():
@@ -400,16 +470,17 @@ async def _local_evaluate(
                     json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()
                 ).hexdigest()
                 cache_path = cache_dir / f"target-{digest}.json"
-                if cache_path.is_file():
+                if use_cache and cache_path.is_file():
                     outputs = json.loads(cache_path.read_text("utf-8"))
                     cache_hits += 1
                 else:
                     outputs = await target(example.inputs or {})
-                    temporary = cache_path.with_suffix(f".{os.getpid()}.tmp")
-                    temporary.write_text(
-                        json.dumps(outputs, ensure_ascii=False, default=str), encoding="utf-8"
-                    )
-                    os.replace(temporary, cache_path)
+                    if use_cache:
+                        temporary = cache_path.with_suffix(f".{os.getpid()}.tmp")
+                        temporary.write_text(
+                            json.dumps(outputs, ensure_ascii=False, default=str), encoding="utf-8"
+                        )
+                        os.replace(temporary, cache_path)
                 run = SimpleNamespace(outputs=outputs)
                 feedback = []
                 for evaluator in evaluators:
@@ -420,6 +491,7 @@ async def _local_evaluate(
                     feedback.extend(SimpleNamespace(**item) for item in values)
                 rows.append({
                     "run": run,
+                    "example": example,
                     "evaluation_results": {"results": feedback},
                 })
     return rows, cache_hits
@@ -434,7 +506,8 @@ async def run(args) -> dict[str, Any]:
     if args.reuse_experiment and not args.upload_results:
         raise SystemExit("复用 LangSmith 实验必须同时提供 --upload-results --confirm-upload")
     settings = get_settings()
-    os.environ.setdefault("LANGSMITH_TEST_CACHE", settings.langsmith_test_cache)
+    if not args.upload_results:
+        os.environ.setdefault("LANGSMITH_TEST_CACHE", settings.langsmith_test_cache)
     ls_client = (
         client()
         if (args.upload_results or args.reuse_experiment or args.compare) and not args.plan_only
@@ -467,6 +540,7 @@ async def run(args) -> dict[str, Any]:
         evaluators.append(judge_evaluator)
     settings = settings.model_copy(update={
         "rag_retrieval_mode": args.rag_mode,
+        "rag_rerank_enabled": args.rerank_mode == "on",
         "agent_review_mode": args.review_mode,
     })
     retrieval_target = None
@@ -527,12 +601,14 @@ async def run(args) -> dict[str, Any]:
                 target = agent_target(args.mode, args.review_mode, settings)
         ledger.reserve_many(plan, _limits(settings))
         if args.upload_results:
-            with tracing_context(enabled=True):
+            with _formal_eval_cache_disabled(), tracing_context(enabled=True):
                 results = await aevaluate(
                     args.reuse_experiment or target,
                     data=data,
                     evaluators=evaluators,
-                    metadata=metadata(args.mode, args.rag_mode, args.review_mode),
+                    metadata=metadata(
+                        args.mode, args.rag_mode, args.review_mode, args.rerank_mode
+                    ),
                     experiment_prefix=args.experiment or f"{args.dataset}-{args.mode}",
                     max_concurrency=args.concurrency,
                     num_repetitions=args.repetitions,
@@ -548,7 +624,10 @@ async def run(args) -> dict[str, Any]:
                 evaluators,
                 repetitions=args.repetitions,
                 cache_dir=Path(settings.langsmith_test_cache),
-                cache_metadata=metadata(args.mode, args.rag_mode, args.review_mode),
+                cache_metadata=metadata(
+                    args.mode, args.rag_mode, args.review_mode, args.rerank_mode
+                ),
+                use_cache=not getattr(args, "no_test_cache", False),
             )
             experiment_name = ""
         success = True
@@ -556,14 +635,83 @@ async def run(args) -> dict[str, Any]:
         if retrieval_target is not None:
             await retrieval_target.close()
     scores: dict[str, list[float]] = {}
+    category_scores: dict[str, dict[str, list[float]]] = {}
+    difficulty_scores: dict[str, dict[str, list[float]]] = {}
+    example_results: list[dict[str, Any]] = []
     for row in rows:
+        example = _row_example(row)
+        example_metadata = _example_metadata(example)
+        example_inputs = _example_inputs(example)
+        category = str(example_metadata.get("category") or "unknown")
+        difficulty = str(example_metadata.get("difficulty") or "unspecified")
+        evaluations: dict[str, float] = {}
         for item in _row_evaluations(row):
             score = getattr(item, "score", None)
             key = getattr(item, "key", None)
             if key and score is not None:
-                scores.setdefault(key, []).append(float(score))
-    metrics = {key: _summary(values) for key, values in scores.items() if values}
+                numeric = float(score)
+                scores.setdefault(key, []).append(numeric)
+                category_scores.setdefault(category, {}).setdefault(key, []).append(numeric)
+                difficulty_scores.setdefault(difficulty, {}).setdefault(key, []).append(numeric)
+                evaluations[str(key)] = numeric
+        outputs = _row_outputs(row)
+        example_results.append({
+            "content_sha256": example_metadata.get("content_sha256"),
+            "category": category,
+            "difficulty": difficulty,
+            "question": (
+                example_inputs.get("question")
+                if example_metadata.get("synthetic") or example_metadata.get("source_derived")
+                else None
+            ),
+            "retrieval_status": outputs.get("retrieval_status"),
+            "ranked_document_ids": [
+                item.get("document_id")
+                for item in outputs.get("retrieval_results", [])
+                if isinstance(item, dict)
+            ],
+            "ranked_chunk_ids": [
+                item.get("chunk_id")
+                for item in outputs.get("retrieval_results", [])
+                if isinstance(item, dict)
+            ],
+            "evaluations": evaluations,
+        })
+    metrics = {key: _metric_summary(key, values) for key, values in scores.items() if values}
+    metrics_by_category = {
+        category: {
+            key: _metric_summary(key, values) for key, values in grouped.items() if values
+        }
+        for category, grouped in sorted(category_scores.items())
+    }
+    metrics_by_difficulty = {
+        difficulty: {
+            key: _metric_summary(key, values) for key, values in grouped.items() if values
+        }
+        for difficulty, grouped in sorted(difficulty_scores.items())
+    }
     outputs = [_row_outputs(row) for row in rows]
+    retrieval_durations = [
+        float(item.get("retrieval_duration_ms", 0)) for item in outputs
+        if item.get("retrieval_duration_ms") is not None
+    ]
+    rerank_durations = [
+        float(item.get("rerank_duration_ms", 0)) for item in outputs
+        if item.get("rerank_applied")
+    ]
+    rerank_applicable = [
+        item for item in outputs if item.get("retrieval_status") == "matched"
+    ]
+    reranker_model_digests = sorted({
+        str(item["reranker_model_digest"])
+        for item in outputs
+        if item.get("reranker_model_digest")
+    })
+    ranking_versions = sorted({
+        str(item["ranking_version"])
+        for item in outputs
+        if item.get("ranking_version")
+    })
     runtime_metrics = {
         "mean_model_calls": round(statistics.fmean([
             float(item.get("model_call_count", 0)) for item in outputs
@@ -574,10 +722,31 @@ async def run(args) -> dict[str, Any]:
         "llm_review_rate": round(sum(
             item.get("review_mode") == "llm" for item in outputs
         ) / len(outputs), 6) if outputs else 0.0,
-        "mean_retrieval_duration_ms": round(statistics.fmean([
-            float(item.get("retrieval_duration_ms", 0)) for item in outputs
-            if item.get("retrieval_duration_ms") is not None
-        ]), 6) if any(item.get("retrieval_duration_ms") is not None for item in outputs) else None,
+        "mean_retrieval_duration_ms": round(
+            statistics.fmean(retrieval_durations), 6
+        ) if retrieval_durations else None,
+        "retrieval_duration_p50_ms": _percentile(retrieval_durations, 0.5),
+        "retrieval_duration_p95_ms": _percentile(retrieval_durations, 0.95),
+        "mean_rerank_duration_ms": round(
+            statistics.fmean(rerank_durations), 6
+        ) if rerank_durations else 0.0,
+        "rerank_duration_p50_ms": _percentile(rerank_durations, 0.5),
+        "rerank_duration_p95_ms": _percentile(rerank_durations, 0.95),
+        "mean_rerank_prompt_tokens": round(statistics.fmean([
+            float(item.get("rerank_prompt_tokens", 0)) for item in outputs
+        ]), 6) if outputs else 0.0,
+        "mean_rerank_candidate_count": round(statistics.fmean([
+            float(item.get("rerank_candidate_count", 0)) for item in outputs
+        ]), 6) if outputs else 0.0,
+        "rerank_applied_rate": round(sum(
+            bool(item.get("rerank_applied")) for item in rerank_applicable
+        ) / len(rerank_applicable), 6) if rerank_applicable else 1.0,
+        "rerank_degraded_rate": round(sum(
+            item.get("reranker_status") in {"degraded", "cooldown"}
+            for item in outputs
+        ) / len(outputs), 6) if outputs else 0.0,
+        "reranker_model_digests": reranker_model_digests,
+        "ranking_versions": ranking_versions,
     }
     required = set(REQUIRED_BY_MODE[args.mode]) | (JUDGE_KEYS if args.judge else set())
     missing = sorted(required - set(metrics))
@@ -603,6 +772,7 @@ async def run(args) -> dict[str, Any]:
         "dataset": args.dataset,
         "mode": args.mode,
         "rag_mode": args.rag_mode,
+        "rerank_mode": args.rerank_mode,
         "review_mode": args.review_mode,
         "repetitions": args.repetitions,
         "run_count": len(rows),
@@ -610,14 +780,22 @@ async def run(args) -> dict[str, Any]:
         "dataset_sha256": dataset_sha256(args.dataset),
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
-        "metadata": metadata(args.mode, args.rag_mode, args.review_mode),
+        "metadata": metadata(
+            args.mode, args.rag_mode, args.review_mode, args.rerank_mode
+        ),
         "metrics": metrics,
+        "metrics_by_category": metrics_by_category,
+        "metrics_by_difficulty": metrics_by_difficulty,
+        "example_results": example_results,
         "runtime_metrics": runtime_metrics,
         "project_stats": project_stats,
         "missing_required_metrics": missing,
         "local_reproducible": local_reproducible,
         "langsmith_witness_complete": witness_complete,
         "resume_eligible": bool(not missing and (local_reproducible or witness_complete)),
+        "test_cache_enabled": bool(
+            not args.upload_results and not getattr(args, "no_test_cache", False)
+        ),
         "batch": batch,
         "resource_usage": {
             "planned_traces": plan["evaluation_traces"],
@@ -641,6 +819,29 @@ async def run(args) -> dict[str, Any]:
         }
         if failed:
             raise SystemExit("评测门禁未通过：" + json.dumps(failed, ensure_ascii=False))
+        if args.mode == "retrieval" and args.rerank_mode == "on":
+            rerank_failed: dict[str, dict[str, float]] = {}
+            if runtime_metrics["rerank_applied_rate"] < 1.0:
+                rerank_failed["rerank_applied_rate"] = {
+                    "actual": runtime_metrics["rerank_applied_rate"],
+                    "required": 1.0,
+                }
+            if runtime_metrics["rerank_degraded_rate"] > 0:
+                rerank_failed["rerank_degraded_rate"] = {
+                    "actual": runtime_metrics["rerank_degraded_rate"],
+                    "required": 0.0,
+                }
+            rerank_p95 = runtime_metrics["rerank_duration_p95_ms"]
+            if rerank_p95 is not None and rerank_p95 > 3000:
+                rerank_failed["rerank_duration_p95_ms"] = {
+                    "actual": rerank_p95,
+                    "required_max": 3000.0,
+                }
+            if rerank_failed:
+                raise SystemExit(
+                    "Reranker 评测门禁未通过："
+                    + json.dumps(rerank_failed, ensure_ascii=False)
+                )
     if args.require_export and not payload["langsmith_export_complete"]:
         raise SystemExit(
             "LangSmith 导出不完整：实验运行数小于本地结果数，可能已达到 Trace 配额"
@@ -725,6 +926,7 @@ def parse_args():
     parser.add_argument("--dataset", default="")
     parser.add_argument("--mode", choices=["retrieval", "component", "live"], default=None)
     parser.add_argument("--rag-mode", choices=["bm25", "hybrid"], default="hybrid")
+    parser.add_argument("--rerank-mode", choices=["off", "on"], default="off")
     parser.add_argument("--review-mode", choices=["always-llm", "auto"], default="auto")
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--fail-on-threshold", action="store_true")
@@ -746,6 +948,11 @@ def parse_args():
     parser.add_argument("--report-name", default="")
     parser.add_argument("--no-report", action="store_true")
     parser.add_argument("--require-export", action="store_true")
+    parser.add_argument(
+        "--no-test-cache",
+        action="store_true",
+        help="本地正式性能实验禁用模型/目标响应缓存",
+    )
     parser.add_argument("--compare", nargs=2, metavar=("BASELINE", "CURRENT"))
     return parser.parse_args()
 

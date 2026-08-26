@@ -138,7 +138,9 @@ class ReportRun:
             csv_path.suffix + f".{os.getpid()}.{secrets.token_hex(4)}.tmp"
         )
         with temporary.open("w", encoding="utf-8", newline="") as handle:
-            fields = ["metric", "sample_count", "mean", "standard_deviation", "pass_rate"]
+            fields = [
+                "metric", "sample_count", "mean", "standard_deviation", "pass_rate", "direction"
+            ]
             writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)

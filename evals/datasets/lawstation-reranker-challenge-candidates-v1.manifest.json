@@ -1,0 +1,18 @@
+{
+  "dataset": "lawstation-reranker-challenge-candidates-v1",
+  "dataset_sha256": "358852283a4c74d2df5d948152a4605033d65f0dc9f77b9b13f8cc37c4bcd097",
+  "sample_count": 600,
+  "source_file": "law.json",
+  "source_sha256": "8d1b4832c56c90d0cf8782aae70ee9961199b3d16ea4946933639485c21b8f86",
+  "selection_rule": "all_valid_codex_reranker_candidates_before_hybrid_qualification",
+  "prompt_version": "resume-rag-challenge-v1",
+  "prompt_sha256": "1e6c283e7a15045b2d9b6c36ff150e89165d1471d10459982c79d8b7bf574794",
+  "human_verified": false,
+  "generator": "codex",
+  "generator_model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh",
+  "previous_candidate_count": 300,
+  "previous_candidate_sha256": "f2563d7c50a9be12026b2430e34d264d2a997ab5b5e1dafc4074ace2bc0d9027",
+  "expanded_candidate_count": 600,
+  "expansion_seed": 42
+}

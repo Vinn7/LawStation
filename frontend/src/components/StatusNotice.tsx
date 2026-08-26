@@ -34,17 +34,20 @@ export function StatusNotice({
   onRetry,
   onDismissError,
 }: StatusNoticeProps) {
-  const showIndex = index.status !== 'ready';
+  const rerankerDegraded = ['degraded', 'cooldown'].includes(index.reranker_status ?? '');
+  const showIndex = index.status !== 'ready' || rerankerDegraded;
   if (!showIndex && !agent && !tool && !memoryMessage && !error) return null;
 
   return (
     <div className="status-stack" aria-live="polite">
       {showIndex && (
-        <div className={`status-notice index-notice is-${index.status}`}>
+        <div className={`status-notice index-notice is-${rerankerDegraded ? 'degraded' : index.status}`}>
           {index.status === 'building' || index.status === 'checking'
             ? <LoaderCircle className="spin" size={17} />
-            : index.status === 'degraded' ? <BookOpenCheck size={17} /> : <AlertCircle size={17} />}
-          <span>{index.message || (index.status === 'degraded' ? 'Dense 索引不可用，当前仍可使用 BM25 检索。' : '法规索引暂不可用。')}</span>
+            : index.status === 'degraded' || rerankerDegraded ? <BookOpenCheck size={17} /> : <AlertCircle size={17} />}
+          <span>{rerankerDegraded
+            ? (index.reranker_message || '法条精排暂不可用，当前使用 RRF 排序。')
+            : (index.message || (index.status === 'degraded' ? 'Dense 索引不可用，当前仍可使用 BM25 检索。' : '法规索引暂不可用。'))}</span>
         </div>
       )}
       {tool && (

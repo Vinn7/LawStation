@@ -164,6 +164,9 @@ class RetrievalTarget:
         if retrieval_mode == "hybrid" and not engine.status().get("dense_enabled"):
             await engine.close()
             raise RuntimeError("Hybrid 评测要求有效 Dense 索引，当前检索引擎处于降级状态")
+        if settings.rag_rerank_enabled and engine.status().get("reranker_status") != "ready":
+            await engine.close()
+            raise RuntimeError("Reranker 评测要求精排模型 ready，禁止静默降级为 RRF")
         return cls(engine, retrieval_mode)
 
     async def __call__(self, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -174,12 +177,40 @@ class RetrievalTarget:
             filters=inputs.get("filters"),
             retrieval_mode=self.retrieval_mode,
         )
+        engine_status = self.engine.status()
+        reranker_model = str(engine_status.get("reranker_model") or "")
+        reranker_model_digest = str(
+            engine_status.get("reranker_model_digest") or ""
+        )
+        result_ranking_version = str(
+            results[0].get("ranking_version") if results else ""
+        )
+        ranking_version = result_ranking_version or (
+            f"{reranker_model}@{reranker_model_digest}"
+            if reranker_model and reranker_model_digest
+            else "rrf-v1"
+        )
         return {
             "retrieval_status": "matched" if results else "no_match",
             "retrieval_results": results,
             "retrieval_mode": self.retrieval_mode,
             "retrieval_duration_ms": round((time.perf_counter() - started) * 1000, 3),
-            "dense_enabled": bool(self.engine.status().get("dense_enabled")),
+            "dense_enabled": bool(engine_status.get("dense_enabled")),
+            "rerank_applied": bool(results and results[0].get("rerank_applied")),
+            "rerank_duration_ms": (
+                float(results[0].get("rerank_duration_ms", 0)) if results else 0.0
+            ),
+            "rerank_prompt_tokens": (
+                int(results[0].get("rerank_prompt_tokens", 0)) if results else 0
+            ),
+            "rerank_candidate_count": (
+                int(results[0].get("rerank_candidate_count", 0)) if results else 0
+            ),
+            "reranker_status": engine_status.get("reranker_status"),
+            "reranker_provider": engine_status.get("reranker_provider"),
+            "reranker_model": reranker_model,
+            "reranker_model_digest": reranker_model_digest,
+            "ranking_version": ranking_version,
         }
 
     async def close(self) -> None:

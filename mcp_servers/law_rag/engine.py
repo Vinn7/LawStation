@@ -20,6 +20,11 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit
 from backend.app.core.ollama import ollama_runtime_status
 from mcp_servers.law_rag.embeddings import create_embedding_provider
+from mcp_servers.law_rag.reranker import (
+    RerankCandidate,
+    RerankerUnavailable,
+    create_reranker,
+)
 
 CHUNKER_VERSION = "law-article-v1"
 QUERY_INSTRUCTION_VERSION = "legal-query-v1"
@@ -104,6 +109,8 @@ class LawSearchEngine:
         self._build_task: asyncio.Task | None = None
         self.embedding_provider = create_embedding_provider(self.settings)
         self.embedding_descriptor = None
+        self.reranker = create_reranker(self.settings)
+        self.reranker_descriptor = None
         self.fingerprint = self._fingerprint()
         runtime = ollama_runtime_status()
         self._state = {
@@ -120,6 +127,18 @@ class LawSearchEngine:
             "embedding_model_digest": "",
             "ollama_available": runtime["available"],
             "ollama_managed": runtime["managed"],
+            "reranker_enabled": bool(self.reranker),
+            "reranker_status": "checking" if self.reranker else "disabled",
+            "reranker_provider": getattr(self.settings, "rag_rerank_provider", "tei"),
+            "reranker_model": getattr(self.settings, "rag_rerank_model", ""),
+            "reranker_model_digest": "",
+            "reranker_managed": False,
+            "reranker_candidate_count": getattr(
+                self.settings, "rag_rerank_candidate_count", 0
+            ),
+            "reranker_message": (
+                "正在检查本地法条精排模型" if self.reranker else "法条精排已关闭"
+            ),
             "message": "正在检查法律索引",
         }
 
@@ -140,10 +159,36 @@ class LawSearchEngine:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def status(self) -> dict:
+        self._sync_reranker_state()
         return dict(self._state)
 
     def _set_state(self, **values) -> None:
         self._state.update(values)
+
+    def _sync_reranker_state(self) -> None:
+        if self.reranker is None:
+            return
+        reranker = self.reranker.status()
+        self._state.update({
+            "reranker_status": reranker["status"],
+            "reranker_provider": reranker["provider"],
+            "reranker_model": reranker["model"],
+            "reranker_model_digest": reranker["model_digest"],
+            "reranker_managed": bool(reranker.get("managed", False)),
+            "reranker_message": reranker["message"],
+        })
+
+    async def _initialize_reranker(self) -> None:
+        if self.reranker is None:
+            return
+        try:
+            self.reranker_descriptor = await self.reranker.prepare()
+        except Exception:
+            self._sync_reranker_state()
+            if getattr(self.settings, "rag_rerank_required", False):
+                raise
+        else:
+            self._sync_reranker_state()
 
     def _read_valid_index(self, directory: Path):
         manifest_path = directory / "manifest.json"
@@ -181,6 +226,7 @@ class LawSearchEngine:
         return True
 
     async def initialize_index(self, wait: bool = False, force: bool = False) -> None:
+        await self._initialize_reranker()
         try:
             self.embedding_descriptor = await self.embedding_provider.prepare()
         except Exception as exc:  # noqa: BLE001 - direct MCP/debug mode must retain BM25
@@ -236,6 +282,8 @@ class LawSearchEngine:
             except asyncio.CancelledError:
                 pass
         await self.embedding_provider.close()
+        if self.reranker is not None:
+            await self.reranker.close()
 
     async def _embed(self, texts: list[str]) -> np.ndarray:
         return await self.embedding_provider.embed_documents(texts)
@@ -648,7 +696,50 @@ class LawSearchEngine:
                     accepted_rank += 1
                     if accepted_rank >= pool:
                         break
-            ordered = self._rrf_order(ranks, top_k)
+            rerank_limit = max(
+                top_k,
+                int(getattr(self.settings, "rag_rerank_candidate_count", top_k)),
+            )
+            candidate_order = self._rrf_order(ranks, rerank_limit)
+            ordered = candidate_order[:top_k]
+            rerank_scores: dict[int, float] = {}
+            rerank_applied = False
+            rerank_duration_ms = 0.0
+            rerank_prompt_tokens = 0
+            if self.reranker is not None and candidate_order:
+                try:
+                    batch = await self.reranker.rerank(
+                        query,
+                        [
+                            RerankCandidate(
+                                index=index,
+                                chunk_id=self.docs[index]["chunk_id"],
+                                text=self.docs[index]["text"],
+                                rrf_score=ranks[index],
+                            )
+                            for index in candidate_order
+                        ],
+                    )
+                except RerankerUnavailable:
+                    self._sync_reranker_state()
+                else:
+                    minimum_rerank = float(
+                        getattr(self.settings, "rag_rerank_min_score", 0.0)
+                    )
+                    rerank_scores = {
+                        item.index: item.score
+                        for item in batch.results
+                        if item.score >= minimum_rerank
+                    }
+                    ordered = [
+                        item.index
+                        for item in batch.results
+                        if item.score >= minimum_rerank
+                    ][:top_k]
+                    rerank_applied = True
+                    rerank_duration_ms = batch.duration_ms
+                    rerank_prompt_tokens = batch.prompt_tokens
+                    self._sync_reranker_state()
             state = self.status()
             results = [{
                 **{key: value for key, value in self.docs[index].items() if key != "text"},
@@ -657,9 +748,25 @@ class LawSearchEngine:
                 "retrieval_scores": {
                     **raw_scores.get(index, {}),
                     "rrf": round(ranks[index], 8),
+                    **(
+                        {"rerank": round(rerank_scores[index], 8)}
+                        if index in rerank_scores else {}
+                    ),
                 },
                 "data_version": self.fingerprint,
                 "retrieval_mode": mode,
+                "rerank_applied": rerank_applied,
+                "rerank_provider": (
+                    self.reranker_descriptor.provider
+                    if rerank_applied and self.reranker_descriptor else None
+                ),
+                "ranking_version": (
+                    self.reranker_descriptor.ranking_version
+                    if rerank_applied and self.reranker_descriptor else "rrf-v1"
+                ),
+                "rerank_duration_ms": rerank_duration_ms,
+                "rerank_prompt_tokens": rerank_prompt_tokens,
+                "rerank_candidate_count": len(candidate_order) if rerank_applied else 0,
                 "dense_enabled": state["dense_enabled"],
                 "index_status": state["status"],
             } for rank, index in enumerate(ordered)]

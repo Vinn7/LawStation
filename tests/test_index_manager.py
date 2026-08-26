@@ -6,6 +6,12 @@ import pytest
 
 import mcp_servers.law_rag.engine as engine_module
 from mcp_servers.law_rag.embeddings import EmbeddingDescriptor
+from mcp_servers.law_rag.reranker import (
+    RerankBatch,
+    RerankerDescriptor,
+    RerankerUnavailable,
+    RerankResult,
+)
 
 
 def settings(source, index_dir):
@@ -381,6 +387,115 @@ async def test_unknown_retrieval_mode_is_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="retrieval_mode"):
         await engine.search("内容", retrieval_mode="invalid")
+
+
+@pytest.mark.asyncio
+async def test_reranker_reorders_rrf_candidates_without_changing_schema(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text(
+        '{"测试法第一条":"劳动合同解除","测试法第二条":"劳动赔偿责任"}',
+        encoding="utf-8",
+    )
+    config = settings(source, tmp_path / "indexes")
+    config.rag_bm25_min_score = -1
+    config.rag_rerank_candidate_count = 12
+    config.rag_rerank_min_score = 0
+    monkeypatch.setattr(engine_module, "get_settings", lambda: config)
+    engine = engine_module.LawSearchEngine()
+
+    class FakeReranker:
+        async def rerank(self, _query, candidates):
+            return RerankBatch([
+                RerankResult(
+                    candidates[1].index, candidates[1].chunk_id, 0.9, candidates[1].rrf_score
+                ),
+                RerankResult(
+                    candidates[0].index, candidates[0].chunk_id, 0.1, candidates[0].rrf_score
+                ),
+            ], 12.5, 40)
+
+        def status(self):
+            return {
+                "status": "ready", "message": "ready", "provider": "ollama",
+                "model": "reranker", "model_digest": "digest", "ranking_version": "reranker@digest",
+            }
+
+        async def close(self):
+            return None
+
+    engine.reranker = FakeReranker()
+    engine.reranker_descriptor = RerankerDescriptor("ollama", "reranker", "digest")
+    result = await engine.search("劳动", top_k=2, retrieval_mode="bm25")
+
+    assert len(result) == 2
+    assert result[0]["retrieval_scores"]["rerank"] == pytest.approx(0.9)
+    assert result[0]["rerank_applied"] is True
+    assert result[0]["ranking_version"] == "reranker@digest"
+    assert result[0]["rerank_prompt_tokens"] == 40
+
+
+@pytest.mark.asyncio
+async def test_reranker_failure_falls_back_to_rrf_not_no_match(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"测试法第一条":"劳动合同解除"}', encoding="utf-8")
+    config = settings(source, tmp_path / "indexes")
+    config.rag_bm25_min_score = -1
+    config.rag_rerank_candidate_count = 12
+    monkeypatch.setattr(engine_module, "get_settings", lambda: config)
+    engine = engine_module.LawSearchEngine()
+
+    class FailedReranker:
+        async def rerank(self, _query, _candidates):
+            raise RerankerUnavailable("offline")
+
+        def status(self):
+            return {
+                "status": "degraded", "message": "offline", "provider": "ollama",
+                "model": "reranker", "model_digest": "", "ranking_version": "",
+            }
+
+        async def close(self):
+            return None
+
+    engine.reranker = FailedReranker()
+    result = await engine.search("劳动", retrieval_mode="bm25")
+
+    assert result
+    assert result[0]["rerank_applied"] is False
+    assert "rerank" not in result[0]["retrieval_scores"]
+    assert result[0]["ranking_version"] == "rrf-v1"
+
+
+@pytest.mark.asyncio
+async def test_reranker_threshold_can_return_normal_no_match(tmp_path, monkeypatch):
+    source = tmp_path / "law.json"
+    source.write_text('{"测试法第一条":"劳动合同解除"}', encoding="utf-8")
+    config = settings(source, tmp_path / "indexes")
+    config.rag_bm25_min_score = -1
+    config.rag_rerank_candidate_count = 12
+    config.rag_rerank_min_score = 0.8
+    monkeypatch.setattr(engine_module, "get_settings", lambda: config)
+    engine = engine_module.LawSearchEngine()
+
+    class LowScoreReranker:
+        async def rerank(self, _query, candidates):
+            item = candidates[0]
+            return RerankBatch([
+                RerankResult(item.index, item.chunk_id, 0.2, item.rrf_score)
+            ], 3.0, 10)
+
+        def status(self):
+            return {
+                "status": "ready", "message": "ready", "provider": "ollama",
+                "model": "reranker", "model_digest": "digest", "ranking_version": "reranker@digest",
+            }
+
+        async def close(self):
+            return None
+
+    engine.reranker = LowScoreReranker()
+    engine.reranker_descriptor = RerankerDescriptor("ollama", "reranker", "digest")
+    assert await engine.search("劳动", retrieval_mode="bm25") == []
 
 
 def test_exact_article_lookup_uses_map_and_returns_all_chunks(tmp_path, monkeypatch):
