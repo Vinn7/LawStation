@@ -122,6 +122,17 @@ class MonthlyResourceBudget:
             value[key] = max(0, value[key] - reserved + actual)
             self._write(value)
 
+    def record_many(self, amounts: dict[str, int]) -> None:
+        """Record actual usage without enforcing a monthly ceiling."""
+        unknown = set(amounts) - self.KEYS
+        if unknown or any(amount < 0 for amount in amounts.values()):
+            raise ValueError(f"非法资源用量：{sorted(unknown)}")
+        with self._locked():
+            value = self._read()
+            for key, amount in amounts.items():
+                value[key] += amount
+            self._write(value)
+
     def remaining(self, limits: dict[str, int]) -> dict[str, int]:
         value = self.snapshot()
         return {key: max(0, int(limit) - value.get(key, 0)) for key, limit in limits.items()}

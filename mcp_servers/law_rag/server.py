@@ -61,9 +61,9 @@ async def close_engine() -> None:
 
 
 @mcp.tool()
-async def search_laws(query: str, top_k: int = 8, filters: dict | None = None) -> list[dict]:
+async def search_laws(query: str, top_k: int = 8, filters: dict | None = None) -> dict:
     """混合检索中国法律法规。法律问题、权利义务或法条核验时使用。"""
-    return await (await initialize_engine()).search(query, top_k, filters)
+    return await (await initialize_engine()).search(query, top_k, filters, envelope=True)
 
 
 @mcp.tool()

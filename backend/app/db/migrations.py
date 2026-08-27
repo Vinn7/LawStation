@@ -8,7 +8,7 @@ from alembic import command
 from backend.app.core.config import Settings, get_settings
 
 ROOT = Path(__file__).resolve().parents[3]
-TARGET_REVISION = "20260821_04"
+TARGET_REVISION = "20260826_05"
 
 
 def _sqlite_path(database_url: str) -> Path | None:
@@ -36,7 +36,7 @@ def upgrade_database(settings: Settings | None = None) -> Path | None:
     database_path = _sqlite_path(settings.database_url)
     backup_path = None
     if database_path and database_path.is_file() and _current_revision(database_path) != TARGET_REVISION:
-        backup_path = database_path.with_name(database_path.name + ".pre-memory-v2.bak")
+        backup_path = database_path.with_name(database_path.name + ".pre-agent-runs.bak")
         if not backup_path.exists():
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(database_path, backup_path)

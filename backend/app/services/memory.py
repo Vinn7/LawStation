@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.context import RequestUserContext
 from backend.app.core.logging import audit
 from backend.app.db.models import ConversationSummary, Message, UserMemory
+from backend.app.services.memory_schemas import MemorySnapshot
 from backend.app.services.repositories import OwnedRepository
 
 
@@ -76,6 +78,15 @@ class MemoryService:
         question: str = "",
         exclude_message_id: str | None = None,
     ) -> tuple[str, list[Message]]:
+        snapshot = self.snapshot(conversation_id, question, exclude_message_id)
+        return snapshot.context, snapshot.history
+
+    def snapshot(
+        self,
+        conversation_id: str,
+        question: str = "",
+        exclude_message_id: str | None = None,
+    ) -> MemorySnapshot:
         summary = self.db.scalar(
             select(ConversationSummary).where(
                 ConversationSummary.tenant_id == self.ctx.tenant_id,
@@ -144,7 +155,28 @@ class MemoryService:
             history_count=len(history),
             token_count=estimate_tokens(question) + recent_used + estimate_tokens(context),
         )
-        return context, history
+        selected = [
+            {
+                "memory_id": memory.id,
+                "canonical_key": memory.canonical_key,
+                "scope": memory.scope,
+                "type": memory.memory_type,
+                "content": memory.content,
+            }
+            for memory in [*case_memories, *profile_memories]
+            if _memory_line(memory) in {*case_lines, *profile_lines}
+        ]
+        return MemorySnapshot(
+            context=context,
+            history=history,
+            estimated_tokens=estimate_tokens(question) + recent_used + estimate_tokens(context),
+            selected_case_memories=len(case_lines),
+            selected_profile_memories=len(profile_lines),
+            truncated=truncated,
+            current_user_message=question,
+            selected_memories=selected,
+            snapshot_time=datetime.now(UTC),
+        )
 
     def consolidate(self, conversation_id: str) -> bool:
         raise RuntimeError(

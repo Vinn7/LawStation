@@ -46,15 +46,15 @@ LawStation 已不是简单的 LLM Chat Demo。当前代码形成了较完整的�
 
 ### 2.7 观测与业务失败解耦
 
-JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈同步或 flush 失败都不阻塞咨询。评测还带显式上传确认和月度预算。
+JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈同步或 flush 失败都不阻塞咨询。评测保留显式上传确认和实际用量账本，但不再因月度累计值硬阻断；生产 Trace 仍独立限额。
 
 关键 symbol：`LangSmithObservability`、`MonthlyResourceBudget`、`ReportRun`。
 
 ## 3. 部分实现或语义边界
 
-### 3.1 `MemorySnapshot` 仅定义未落地
+### 3.1 `MemorySnapshot` 已进入持久化任务主链路
 
-`backend/app/services/memory_schemas.py::MemorySnapshot` 是冻结 dataclass，但 `MemoryService.context` 仍返回 tuple。运行时确实形成固定快照语义，类型层尚未强制。
+`backend/app/services/memory_schemas.py::MemorySnapshot` 是冻结 dataclass，`MemoryService.snapshot()` 在 AgentRun 真正取得执行配额后构建快照。快照显式包含近期消息、会话摘要、选中记忆、当前用户消息和时间点；Graph 执行期间不会动态吸收其他会话后写入的记忆。旧的 `MemoryService.context()` 仅作为兼容入口保留。
 
 ### 3.2 线上评测配置多于实际调度
 
@@ -97,7 +97,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 2. **会话排序不准确**：新增消息未更新 `Conversation.updated_at`。
 3. **记忆部分成功语义**：候选已提交但摘要失败时整个 Job 标失败；建议拆分阶段状态。
 4. **Memory Worker 关闭与吞吐**：单 Worker、领取非多进程原子，关闭等待无硬超时。
-5. **前端任务不可恢复**：刷新后后台流和累计 token 丢失。
+5. **任务恢复仍是单机能力**：刷新后可通过 `active-run + Last-Event-ID` 重放，服务重启可从 LangGraph checkpoint 续跑；但 AgentRun Worker、租约和事件通知仍基于单机 SQLite，不支持多实例竞争领取和跨节点实时推送。
 6. **反馈错误体验**：前端反馈失败没有独立可见提示。
 
 ### P2：性能与扩展
@@ -116,6 +116,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 - 使用 BM25 + Ollama Dense + FAISS + RRF 混合召回。
 - 设计 chunk 级 EvidencePacket 与确定性引用边界。
 - 实现多用户逻辑隔离、分层记忆、最新事实覆盖和并发会话。
+- 使用 `AsyncSqliteSaver` 持久化 LangGraph super-step，并以 AgentRun 租约、事件日志和幂等消息写入实现刷新/断线/单机服务重启恢复。
 - 建立 JSONL 审计、LangSmith 可选追踪和低资源评测。
 - 实现可恢复全量索引、单入口和单端口部署。
 
@@ -124,7 +125,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 - 已有生产级认证、RBAC 或真正多租户 SaaS。
 - 三个 Agent 是独立微服务。
 - 已接入 TEI `BAAI/bge-reranker-v2-m3` Cross-Encoder，并建立不读取 Candidate 结果的相邻法条挑战集资格流水线；在200条冻结集完成同样本消融前，仍不能宣称真实基准优于 RRF。
-- 已支持浏览器刷新后的任务恢复。
+- 已实现多机、多副本环境中的任务迁移或分布式恢复。
 - 所有回答都有律师人工校验。
 - 评测小样本分数代表生产准确率。
 - 前端展示的是 DeepSeek 原始实时 token。

@@ -127,7 +127,7 @@ MessageList 仅在用户距离底部不足 96px 时维持自动滚动；主动�
 ## 11. 当前边界与风险
 
 - 状态全部位于顶层 `App`，功能继续增长时可维护性会下降。
-- runtime 只在内存中，刷新后后台任务不可恢复。
+- 页面 runtime 本身仍在内存中，但服务端 AgentRun 可查询；刷新后重新打开会话会查询 active-run，并从 sequence 0 或已知 sequence 重放。
 - index 固定每 2.5 秒轮询，即使 ready 也继续请求。
 - MemoryJob 最多轮询 30 秒，超时后界面不再自动更新。
 - Citation 类型没有声明 `chunk_id`、quoted excerpt 和 data version，虽然前端有意只展示法名条号，但类型与后端完整结构不对称。
@@ -142,3 +142,7 @@ MessageList 仅在用户距离底部不足 96px 时维持自动滚动；主动�
 - `frontend/src/test/MemoryPanel.test.tsx`
 
 生产构建命令：`npm run build`；组件测试命令：`npm test`。
+
+## 13. 持久化任务恢复
+
+`ConversationRuntime` 新增 `runId/lastEventSequence/serverStatus/reconnecting`。发送链路改为 `api.createRun()` 后调用 `api.runEvents()`；`parseSseBlock` 解析 SSE `id`，旧事件按 sequence 去重。网络断开时订阅自动重连，用户切换不 abort 其他 ConversationKey；停止按钮先调用 `cancelRun`，再终止本地订阅。终态后重新读取服务端消息，避免客户端拼接结果成为事实源。

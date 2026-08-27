@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -11,6 +12,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import or_, select
 
 from backend.app.agent.middleware import InvocationModelLimitMiddleware, ToolAuditMiddleware
 from backend.app.agent.registry import MCPToolRegistry
@@ -21,6 +23,7 @@ from backend.app.agent.schemas import (
     CounselDraft,
     EvidenceItem,
     EvidencePacket,
+    EvidenceSelectionResult,
     ResearchTask,
     ReviewResult,
     UnresolvedIssue,
@@ -28,6 +31,8 @@ from backend.app.agent.schemas import (
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings
 from backend.app.core.logging import audit, summary
+from backend.app.db.models import UserMemory
+from backend.app.db.session import SessionLocal
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -38,12 +43,15 @@ ANALYST_PROMPT = """你是法律咨询的案情分析与调度 Agent。只做问
 request_type(casual_chat|legal_consultation|insufficient_information), case_summary, jurisdiction,
 legal_domain, key_facts[], missing_facts[], legal_issues[], research_tasks[{issue_id,query,purpose}],
 risk_level(low|medium|high), next_action(direct_answer|ask_clarification|research), direct_answer,
-clarification_questions[]。普通闲聊填写 direct_answer；关键事实不足时给出简洁澄清问题。"""
+clarification_questions[], current_fact_overrides[{canonical_key,new_value,old_value,
+replaced_memory_id,confidence}]。只有当前消息明确修正历史记忆时才填写override。普通闲聊填写
+direct_answer；关键事实不足时给出简洁澄清问题。"""
 
 RESEARCH_PROMPT = """你是法律研究 Agent，也是唯一可以调用法律检索工具的角色。针对每个 research task，
     先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实返回结果。
     最终只返回严格 JSON：research_tasks[], evidence_items[{document_id,chunk_id,supports_issue_ids,
-    verification_status}], unresolved_issues[{issue_id,description}], conflicts[], research_summary。
+    verification_status}], accepted_chunk_ids[], rejected_candidates[{chunk_id,reason}],
+    unresolved_issues[{issue_id,description}], conflicts[], research_summary。
     evidence_items 必须使用工具结果中真实存在的 chunk_id；document_id 仅表示原始法条，不能代替 chunk_id。
     找不到依据时返回空 evidence_items，
 并在 unresolved_issues 说明，这属于正常检索结果，不得凭常识补造法条。"""
@@ -66,6 +74,10 @@ REVIEW_PROMPT = """你是 Case Analyst 的复核阶段。检查草稿是否覆�
 只返回严格 JSON：approved,
 unsupported_claims[], missing_issue_ids[], citation_errors[], contradictions[], revision_instruction,
 next_action(finalize|research_again|revise_draft)。只有明确证据缺口才 research_again；表达或论证问题选 revise_draft。"""
+
+EVIDENCE_SELECTOR_PROMPT = """你是受限证据选择器，不允许调用任何工具。输入只包含本轮已检索到的
+候选法条和争议点。逐个候选决定接受或拒绝：只有直接支持争议点的候选才能进入 accepted_chunk_ids；
+其余必须进入 rejected_candidates 并给出简短原因。不得生成输入中不存在的 chunk_id。仅输出 JSON。"""
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -186,6 +198,52 @@ def _no_match_safe_answer(state: LegalConsultationState) -> str:
     )
 
 
+def _validate_fact_overrides(items, context: AgentInvocationContext):
+    """Treat model-provided memory IDs as untrusted ownership hints."""
+    requested_ids = {item.replaced_memory_id for item in items if item.replaced_memory_id}
+    valid_ids: set[str] = set()
+    if requested_ids:
+        identity = context.identity
+        with SessionLocal() as db:
+            valid_ids = set(db.scalars(select(UserMemory.id).where(
+                UserMemory.id.in_(requested_ids),
+                UserMemory.tenant_id == identity.tenant_id,
+                UserMemory.user_id == identity.user_id,
+                UserMemory.status == "active",
+                or_(
+                    UserMemory.scope == "user",
+                    UserMemory.conversation_id == identity.conversation_id,
+                ),
+            )))
+    accepted = [
+        item for item in items
+        if not item.replaced_memory_id or item.replaced_memory_id in valid_ids
+    ]
+    rejected_count = len(items) - len(accepted)
+    if rejected_count:
+        audit(
+            "agent.fact_override.rejected",
+            level=logging.WARNING,
+            status="rejected",
+            rejected_count=rejected_count,
+            **context.audit_fields,
+        )
+    return accepted
+
+
+def _fact_boundary_errors(state: LegalConsultationState, answer: str) -> list[str]:
+    """Reject deterministic reuse of an explicitly superseded scalar fact."""
+    errors: list[str] = []
+    for override in state.get("current_fact_overrides", []):
+        old_value = str(override.get("old_value") or "").strip()
+        new_value = str(override.get("new_value") or "").strip()
+        if old_value and old_value != new_value and old_value in answer:
+            errors.append(
+                f"回答仍使用已被本轮消息替换的事实 {override.get('canonical_key', '')}"
+            )
+    return errors
+
+
 def _citation_errors(draft: CounselDraft | None, packet: EvidencePacket | None) -> list[str]:
     if draft is None:
         return ["缺少法律意见草稿"]
@@ -227,15 +285,24 @@ def _payload(state: LegalConsultationState) -> dict[str, Any]:
         "evidence_packet": state["evidence_packet"].model_dump() if state["evidence_packet"] else None,
         "counsel_draft": state["counsel_draft"].model_dump() if state["counsel_draft"] else None,
         "review_result": state["review_result"].model_dump() if state["review_result"] else None,
+        "current_fact_overrides": state.get("current_fact_overrides", []),
     }
 
 
 class LegalConsultationGraph:
-    def __init__(self, model: Any, tools: list[BaseTool], registry: MCPToolRegistry, settings: Settings) -> None:
+    def __init__(
+        self,
+        model: Any,
+        tools: list[BaseTool],
+        registry: MCPToolRegistry,
+        settings: Settings,
+        checkpointer: Any = None,
+    ) -> None:
         self.model = model
         self.tools = tools
         self.registry = registry
         self.settings = settings
+        self.checkpointer = checkpointer
         self.research_agent = create_agent(
             model=model,
             tools=tools,
@@ -271,7 +338,10 @@ class LegalConsultationGraph:
             {"finish": "finalize", "research": "legal_researcher", "revise": "legal_counsel"},
         )
         graph.add_edge("finalize", END)
-        return graph.compile(name="lawstation-three-agent-graph")
+        return graph.compile(
+            name="lawstation-three-agent-graph",
+            checkpointer=self.checkpointer,
+        )
 
     async def _invoke_json(self, runtime: Runtime[AgentInvocationContext], agent_name: str, prompt: str, payload: dict[str, Any], schema: type[SchemaT]) -> SchemaT:
         context = runtime.context
@@ -288,7 +358,7 @@ class LegalConsultationGraph:
             result = schema.model_validate(_extract_json(_message_text(response)))
             audit("agent.node.completed", status="success", agent=agent_name, duration_ms=int((time.perf_counter() - started) * 1000), **context.audit_fields)
             return result
-        except Exception as exc:
+        except Exception as exc:  # Central model boundary audits and re-raises provider errors.
             audit("agent.node.failed", level=logging.ERROR, status="failed", agent=agent_name, error_type=type(exc).__name__, error=summary(str(exc)), duration_ms=int((time.perf_counter() - started) * 1000), **context.audit_fields)
             raise
 
@@ -296,7 +366,16 @@ class LegalConsultationGraph:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "analyzing", "message": "正在分析案情"}})
         if runtime.context.evaluation_case_analysis is not None:
             analysis = CaseAnalysis.model_validate(runtime.context.evaluation_case_analysis)
-            update: dict[str, Any] = {"case_analysis": analysis}
+            validated_overrides = await asyncio.to_thread(
+                _validate_fact_overrides, analysis.current_fact_overrides, runtime.context
+            )
+            analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
+            update: dict[str, Any] = {
+                "case_analysis": analysis,
+                "current_fact_overrides": [
+                    item.model_dump() for item in analysis.current_fact_overrides
+                ],
+            }
             if analysis.next_action == "direct_answer":
                 update["final_answer"] = analysis.direct_answer
             elif analysis.next_action == "ask_clarification":
@@ -310,8 +389,22 @@ class LegalConsultationGraph:
         except (ValueError, ValidationError, RuntimeError) as exc:
             question = _message_text(state["messages"][-1]) if state["messages"] else ""
             analysis = CaseAnalysis(request_type="legal_consultation", case_summary=question, legal_issues=[question], research_tasks=[ResearchTask(issue_id="issue-1", query=question, purpose="核验法律依据")], next_action="research")
-            return {"case_analysis": analysis, "errors": [*state["errors"], AgentError(agent="case_analyst", message=str(exc))]}
-        update: dict[str, Any] = {"case_analysis": analysis}
+            return {
+                "case_analysis": analysis,
+                "errors": [*state["errors"], AgentError(agent="case_analyst", message=str(exc))],
+                "model_call_count": runtime.context.metrics.model_call_count,
+            }
+        validated_overrides = await asyncio.to_thread(
+            _validate_fact_overrides, analysis.current_fact_overrides, runtime.context
+        )
+        analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
+        update: dict[str, Any] = {
+            "case_analysis": analysis,
+            "current_fact_overrides": [
+                item.model_dump() for item in analysis.current_fact_overrides
+            ],
+            "model_call_count": runtime.context.metrics.model_call_count,
+        }
         if analysis.next_action == "direct_answer":
             update["final_answer"] = analysis.direct_answer or "您好，请告诉我需要咨询的法律问题。"
         elif analysis.next_action == "ask_clarification":
@@ -369,7 +462,61 @@ class LegalConsultationGraph:
             if final_message is None:
                 raise RuntimeError("法律研究 Agent 未返回结果")
             raw_packet = EvidencePacket.model_validate(_extract_json(_message_text(final_message)))
+            if not raw_packet.evidence_items and raw_packet.accepted_chunk_ids:
+                selected_ids = set(raw_packet.accepted_chunk_ids)
+                raw_packet = raw_packet.model_copy(update={
+                    "evidence_items": [
+                        EvidenceItem(
+                            document_id=str(item.get("document_id", "")),
+                            chunk_id=str(item.get("chunk_id", "")),
+                            supports_issue_ids=[task.issue_id for task in analysis.research_tasks],
+                        )
+                        for item in candidates
+                        if str(item.get("chunk_id", "")) in selected_ids
+                    ]
+                })
             accepted = _authoritative_evidence(raw_packet, candidates)
+            if candidates and not accepted and not raw_packet.rejected_candidates:
+                selection = await self._invoke_json(
+                    runtime,
+                    "evidence_selector",
+                    EVIDENCE_SELECTOR_PROMPT,
+                    {
+                        "legal_issues": analysis.legal_issues if analysis else [],
+                        "candidates": [
+                            {
+                                "chunk_id": item.get("chunk_id"),
+                                "law_name": item.get("law_name"),
+                                "article_number": item.get("article_number"),
+                                "content": item.get("content"),
+                            }
+                            for item in candidates
+                        ],
+                    },
+                    EvidenceSelectionResult,
+                )
+                valid_ids = {str(item.get("chunk_id", "")) for item in candidates}
+                accepted_ids = {
+                    item for item in selection.accepted_chunk_ids if item in valid_ids
+                }
+                valid_rejections = [
+                    item for item in selection.rejected_candidates if item.chunk_id in valid_ids
+                ]
+                selected_packet = raw_packet.model_copy(update={
+                    "evidence_items": [
+                        EvidenceItem(
+                            document_id=str(item.get("document_id", "")),
+                            chunk_id=str(item.get("chunk_id", "")),
+                            supports_issue_ids=[task.issue_id for task in analysis.research_tasks],
+                        )
+                        for item in candidates
+                        if str(item.get("chunk_id", "")) in accepted_ids
+                    ],
+                    "accepted_chunk_ids": list(accepted_ids),
+                    "rejected_candidates": valid_rejections,
+                })
+                accepted = _authoritative_evidence(selected_packet, candidates)
+                raw_packet = selected_packet
             if accepted:
                 retrieval_status = "matched"
             elif failed_tool_result and not successful_tool_result:
@@ -381,7 +528,16 @@ class LegalConsultationGraph:
                 unresolved = [UnresolvedIssue(issue_id="issue-1", description="当前法规库未检索到可直接引用的依据")]
             packet = raw_packet.model_copy(update={
                 "retrieval_status": retrieval_status,
+                "candidate_status": "matched" if candidates else "no_match",
+                "evidence_status": (
+                    "accepted"
+                    if accepted
+                    else "error"
+                    if failed_tool_result and not successful_tool_result
+                    else "rejected"
+                ),
                 "evidence_items": accepted,
+                "accepted_chunk_ids": [item.chunk_id for item in accepted],
                 "unresolved_issues": unresolved,
                 "research_summary": raw_packet.research_summary or (
                     "检索正常完成，但未找到可引用法条。" if retrieval_status == "no_match" else raw_packet.research_summary
@@ -403,12 +559,25 @@ class LegalConsultationGraph:
                 remaining_model_calls=max(0, self.settings.agent_max_model_calls - context.metrics.model_call_count),
                 **context.audit_fields,
             )
-            return {"evidence_packet": packet, "retry_count": state["retry_count"] + (1 if state["review_result"] else 0)}
-        except Exception as exc:
+            return {
+                "evidence_packet": packet,
+                "retry_count": state["retry_count"] + (1 if state["review_result"] else 0),
+                "model_call_count": context.metrics.model_call_count,
+                "tool_call_count": context.metrics.tool_call_count,
+                "tool_trajectory": list(context.metrics.tool_trajectory),
+            }
+        except Exception as exc:  # noqa: BLE001 - research failures become controlled evidence state
             audit("agent.node.failed", level=logging.ERROR, status="failed", agent="legal_researcher", error_type=type(exc).__name__, error=summary(str(exc)), **context.audit_fields)
             issues = [UnresolvedIssue(issue_id=f"issue-{index + 1}", description=item) for index, item in enumerate(analysis.legal_issues if analysis else [])]
             packet = EvidencePacket(retrieval_status="tool_error", research_tasks=analysis.research_tasks if analysis else [], unresolved_issues=issues, research_summary="法律检索执行失败，未能完成法规核验。")
-            return {"evidence_packet": packet, "errors": [*state["errors"], AgentError(agent="legal_researcher", message=str(exc))], "retry_count": state["retry_count"] + (1 if state["review_result"] else 0)}
+            return {
+                "evidence_packet": packet,
+                "errors": [*state["errors"], AgentError(agent="legal_researcher", message=str(exc))],
+                "retry_count": state["retry_count"] + (1 if state["review_result"] else 0),
+                "model_call_count": runtime.context.metrics.model_call_count,
+                "tool_call_count": runtime.context.metrics.tool_call_count,
+                "tool_trajectory": list(runtime.context.metrics.tool_trajectory),
+            }
 
     async def legal_counsel(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         evidence = state["evidence_packet"]
@@ -425,23 +594,41 @@ class LegalConsultationGraph:
                 disclosure = "本轮法规检索正常完成，但当前法规库中未检索到可引用法条。以上属于一般性分析，不构成已经过法规核验的确定性法律结论。"
                 answer = draft.answer if _no_match_disclosure_present(draft.answer) else f"{draft.answer.rstrip()}\n\n## 检索说明\n\n{disclosure}"
                 draft = draft.model_copy(update={"answer": answer, "confidence": "low"})
-            return {"counsel_draft": draft, "revision_count": state["revision_count"] + (1 if state["review_result"] else 0)}
-        except Exception as exc:
+            return {
+                "counsel_draft": draft,
+                "revision_count": state["revision_count"] + (1 if state["review_result"] else 0),
+                "model_call_count": runtime.context.metrics.model_call_count,
+            }
+        except Exception as exc:  # noqa: BLE001 - counsel failures use a safe user-facing fallback
             fallback_answer = _no_match_safe_answer(state) if no_match else (evidence.research_summary if evidence else "暂时无法形成完整法律意见。") + "\n\n当前回答生成失败，建议稍后重试或咨询专业律师。"
             fallback = CounselDraft(answer=fallback_answer, confidence="low", limitations=["回答生成或法规核验未完整完成"])
-            return {"counsel_draft": fallback, "errors": [*state["errors"], AgentError(agent="legal_counsel", message=str(exc))]}
+            return {
+                "counsel_draft": fallback,
+                "errors": [*state["errors"], AgentError(agent="legal_counsel", message=str(exc))],
+                "model_call_count": runtime.context.metrics.model_call_count,
+            }
 
     async def reviewer(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "reviewing", "message": "正在核验回答"}})
         try:
             review = await self._invoke_json(runtime, "case_analyst_reviewer", REVIEW_PROMPT, _payload(state), ReviewResult)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - review failures finalize with explicit limitations
             review = ReviewResult(approved=False, revision_instruction="自动复核未完成，最终回答应保留风险提示。", next_action="finalize")
-            return {"review_result": review, "errors": [*state["errors"], AgentError(agent="case_analyst_reviewer", message=str(exc))]}
+            return {
+                "review_result": review,
+                "errors": [*state["errors"], AgentError(agent="case_analyst_reviewer", message=str(exc))],
+                "model_call_count": runtime.context.metrics.model_call_count,
+            }
         deterministic_errors = _citation_errors(state["counsel_draft"], state["evidence_packet"])
         packet = state["evidence_packet"]
         if packet and packet.retrieval_status == "no_match":
             deterministic_errors.extend(_no_match_violations(state["counsel_draft"].answer if state["counsel_draft"] else ""))
+        deterministic_errors.extend(
+            _fact_boundary_errors(
+                state,
+                state["counsel_draft"].answer if state["counsel_draft"] else "",
+            )
+        )
         if deterministic_errors:
             review.approved = False
             review.citation_errors = list(dict.fromkeys([*review.citation_errors, *deterministic_errors]))
@@ -457,7 +644,10 @@ class LegalConsultationGraph:
             else:
                 review.approved = True
                 review.next_action = "finalize"
-        return {"review_result": review}
+        return {
+            "review_result": review,
+            "model_call_count": runtime.context.metrics.model_call_count,
+        }
 
     async def review_gate(
         self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]
@@ -565,4 +755,10 @@ class LegalConsultationGraph:
             seen_documents.add(evidence_key)
             citations.append(Citation(document_id=item.document_id, chunk_id=item.chunk_id, law_name=item.law_name, article_number=item.article_number, quoted_excerpt=item.content[:240], data_version=item.data_version))
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "completed", "message": "分析已完成"}})
-        return {"final_answer": answer, "citations": citations}
+        return {
+            "final_answer": answer,
+            "citations": citations,
+            "model_call_count": runtime.context.metrics.model_call_count,
+            "tool_call_count": runtime.context.metrics.tool_call_count,
+            "tool_trajectory": list(runtime.context.metrics.tool_trajectory),
+        }

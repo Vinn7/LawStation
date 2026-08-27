@@ -19,6 +19,14 @@ class ResearchTask(BaseModel):
         return "" if value is None else str(value)
 
 
+class CurrentFactOverride(BaseModel):
+    canonical_key: str = Field(min_length=1, max_length=160)
+    new_value: str = Field(min_length=1, max_length=1000)
+    old_value: str = Field(default="", max_length=1000)
+    replaced_memory_id: str | None = None
+    confidence: float = Field(default=0.8, ge=0, le=1)
+
+
 class CaseAnalysis(BaseModel):
     request_type: Literal["casual_chat", "legal_consultation", "insufficient_information"]
     case_summary: str = ""
@@ -32,6 +40,7 @@ class CaseAnalysis(BaseModel):
     next_action: Literal["direct_answer", "ask_clarification", "research"] = "research"
     direct_answer: str = ""
     clarification_questions: list[str] = Field(default_factory=list)
+    current_fact_overrides: list[CurrentFactOverride] = Field(default_factory=list)
 
     @field_validator("case_summary", "direct_answer", mode="before")
     @classmethod
@@ -50,7 +59,7 @@ class CaseAnalysis(BaseModel):
 
     @field_validator(
         "key_facts", "missing_facts", "legal_issues", "research_tasks",
-        "clarification_questions", mode="before",
+        "clarification_questions", "current_fact_overrides", mode="before",
     )
     @classmethod
     def normalize_optional_lists(cls, value):
@@ -79,10 +88,24 @@ class UnresolvedIssue(BaseModel):
         return str(value)
 
 
+class CandidateRejection(BaseModel):
+    chunk_id: str
+    reason: str = "与当前争议点不直接相关"
+
+
+class EvidenceSelectionResult(BaseModel):
+    accepted_chunk_ids: list[str] = Field(default_factory=list)
+    rejected_candidates: list[CandidateRejection] = Field(default_factory=list)
+
+
 class EvidencePacket(BaseModel):
     retrieval_status: Literal["matched", "no_match", "tool_unavailable", "tool_error"] = "no_match"
+    candidate_status: Literal["matched", "no_match"] = "no_match"
+    evidence_status: Literal["accepted", "rejected", "unavailable", "error"] = "rejected"
     research_tasks: list[ResearchTask] = Field(default_factory=list)
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    accepted_chunk_ids: list[str] = Field(default_factory=list)
+    rejected_candidates: list[CandidateRejection] = Field(default_factory=list)
     unresolved_issues: list[UnresolvedIssue] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     research_summary: str = ""
@@ -108,6 +131,8 @@ class EvidencePacket(BaseModel):
     def align_status_with_evidence(self):
         if self.evidence_items:
             self.retrieval_status = "matched"
+            self.candidate_status = "matched"
+            self.evidence_status = "accepted"
         elif self.retrieval_status == "matched":
             self.retrieval_status = "no_match"
         return self

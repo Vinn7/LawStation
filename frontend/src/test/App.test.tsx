@@ -12,6 +12,15 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+function run(id: string, conversationId: string, status: 'queued' | 'running' | 'completed' = 'queued') {
+  return {
+    id, request_id: `request-${id}`, conversation_id: conversationId, status,
+    current_stage: status === 'queued' ? 'queued' : status === 'running' ? 'analyzing' : 'completed',
+    input_text: '问题', attempt: 1, last_event_sequence: 8,
+    model_call_count: 3, tool_call_count: 1,
+  };
+}
+
 describe('App user isolation', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -59,13 +68,18 @@ describe('App user isolation', () => {
         return json({ id: 'new-conversation', tenant_id: 'tenant', user_id: 'user-a', title: '法律咨询', created_at: '2026-08-20T12:00:00Z', updated_at: '2026-08-20T12:00:00Z' }, 201);
       }
       if (url.endsWith('/api/conversations')) return json([]);
-      if (url.endsWith('/messages/stream')) {
+      if (url.endsWith('/api/conversations/new-conversation/runs')) return json(run('run-1', 'new-conversation'), 202);
+      if (url.includes('/api/agent-runs/run-1/events')) {
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
             streamBody.forEach((block) => controller.enqueue(encoder.encode(block)));
             controller.close();
           },
         }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      if (url.endsWith('/api/agent-runs/run-1')) return json(run('run-1', 'new-conversation', 'completed'));
+      if (url.endsWith('/api/conversations/new-conversation/messages')) {
+        return json([{ id: 'assistant-1', role: 'assistant', content: '根据相关法律，可以依法主张权利。', status: 'complete', citations: [{ document_id: 'law-1', law_name: '劳动合同法', article_number: '第八十二条' }] }]);
       }
       if (url.endsWith('/api/memory-jobs/memory-1')) {
         return json({ id: 'memory-1', status: 'completed', candidate_count: 1, summary_updated: false });
@@ -99,7 +113,9 @@ describe('App user isolation', () => {
           ? [{ id: 'conversation-a', tenant_id: 'tenant', user_id: 'user-a', title: '张三会话', created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-20T10:00:00Z' }]
           : [{ id: 'conversation-b', tenant_id: 'tenant', user_id: 'user-b', title: '李四会话', created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-20T10:00:00Z' }]);
       }
-      if (url.endsWith('/messages/stream')) {
+      if (url.endsWith('/active-run')) return json(null);
+      if (url.endsWith('/api/conversations/conversation-a/runs')) return json(run('run-a', 'conversation-a'), 202);
+      if (url.includes('/api/agent-runs/run-a/events')) {
         streamSignal = init?.signal as AbortSignal;
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
@@ -147,7 +163,9 @@ describe('App user isolation', () => {
       if (url.endsWith('/api/conversations')) {
         return json([{ id: 'conversation-a', tenant_id: 'tenant', user_id: 'user-a', title: '无法条测试', created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-20T10:00:00Z' }]);
       }
-      if (url.endsWith('/messages/stream')) {
+      if (url.endsWith('/active-run')) return json(null);
+      if (url.endsWith('/api/conversations/conversation-a/runs')) return json(run('run-no-match', 'conversation-a'), 202);
+      if (url.includes('/api/agent-runs/run-no-match/events')) {
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
             streamController = controller;

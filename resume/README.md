@@ -26,7 +26,7 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 9. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
 10. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
 11. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
-12. [量化评测实测结果](eval-results.md)：100 条本地 RAG 消融、Agent Smoke、证据边界和可用简历表述。
+12. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
 13. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
 14. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 

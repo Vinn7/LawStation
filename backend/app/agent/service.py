@@ -17,6 +17,8 @@ class AgentService:
         conversation_id: str,
         trace_config: dict | None = None,
         trace_id: str | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
     ) -> None:
         self.runtime = runtime
         self.ctx = ctx
@@ -26,6 +28,8 @@ class AgentService:
         self.final_answer = ""
         self.langsmith_trace_id: str | None = trace_id
         self.trace_config = trace_config
+        self.run_id = run_id
+        self.resume = resume
 
     async def run(self, memory_context: str, history, question: str) -> AsyncIterator[dict]:
         messages = []
@@ -46,15 +50,14 @@ class AgentService:
         )
         try:
             invocation.langsmith_trace_id = self.langsmith_trace_id
-            stream = (
-                self.runtime.stream(
-                    invocation,
-                    messages,
-                    memory_context,
-                    trace_config=self.trace_config,
-                )
-                if self.trace_config is not None
-                else self.runtime.stream(invocation, messages, memory_context)
+            runtime_kwargs = {}
+            if self.trace_config is not None:
+                runtime_kwargs["trace_config"] = self.trace_config
+            if self.run_id:
+                runtime_kwargs["thread_id"] = f"agent-run:{self.run_id}"
+                runtime_kwargs["resume"] = self.resume
+            stream = self.runtime.stream(
+                invocation, messages, memory_context, **runtime_kwargs
             )
             async for item in stream:
                 if item["event"] == "agent_final":

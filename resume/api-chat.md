@@ -9,7 +9,12 @@
 | `GET /api/users` | 无 | 返回演示用户供页面切换 |
 | `GET/POST /api/conversations` | `X-User-ID` | 列出或创建当前用户会话 |
 | `GET /api/conversations/{id}/messages` | `X-User-ID` | 所有权校验后读取消息及反馈 |
-| `POST /api/conversations/{id}/messages/stream` | `X-User-ID` | 主 SSE 咨询链路 |
+| `POST /api/conversations/{id}/runs` | `X-User-ID` | 创建持久化咨询任务 |
+| `GET /api/agent-runs/{run_id}` | `X-User-ID` | 查询所有权范围内任务状态 |
+| `GET /api/agent-runs/{run_id}/events` | `X-User-ID` | sequence SSE 重放与实时订阅 |
+| `POST /api/agent-runs/{run_id}/cancel` | `X-User-ID` | 明确取消 queued/running 任务 |
+| `GET /api/conversations/{id}/active-run` | `X-User-ID` | 页面恢复当前会话任务 |
+| `POST /api/conversations/{id}/messages/stream` | `X-User-ID` | 兼容旧客户端的 legacy SSE |
 | `GET/PATCH/DELETE /api/memories` | `X-User-ID` | 当前用户记忆治理 |
 | `POST /api/memories/{id}/confirm|reject` | `X-User-ID` | 兼容 pending 记忆治理 |
 | `GET /api/memory-jobs/{id}` | `X-User-ID` | 查询后台整理状态 |
@@ -136,7 +141,7 @@ LangSmith 不可用时反馈仍保留，`sync_status=unavailable`。
 
 - 没有请求内容最大长度限制或速率限制。
 - `Conversation.updated_at` 不会在新增消息时显式更新，因此会话列表按最近活动排序的语义并不完整。
-- SSE 只能在当前浏览器页面生命周期内持续；刷新后没有任务查询、事件重放或断点续传。
+- 新 AgentRun 链路支持页面刷新后的任务查询与事件重放；legacy `messages/stream` 仍不具备该能力，应逐步下线。
 - 正文首 token 延迟较高，尤其 matched 法律问题需多次模型调用。
 
 ## 10. 关键测试
@@ -146,3 +151,24 @@ LangSmith 不可用时反馈仍保留，`sync_status=unavailable`。
 - `tests/test_feedback.py::test_feedback_is_owned_and_persisted_before_export`
 - `frontend/src/test/sse.test.ts`
 - `frontend/src/test/App.test.tsx`
+
+## 11. AgentRun SSE 时序
+
+```mermaid
+sequenceDiagram
+    participant UI as Browser
+    participant API as FastAPI
+    participant DB as AgentRun DB
+    participant Worker as AgentRunManager
+    participant Graph as LangGraph
+    UI->>API: POST conversations/{id}/runs
+    API->>DB: queued + message_start(sequence=1)
+    UI->>API: GET agent-runs/{run}/events?after_sequence=N
+    Worker->>DB: claim lease + running
+    Worker->>Graph: aget_state / astream
+    Graph-->>Worker: status/tool/final events
+    Worker->>DB: append sequence events + idempotent final message
+    DB-->>UI: replay then live SSE
+```
+
+客户端断开只终止订阅；服务端任务继续。SSE 以 `id: sequence` 去重，终态后前端重新加载消息表，不把未复核草稿写入事件表。

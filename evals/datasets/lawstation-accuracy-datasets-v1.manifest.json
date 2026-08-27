@@ -1,0 +1,16 @@
+{
+  "schema_version": "accuracy-datasets-v1",
+  "seed": 42,
+  "retrieval_calibration": {
+    "count": 200,
+    "matched": 100,
+    "no_match": 100,
+    "development": 120,
+    "validation": 80,
+    "sha256": "21f86149732fa61db45b8c408d880470d9ef5605acc7992a3745f85cda500762"
+  },
+  "fact_conflicts": {
+    "count": 30,
+    "sha256": "bbeedd43fb1e3633a96e20462e9d8a6e9a07c5cac20888ba3cf2e294618328c2"
+  }
+}

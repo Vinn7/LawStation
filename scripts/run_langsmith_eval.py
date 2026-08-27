@@ -407,14 +407,6 @@ def _budget_plan(args, example_count: int) -> dict[str, int]:
     }
 
 
-def _limits(settings) -> dict[str, int]:
-    return {
-        "evaluation_traces": settings.eval_monthly_trace_budget,
-        "agent_model_calls": settings.eval_monthly_agent_model_call_budget,
-        "judge_calls": settings.eval_monthly_judge_call_budget,
-    }
-
-
 @contextmanager
 def _tracing_disabled():
     previous = {
@@ -570,10 +562,7 @@ async def run(args) -> dict[str, Any]:
             judge_ids = {str(item.id) for item in data[:judge_limit]}
     plan = _budget_plan(args, example_count)
     ledger = MonthlyResourceBudget(settings.eval_resource_budget_path)
-    budget_before = (
-        ledger.peek_remaining(_limits(settings))
-        if args.plan_only else ledger.remaining(_limits(settings))
-    )
+    usage_before = ledger.snapshot()
     preview = {
         "profile": args.profile,
         "dataset": args.dataset,
@@ -581,12 +570,12 @@ async def run(args) -> dict[str, Any]:
         "repetitions": args.repetitions,
         "upload_results": args.upload_results,
         "planned": plan,
-        "budget_remaining_before": budget_before,
+        "monthly_budget_enforced": False,
+        "monthly_usage_before": usage_before,
         "batch": batch,
     }
     if args.plan_only:
         return preview
-    ledger.check_many(plan, _limits(settings))
     started_at = datetime.now(UTC)
     success = False
     cache_hits = 0
@@ -599,7 +588,6 @@ async def run(args) -> dict[str, Any]:
                     return await retrieval_target(inputs)
             else:
                 target = agent_target(args.mode, args.review_mode, settings)
-        ledger.reserve_many(plan, _limits(settings))
         if args.upload_results:
             with _formal_eval_cache_disabled(), tracing_context(enabled=True):
                 results = await aevaluate(
@@ -752,9 +740,11 @@ async def run(args) -> dict[str, Any]:
     missing = sorted(required - set(metrics))
     actual_model_calls = sum(int(item.get("model_call_count", 0)) for item in outputs)
     if success:
-        ledger.settle("evaluation_traces", plan["evaluation_traces"], len(rows) if args.upload_results else 0)
-        ledger.settle("agent_model_calls", plan["agent_model_calls"], actual_model_calls)
-        ledger.settle("judge_calls", plan["judge_calls"], judge_calls)
+        ledger.record_many({
+            "evaluation_traces": len(rows) if args.upload_results else 0,
+            "agent_model_calls": actual_model_calls,
+            "judge_calls": judge_calls,
+        })
     project_stats = (
         _project_stats(ls_client, experiment_name, len(rows))
         if args.upload_results and ls_client is not None else {}
@@ -804,7 +794,8 @@ async def run(args) -> dict[str, Any]:
             "judge_calls": judge_calls,
             "cache_hits": cache_hits,
             "estimated_token_usage": project_stats.get("total_tokens"),
-            "budget_remaining": ledger.remaining(_limits(settings)),
+            "monthly_budget_enforced": False,
+            "monthly_usage": ledger.snapshot(),
         },
     }
     payload["langsmith_export_complete"] = witness_complete

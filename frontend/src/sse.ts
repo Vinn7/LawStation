@@ -2,6 +2,7 @@ import type { SseEvent, SseEventName } from './types';
 
 export function parseSseBlock(block: string): SseEvent | null {
   let event = 'message' as SseEventName;
+  let id: number | undefined;
   const data: string[] = [];
 
   for (const rawLine of block.split(/\r?\n/)) {
@@ -11,15 +12,16 @@ export function parseSseBlock(block: string): SseEvent | null {
     let value = separator === -1 ? '' : rawLine.slice(separator + 1);
     if (value.startsWith(' ')) value = value.slice(1);
     if (field === 'event') event = value as SseEventName;
+    if (field === 'id' && /^\d+$/.test(value)) id = Number(value);
     if (field === 'data') data.push(value);
   }
 
   if (data.length === 0 || event === ('message' as SseEventName)) return null;
   const rawData = data.join('\n');
   try {
-    return { event, data: JSON.parse(rawData) };
+    return { id, event, data: JSON.parse(rawData) };
   } catch {
-    return { event, data: rawData };
+    return { id, event, data: rawData };
   }
 }
 

@@ -33,6 +33,16 @@ def test_multi_resource_reservation_is_atomic(tmp_path):
     assert state["judge_calls"] == 0
 
 
+def test_actual_usage_can_be_recorded_without_monthly_ceiling(tmp_path):
+    ledger = MonthlyResourceBudget(tmp_path / "budget.json")
+    ledger.record_many({"agent_model_calls": 120, "judge_calls": 30})
+    ledger.record_many({"agent_model_calls": 8, "evaluation_traces": 6})
+    state = ledger.snapshot()
+    assert state["agent_model_calls"] == 128
+    assert state["judge_calls"] == 30
+    assert state["evaluation_traces"] == 6
+
+
 def test_stratified_selection_is_deterministic():
     cases = load_cases("lawstation-agent-v3")
     categories = ["casual", "clarification", "matched", "no_match", "tool_error", "memory"]

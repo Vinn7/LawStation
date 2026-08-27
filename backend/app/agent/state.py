@@ -25,6 +25,10 @@ class LegalConsultationState(TypedDict):
     final_answer: str
     citations: list[Citation]
     errors: list[AgentError]
+    current_fact_overrides: list[dict[str, Any]]
+    model_call_count: int
+    tool_call_count: int
+    tool_trajectory: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)

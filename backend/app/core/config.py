@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     agent_per_user_concurrency: int = 2
     agent_per_conversation_concurrency: int = 1
     agent_queue_timeout_seconds: int = 30
+    agent_run_worker_poll_seconds: float = 0.5
+    agent_run_lease_seconds: int = 120
+    agent_run_recovery_max_attempts: int = 2
+    agent_run_event_retention_days: int = 7
+    langgraph_checkpoint_enabled: bool = True
+    langgraph_checkpoint_path: str = "./data/runtime/langgraph-checkpoints.db"
+    langgraph_checkpoint_retention_days: int = 7
+    langgraph_strict_msgpack: bool = True
     llm_request_timeout_seconds: int = 60
     llm_max_retries: int = 2
     llm_temperature: float = 0.0
@@ -79,6 +87,9 @@ class Settings(BaseSettings):
     rag_bm25_min_score: float = 0.01
     rag_dense_min_score: float = 0.20
     rag_rrf_min_score: float = 0.01
+    rag_match_gate_enabled: bool = True
+    rag_match_gate_config_path: str = "./evals/config/retrieval-gate-v1.json"
+    rag_match_gate_required: bool = False
     rag_retrieval_mode: Literal["bm25", "hybrid"] = "hybrid"
     rag_rerank_enabled: bool = True
     rag_rerank_provider: Literal["tei", "ollama"] = "tei"
@@ -125,9 +136,6 @@ class Settings(BaseSettings):
     langsmith_online_eval_sample_rate: float = 0.0
     langsmith_annotation_queue_id: str = ""
     langsmith_monthly_production_trace_budget: int = 20
-    eval_monthly_trace_budget: int = 60
-    eval_monthly_agent_model_call_budget: int = 80
-    eval_monthly_judge_call_budget: int = 20
     eval_resource_budget_path: str = "./data/runtime/eval-resource-budget.json"
     langsmith_test_cache: str = "./data/runtime/langsmith-test-cache"
     eval_report_root: str = "./evals/reports/runs"

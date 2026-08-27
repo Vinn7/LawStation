@@ -1,0 +1,15 @@
+{
+  "version": "retrieval-gate-v1",
+  "threshold": 0.25,
+  "weights": {
+    "rerank": 0.3,
+    "dense": 0.15,
+    "bm25": 0.15,
+    "rrf": 0.1,
+    "source_agreement": 0.15,
+    "query_coverage": 0.1,
+    "top_margin": 0.05
+  },
+  "calibration_status": "provisional",
+  "note": "Run the frozen retrieval calibration dataset before changing production thresholds."
+}

@@ -133,7 +133,7 @@ assistantMessageId
 ## 10. 当前边界
 
 - 并发计数和 reservation 都在进程内；多 Uvicorn worker 不共享。
-- 浏览器刷新会中断流，服务端没有持久化 Task API 和 SSE replay。
+- 浏览器刷新会中断当前订阅，但不会取消持久化 AgentRun；重新打开会话后通过 active-run 和 sequence SSE replay 恢复。
 - 多标签页之间不共享前端 runtime，服务端同会话 reservation 仍能阻止重复 Graph。
 - `MemoryTaskManager` 只有一个 Worker，和 Agent 并发配额是两套独立机制。
 - SQLite WAL 改善读写并发，但不是分布式锁或高写入吞吐数据库。
@@ -148,3 +148,7 @@ assistantMessageId
 ## 12. 面试表达
 
 > 我把并发控制拆成会话 reservation、用户配额和全局配额。同会话重复请求立即拒绝，不同会话再按每用户 2、全局 6 排队。记忆快照在真正取得配额后读取，Graph 运行期间保持不变。前端不使用单一 streaming 布尔值，而是按 userId:conversationId 维护 runtime、controller 和 request token，所以切换用户后原任务能继续，事件也只写回自己的会话。
+
+## 13. 租约与重启恢复
+
+`AgentRunManager` 在运行中每 `lease/3` 续约，启动时把遗留 running 任务重新置为 queued，并使用原 `langgraph_thread_id` 从最新 checkpoint 恢复；超过 `AGENT_RUN_RECOVERY_MAX_ATTEMPTS` 后终止。进程正常关闭不会把正在执行任务误标为用户中断。事件和 checkpoint 默认保留 7 天，由启动清理过程删除过期终态 Run 的恢复数据。

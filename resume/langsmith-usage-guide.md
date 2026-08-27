@@ -28,12 +28,12 @@ flowchart LR
 关键实现：
 
 - `scripts/run_langsmith_eval.py::run`：单次评测入口。
-- `scripts/run_staged_langsmith_eval.py::main`：受预算保护的分阶段对比入口。
+- `scripts/run_staged_langsmith_eval.py::main`：记录实际用量的分阶段对比入口；上传仍需显式确认。
 - `backend/app/evaluation/targets.py::RetrievalTarget`：检索评测目标。
 - `backend/app/evaluation/targets.py::agent_target`：组件/完整 Agent 目标。
 - `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`：确定性指标。
 - `backend/app/evaluation/judge.py::LegalQualityJudge`：一次调用返回八项语义评分。
-- `backend/app/core/resource_budget.py::MonthlyResourceBudget`：进程安全的月度预算账本。
+- `backend/app/core/resource_budget.py::MonthlyResourceBudget`：进程安全的月度用量账本；生产Trace仍使用限额接口，评测使用无限额的实际用量追加。
 - `backend/app/evaluation/reporting.py::ReportRun`：时间戳报告与原子写入。
 
 LangSmith 官方把一次根 Run 及其所有子 Span 计作一条 Trace；三 Agent、模型和工具子节点不会各自再计成一条根 Trace。`upload_results=False` 时，应用与 evaluator 的 Trace 都不会上传。官方参考：[Usage](https://docs.langchain.com/langsmith/view-usage)、[Local evaluation](https://docs.langchain.com/langsmith/local)。
@@ -108,9 +108,6 @@ python run.py --no-langsmith-trace
 默认月度上限：
 
 ```dotenv
-EVAL_MONTHLY_TRACE_BUDGET=60
-EVAL_MONTHLY_AGENT_MODEL_CALL_BUDGET=80
-EVAL_MONTHLY_JUDGE_CALL_BUDGET=20
 LANGSMITH_MONTHLY_PRODUCTION_TRACE_BUDGET=20
 ```
 
@@ -519,6 +516,6 @@ Token 和成本可在单条 Trace、项目统计或 Dashboard 中查看；OpenAI
 3. 通过 retrieval/component/live 分层定位 RAG、Prompt 和集成问题；
 4. 用 Baseline/Candidate 单变量消融证明优化收益；
 5. 用 Dataset SHA256、索引指纹、Git Commit 和时间戳报告保证数字可追溯；
-6. 用显式上传确认、采样和月度预算控制 LangSmith 与模型资源。
+6. 用显式上传确认、分层小样本和实际用量账本控制评测资源；生产 Trace 继续使用月度保护。
 
 这比只说“接入了 LangSmith”更能体现 Agent 质量工程、实验设计和生产安全意识。

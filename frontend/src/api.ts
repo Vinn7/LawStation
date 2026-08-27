@@ -1,4 +1,4 @@
-import type { ChatMessage, Conversation, IndexStatus, MemoryJob, User, UserMemory } from './types';
+import type { AgentRun, ChatMessage, Conversation, IndexStatus, MemoryJob, User, UserMemory } from './types';
 
 const API = '/api';
 
@@ -64,6 +64,23 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ score, comment }),
+    }),
+  createRun: (userId: string, conversationId: string, content: string) =>
+    request<AgentRun>(`/conversations/${conversationId}/runs`, userId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+  agentRun: (userId: string, runId: string, signal?: AbortSignal) =>
+    request<AgentRun>(`/agent-runs/${runId}`, userId, { signal }),
+  activeRun: (userId: string, conversationId: string, signal?: AbortSignal) =>
+    request<AgentRun | null>(`/conversations/${conversationId}/active-run`, userId, { signal }),
+  cancelRun: (userId: string, runId: string) =>
+    request<AgentRun>(`/agent-runs/${runId}/cancel`, userId, { method: 'POST' }),
+  runEvents: (userId: string, runId: string, afterSequence: number, signal: AbortSignal) =>
+    fetch(`${API}/agent-runs/${runId}/events?after_sequence=${afterSequence}`, {
+      headers: { 'X-User-ID': userId },
+      signal,
     }),
   streamMessage: (userId: string, conversationId: string, content: string, signal: AbortSignal) =>
     fetch(`${API}/conversations/${conversationId}/messages/stream`, {

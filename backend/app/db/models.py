@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -198,6 +199,82 @@ class MemoryJob(Base):
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=now)
     updated_at: Mapped[datetime] = mapped_column(default=now, onupdate=now)
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.user_id", "conversations.id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_agent_run_owner", "tenant_id", "user_id", "conversation_id", "created_at"),
+        Index("ix_agent_run_queue", "status", "created_at"),
+        Index(
+            "uq_agent_run_active_conversation",
+            "tenant_id",
+            "user_id",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    request_id: Mapped[str] = mapped_column(String(36), unique=True)
+    tenant_id: Mapped[str] = mapped_column(String(36))
+    user_id: Mapped[str] = mapped_column(String(36))
+    conversation_id: Mapped[str] = mapped_column(String(36))
+    input_text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    current_stage: Mapped[str] = mapped_column(String(30), default="queued")
+    user_message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    assistant_message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    langgraph_thread_id: Mapped[str] = mapped_column(String(100), unique=True)
+    latest_checkpoint_id: Mapped[str] = mapped_column(String(100), default="")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    lease_owner: Mapped[str] = mapped_column(String(100), default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_event_seq: Mapped[int] = mapped_column(Integer, default=0)
+    model_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_type: Mapped[str] = mapped_column(String(100), default="")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(default=now, onupdate=now)
+
+
+class AgentRunEvent(Base):
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.user_id", "conversations.id"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("run_id", "sequence", name="uq_agent_run_event_sequence"),
+        Index("ix_agent_run_event_owner", "tenant_id", "user_id", "run_id", "sequence"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE")
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36))
+    user_id: Mapped[str] = mapped_column(String(36))
+    conversation_id: Mapped[str] = mapped_column(String(36))
+    sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(40))
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=now)
 
 
 class ToolCallRecord(Base):

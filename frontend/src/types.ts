@@ -109,6 +109,10 @@ export interface ConversationRuntime {
   activeAgent?: AgentName;
   statusMessage?: string;
   requestToken?: number;
+  runId?: string;
+  lastEventSequence?: number;
+  serverStatus?: AgentRunStatus;
+  reconnecting?: boolean;
   toolActivity?: ToolActivity;
   memoryMessage?: string;
   error?: string;
@@ -130,6 +134,26 @@ export type SseEventName =
   | 'error';
 
 export interface SseEvent<T = unknown> {
+  id?: number;
   event: SseEventName;
   data: T;
+}
+
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'interrupted' | 'failed';
+
+export interface AgentRun {
+  id: string;
+  request_id: string;
+  conversation_id: string;
+  status: AgentRunStatus;
+  current_stage: AgentStage;
+  input_text: string;
+  attempt: number;
+  last_event_sequence: number;
+  user_message_id?: string | null;
+  assistant_message_id?: string | null;
+  model_call_count: number;
+  tool_call_count: number;
+  error_type?: string;
+  error_summary?: string;
 }

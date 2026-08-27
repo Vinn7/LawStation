@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：3.4
-> 基线日期：2026-08-25
+> 版本：3.7
+> 基线日期：2026-08-26
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -491,7 +491,7 @@ SSE_HEARTBEAT_SECONDS
 - **[已实现]** Reranker 资格检查处理全部候选并每25条原子保存 checkpoint；checkpoint 绑定候选SHA、索引指纹、检索阈值、Top12和禁用精排配置。成功或不足200条都必须保存逐条资格结果、失败原因与分类汇总；配置不一致时不得复用旧进度。
 - **[已实现]** 评估器覆盖路由、Schema、Recall@5、MRR、Hit@1、Top3、Gold 排名、chunk 命中、引用、no_match、轨迹、循环、最新事实和隔离；报告按 category/difficulty 分组并保留最多3条定性改善案例。独立非 Thinking Judge 输出结构化评分。
 - **[已实现]** 评测采用 learn、smoke、compare、release 四级渐进模式；默认 learn 不访问外部服务，smoke 不上传 Trace，云端上传必须显式确认。Compare 默认只执行 10 条检索、3 条 Reviewer 和 2 条 E2E 双组见证样本。
-- **[已实现]** 月度预算账本分别限制评测 Trace、生产 Trace、Agent 模型和 Judge 调用；运行前可用 `--plan-only` 查看样本哈希、最坏调用量和剩余额度，在线 LLM evaluator 默认关闭。
+- **[已实现]** 评测 Trace、Agent 模型和 Judge 只记录实际月度用量，不设置累计硬上限；`--plan-only` 继续展示样本哈希和最坏调用量，云端上传必须显式确认，在线 LLM evaluator 默认关闭。生产 Trace 仍使用独立月度保护，全量追踪仍受进程 Session 根 Trace 上限约束。
 - **[已实现]** 完整本地确定性 RAG 指标通过数据集 SHA256、索引指纹和 Git Commit 作为可复现事实源；LangSmith 负责小样本 Trace 见证。Agent/Judge 数字必须标注样本量，任何报告不得把小样本结果描述为生产准确率。
 - **[已实现]** 每次非 `plan-only` 评测按新加坡时区归档到 `evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/`；JSON 与 CSV 同名，分阶段实验共享一个运行目录。Manifest 保存状态、失败阶段、完成产物和 Baseline 复用来源，原子维护 `latest.json` 与 `latest-success.json`，历史运行不自动清理。
 - **[已实现]** Baseline 复用必须校验数据集 SHA256、样本内容哈希、种子、运行模式、Graph/Prompt 版本及 LangSmith 完整性；复用结果复制进当前运行目录并记录来源，不能只按文件名复用。
@@ -648,3 +648,24 @@ SSE_HEARTBEAT_SECONDS
 - **3.3 / 2026-08-25**：将简历导向量化评测收敛为单一编排入口；默认执行模块回归、挑战集校验、缺失时的 Hybrid Top12 资格冻结、通用/Dense/Reranker 三组消融和6类 Agent 冒烟，并归档实验快照、硬门禁、分组对比及仅基于实测数字生成的简历表述；保持零 LangSmith Trace、零 Judge，Agent 冒烟只允许少量 DeepSeek 调用。
 - **3.4 / 2026-08-26**：针对300条精排候选仅115条通过双干扰项资格的问题，将候选池以不可变前缀方式扩充到600条；资格检查改为全候选诊断、每25条断点续跑和严格指纹校验，正式评测在模型服务启动前拒绝不足600条的候选池，仍保持200条目标和原双干扰项规则不变。
   生成续跑会自动重做 task_id 与当前修复任务不匹配的旧响应；冻结构建允许盲修复造成的问题措辞漂移和新增 `generator_model` 等非语义元数据，但会继续校验 Gold、task_id、源内容哈希和干扰项等不变量，旧300条记录仍原样保留，只追加新候选。
+- **3.5 / 2026-08-26**：完成100条通用回归、300条Dense挑战和200条Reranker挑战的六组本地消融，共1,200次检索；正式报告记录Hybrid Recall@5 `86.67% → 96.33%`、BGE Hit@1 `95% → 97%`、精排应用率100%及降级率0%。
+- **3.6 / 2026-08-26**：移除评测Trace、Agent模型和Judge的月度硬阻断，保留实际用量账本、显式上传确认、生产Trace月度保护及全量追踪Session上限；补跑casual/clarification/matched/no_match/tool_error/memory六类Agent Fixture，配置门禁全部通过，检索状态和最新事实优先两个非门禁诊断均为83.33%。原始预算失败manifest保留，恢复结果单独归档，禁止覆盖审计历史。
+- **3.7 / 2026-08-26**：咨询主入口升级为 SQLite `AgentRun + AgentRunEvent` 持久化任务，并以独立 `AsyncSqliteSaver` 保存每个 Run 的 LangGraph super-step；新增租约恢复、取消、SSE sequence 重放和页面刷新恢复。RAG 增加 `law-search-v2` Envelope 与确定性 `RetrievalConfidenceGate`，Research 明确记录候选接受/拒绝；MemorySnapshot 与当前事实 override 进入 Graph State，并在服务端校验替换目标所有权。新增 200 条冻结检索校准集、30 条事实冲突集及离线网格校准脚本。当前 gate 配置标记为 `provisional`，只有运行 `scripts/calibrate_retrieval_gate.py --write` 且冻结验证集通过门禁后才可标记为已校准。
+
+## 18. 持久化 Agent Run 与 LangGraph Checkpoint
+
+- **[已实现]** `backend/app/services/agent_runs.py::AgentRunManager` 是咨询任务事实源，负责 queued/running/terminal 状态、所有权、租约、恢复、取消、最终消息幂等与事件序列。
+- **[已实现]** `backend/app/agent/checkpoint.py::checkpoint_saver` 使用独立 `data/runtime/langgraph-checkpoints.db`，业务 SQLite 与 Checkpoint SQLite 不共用文件。
+- **[已实现]** 每次 Run 使用 `thread_id=agent-run:<run_id>` 和 `checkpoint_ns=lawstation-consultation-v1`；不得使用 conversation ID 继承 Graph 状态，跨轮上下文仍只来自消息与 MemoryService。
+- **[已实现]** 前端使用 `create run → GET events`；SSE `id` 为持久化 sequence，断线通过 `after_sequence/Last-Event-ID` 重放。浏览器断线不取消 Graph，明确 cancel API 才会停止任务。
+- **[已实现]** 节点至少一次执行；只读 MCP 工具允许节点恢复时重放，消息、最终回答和事件正文必须幂等。未来有副作用工具必须增加业务幂等键。
+- **[禁止]** Checkpoint 保存 SQLAlchemy Session、网络 Client、密钥或跨请求可变对象；不得把 Checkpoint 当作第二套长期记忆。
+
+## 19. 准确性闭环
+
+- MCP `search_laws` 输出 `law-search-v2` Envelope，区分候选检索成功与 Research 证据接受；解析器继续兼容旧数组工具结果。
+- `RetrievalConfidenceGate` 只负责 `candidate_status=matched|no_match`，Research 输出 `accepted_chunk_ids/rejected_candidates`，最终 `retrieval_status` 仍由证据与工具状态共同确定。
+- 当高置信候选未被 Research 接受或拒绝时，最多追加一次无工具 Evidence Selector；其输出 ID 必须回映射到本轮真实候选。
+- Case Analyst 的 `current_fact_overrides` 进入 Graph State；带 memory ID 的 override 必须用同一 SQL 同时校验 tenant、user、active 状态和作用域。
+- `FactBoundaryValidator` 发现回答继续使用旧金额、日期、名称等明确被替换值时，只回到 Counsel 修改一次，不重新检索。
+- 冻结校准门禁：status accuracy ≥95%、no-match precision/recall ≥90%、matched Recall@5 回退≤1pp；未实际运行并通过校准脚本前不得把 provisional 阈值写成实测达标。

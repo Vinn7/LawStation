@@ -18,8 +18,11 @@
 | 记忆 | context budget、压缩阈值、Worker、Memory LLM |
 | RAG | BM25/Dense/RRF 阈值、retrieval mode、TEI BGE 候选数/批次/超时/降级 |
 | 日志 | 目录、级别、轮转和摘要长度 |
-| LangSmith | `config/all/off` 运行模式、Session 根 Trace 上限、采样、隐私、Judge 和月度预算 |
-| Eval | 月度预算、缓存和时间戳报告目录 |
+| LangSmith | `config/all/off` 运行模式、Session 根 Trace 上限、采样、隐私、Judge 和生产 Trace 月度保护 |
+| Eval | 实际用量账本、缓存和时间戳报告目录；不设月度硬上限 |
+| Durable Run | `AGENT_RUN_LEASE_SECONDS/RECOVERY_MAX_ATTEMPTS/WORKER_POLL_SECONDS` |
+| LangGraph | `LANGGRAPH_CHECKPOINT_ENABLED/PATH/RETENTION_DAYS/STRICT_MSGPACK` |
+| Retrieval Gate | `RAG_MATCH_GATE_ENABLED/CONFIG_PATH/REQUIRED` |
 
 密钥只应存在 `.env`；`.env.example` 提供空值模板。前端使用同源 `/api`，没有构建期 API Key。
 
@@ -82,8 +85,12 @@ npm run build
 | `scripts/create_resume_challenge_datasets.py` | 保留旧300条并扩充至600条候选；生成/校验；全量Hybrid双干扰资格冻结与25条checkpoint | prepare/validate无外部服务；仅新增批次用Codex；资格检查使用Ollama且禁用BGE |
 | `scripts/seed_langsmith_datasets.py` | 上传数据集 | LangSmith |
 | `scripts/run_langsmith_eval.py` | 单次 learn/smoke/compare/release | Profile 决定 |
-| `scripts/run_staged_langsmith_eval.py` | 受预算保护的分阶段对比 | 需要显式上传确认 |
+| `scripts/run_staged_langsmith_eval.py` | 分阶段对比与实际用量记录 | 需要显式上传确认，不受月度累计值阻断 |
 | `scripts/run_resume_rag_challenge_eval.py` | 回归测试、数据校验、资格冻结、通用/Dense/BGE 消融、6类 Agent 冒烟、硬门禁与简历结论归档 | 本地 Ollama + TEI；冒烟少量 DeepSeek；不上传 LangSmith、不调用 Judge |
+
+2026-08-26实跑说明：六组RAG消融完成后，旧月度上限曾在外部调用前阻止6条Agent冒烟。移除评测
+硬上限后已补跑六类Fixture，项目配置门禁通过。原始`run-manifest.json`仍保留失败审计，恢复事实
+记录在`POST_RECOVERY_SUMMARY.json`；不得通过覆盖历史manifest伪造一次性成功运行。
 
 LangSmith 评测依赖声明为 `langsmith[vcr]`。这是因为评测脚本默认配置
 `LANGSMITH_TEST_CACHE`，云端 `aevaluate` 也会初始化 VCR 缓存上下文；缺少 `vcrpy` 时会在
@@ -120,7 +127,7 @@ Pytest 配置位于 `pyproject.toml`，测试均在 `tests/`。
 | Alembic | `test_migrations.py` |
 | JSONL 审计 | `test_audit_logging.py` |
 | LangSmith | `test_langsmith_observability.py`、`test_agent_runtime.py`（预算、开关、MCP header 传播） |
-| 评测预算/报告 | `test_eval_resource_budget.py`、`test_eval_reporting.py`、`test_challenge_datasets.py` |
+| 评测用量/报告 | `test_eval_resource_budget.py`、`test_eval_reporting.py`、`test_challenge_datasets.py` |
 | 启动器 | `test_run.py` |
 
 绝大多数外部服务通过 fake/mock 隔离，不应在常规测试中消耗模型额度。
@@ -184,3 +191,11 @@ npm run build
 - 没有仓库内 CI workflow，测试门禁依赖人工运行。
 - `.env` 中非密钥配置与 CLI 参数存在端口联动问题。
 - 生产部署没有 TLS、认证、限流或多实例协调。
+
+## 12. 新增依赖、迁移与测试
+
+- Python 新增 `langgraph-checkpoint-sqlite>=3,<4` 与 `aiosqlite>=0.20,<1`。
+- Alembic head 为 `20260826_05`，创建 `agent_runs/agent_run_events` 与同会话 active 唯一索引；升级前备份名后缀为 `.pre-agent-runs.bak`。
+- Checkpoint 数据库与业务库分离为 `data/runtime/langgraph-checkpoints.db`，使用 `JsonPlusSerializer(pickle_fallback=False)`。
+- 新增 `tests/test_agent_runs.py` 与 `tests/test_retrieval_confidence.py`；本次离线后端全量回归为 144 passed，前端为 13 passed，生产构建通过。
+- 冻结数据由 `scripts/create_accuracy_datasets.py` 生成；真实阈值校准会调用本地检索服务，不在普通测试或开发完成后自动执行。

@@ -168,7 +168,7 @@ Baseline/Candidate 结果；资格检查每25条原子保存 checkpoint，并输
 默认 `learn` 使用固定输出讲解确定性指标，不访问 LangSmith、DeepSeek 或 Ollama；`smoke`
 只运行 6 条分层样本且 `upload_results=false`。云端 Compare 默认仅上传 30 条根 Trace、调用
 10 次 Judge，执行前必须先查看 `--plan-only`，再显式增加 `--confirm-upload`。所有评测受月度
-Trace、Agent 模型和 Judge 三类本地预算保护。完整概念、指标公式和失败定位方法见
+Trace、Agent 模型和 Judge 的实际用量会写入本地账本，但评测不再设置月度硬上限；云端上传仍需显式确认，生产 Trace 仍保留独立保护。完整概念、指标公式和失败定位方法见
 `evals/LEARNING_GUIDE.md`。
 
 `retrieval` 用于隔离比较 BM25 与 Hybrid，`component` 使用固定法规工具结果，`live` 调用当前
@@ -196,6 +196,15 @@ evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/
 - `MemoryTaskManager.enqueue()` 是唯一记忆整理入口；旧 `MemoryService.consolidate()` 已禁用，不能再将用户长消息原文直接沉淀为事实。
 
 咨询 SSE 每 15 秒发送一次不可见 heartbeat，避免长模型调用期间连接被代理关闭。低风险且没有可引用法条的回答通过确定性证据边界校验后可跳过 LLM Reviewer；中高风险、存在法规依据或检索异常时仍执行完整模型复核。
+
+咨询默认使用持久化 AgentRun：创建任务后，前端通过带 sequence 的 SSE 订阅事件；切换用户、临时断网或刷新页面不会取消服务端 Graph，重新打开会话可恢复进度。LangGraph 使用独立 SQLite Checkpoint 数据库保存 super-step，业务消息和记忆仍由主 SQLite 管理。停止生成必须调用 cancel API，而不是仅关闭浏览器连接。
+
+检索工具返回 `law-search-v2` Envelope，并由确定性置信度门控区分候选命中与正常 no-match。仓库内默认 gate 参数是 provisional；需要在 Ollama/TEI 和正式索引就绪后执行：
+
+```bash
+python scripts/calibrate_retrieval_gate.py
+python scripts/calibrate_retrieval_gate.py --write  # 仅冻结验证集通过门禁时更新配置
+```
 
 ## 测试
 

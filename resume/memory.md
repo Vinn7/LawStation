@@ -1,6 +1,6 @@
 # LawStation Memory 模块设计与实现
 
-> Review 状态：**已验证**。本文按 2026-08-23 当前代码更新；关键链路由 `MemoryService.context`、`MemoryTaskManager`、`OwnedRepository`、数据库模型和 `tests/test_memory.py` 交叉确认。
+> Review 状态：**已验证**。本文按 2026-08-26 当前代码更新；关键链路由 `MemoryService.snapshot`、`MemoryTaskManager`、`OwnedRepository`、数据库模型和测试交叉确认。
 
 ## 1. 模块定位
 
@@ -494,3 +494,9 @@ MemoryTaskManager._process
 | `backend/app/api/routes.py` | `_prepare_chat` | 保存问题并创建记忆快照 |
 | `backend/app/api/routes.py` | `stream_message` | 回答完成后创建记忆任务 |
 | `frontend/src/components/MemoryPanel.tsx` | `MemoryPanel` | 记忆查看、修正与删除 |
+
+## 15. MemorySnapshot 与当前事实覆盖
+
+`MemoryService.snapshot` 返回冻结的 `MemorySnapshot`：近期消息、会话摘要、预算内 selected memories、当前问题和 snapshot time。AgentRun 取得并发配额并保存用户消息后才读取该快照，模型执行期间不动态注入其他会话产生的新记忆。
+
+Case Analyst 可输出 `current_fact_overrides`。替换 memory ID 只被视为不可信提示，`graph.py::_validate_fact_overrides` 在一条 owner-scoped SQL 中校验 tenant、user、active 状态和 user/conversation 作用域；合法 override 进入 Graph State，Research/Counsel/Reviewer 共用。数据库中的正式记忆替换仍由回答后的 `MemoryTaskManager` 完成，Checkpoint 不承担长期记忆职责。

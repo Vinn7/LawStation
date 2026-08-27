@@ -5,16 +5,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.agent.checkpoint import checkpoint_saver
 from backend.app.agent.concurrency import AgentConcurrencyManager
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
 from backend.app.api.routes import router
+from backend.app.core.config import get_settings
 from backend.app.core.logging import audit, setup_logging
 from backend.app.db.migrations import upgrade_database
 from backend.app.db.models import Tenant, User
 from backend.app.db.session import Base, SessionLocal, engine
 from backend.app.observability import LangSmithObservability
+from backend.app.services.agent_runs import AgentRunManager
 from backend.app.services.memory_tasks import MemoryTaskManager
 from mcp_servers.law_rag.server import (
     close_engine,
@@ -56,21 +59,36 @@ async def lifespan(app: FastAPI):
     registry = MCPToolRegistry(observability=observability)
     provider = LLMProvider()
     app.state.mcp_tool_registry = registry
-    app.state.agent_runtime = AgentRuntime(registry, provider, observability=observability)
-    app.state.agent_concurrency = AgentConcurrencyManager()
-    app.state.memory_tasks = MemoryTaskManager(provider, observability=observability)
-    await app.state.memory_tasks.start()
-    async with mcp.session_manager.run():
-        audit("application.started", status="ready")
-        try:
-            yield
-        finally:
-            await app.state.memory_tasks.close()
-            await app.state.agent_runtime.close()
-            mcp_app.bind(None)
-            await observability.close()
-            await close_engine()
-            audit("application.stopped", status="stopped")
+    async with checkpoint_saver(get_settings()) as checkpointer:
+        app.state.langgraph_checkpointer = checkpointer
+        app.state.agent_runtime = AgentRuntime(
+            registry,
+            provider,
+            observability=observability,
+            checkpointer=checkpointer,
+        )
+        app.state.agent_concurrency = AgentConcurrencyManager()
+        app.state.memory_tasks = MemoryTaskManager(provider, observability=observability)
+        app.state.agent_runs = AgentRunManager(
+            app.state.agent_runtime,
+            app.state.agent_concurrency,
+            app.state.memory_tasks,
+            observability,
+        )
+        await app.state.memory_tasks.start()
+        await app.state.agent_runs.start()
+        async with mcp.session_manager.run():
+            audit("application.started", status="ready")
+            try:
+                yield
+            finally:
+                await app.state.agent_runs.close()
+                await app.state.memory_tasks.close()
+                await app.state.agent_runtime.close()
+                mcp_app.bind(None)
+                await observability.close()
+                await close_engine()
+                audit("application.stopped", status="stopped")
 
 
 app = FastAPI(title="LawStation API", version="0.2.0", lifespan=lifespan)

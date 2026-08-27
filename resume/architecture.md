@@ -88,7 +88,7 @@ flowchart TB
 | `evals/` | 数据集、批次、报告与学习指南 | 评测使用 |
 | `data/knowledge/` | 法规源数据 | RAG 使用 |
 | `data/indexes/` | 生成的向量索引与 staging | RAG 使用，不作为源码分析 |
-| `data/runtime/` | SQLite 和资源预算账本 | 运行时使用 |
+| `data/runtime/` | SQLite 和资源用量账本 | 运行时使用 |
 | `tools/` | 早期/参考工具 | **未进入正式链路** |
 | `tests/` | Python 回归测试 | 测试时使用 |
 
@@ -162,6 +162,11 @@ TEI 的模型版本采用显式 revision pin：服务返回 `model_sha` 时直�
 | 观测 | JSONL 审计 + 可选 LangSmith | `core/logging.py`、`observability/langsmith.py` |
 | 定向评测 | 600条候选的不可变前缀扩容 + task_id不匹配响应自动续跑 + Gold不变量保护 + Hybrid Top12双干扰资格冻结 + 本地消融/Agent安全门禁 | `evaluation/challenge_datasets.py`、`create_resume_challenge_datasets.py`、`run_resume_rag_challenge_eval.py` |
 
+2026-08-26 的当前基线已完成六组、共1,200次本地RAG检索：300条语义挑战集验证 Hybrid 相对
+BM25 的 Recall@5 `86.67% → 96.33%`；200条排序挑战集验证 TEI BGE 相对RRF的 Hit@1
+`95% → 97%`，精排应用率100%、降级率0%。该结果只适用于源法条约束的合成挑战集。Agent
+完整6类Agent Fixture已补跑：路由、Schema、引用归属、no-match安全、循环上限、租户隔离和完成状态门禁均为100%；检索状态和最新事实优先两个诊断项为83.33%，详见`resume/eval-results.md`。
+
 ## 7. 架构评价
 
 ### 优点
@@ -176,4 +181,20 @@ TEI 的模型版本采用显式 revision pin：服务返回 `model_sha` 时直�
 - 身份仅为演示用户选择，不能视为生产认证。
 - SQLite、进程内信号量、单 Worker 和浏览器内任务缓存限定了单机部署。
 - 正文是“复核后分片输出”，不是模型实时 token 输出。
-- 本地运行增加一个由统一入口管理的 TEI 子进程；没有分布式任务队列或跨刷新流恢复。
+- 本地运行增加一个由统一入口管理的 TEI 子进程；AgentRun、事件日志和 LangGraph Checkpoint 已支持单机跨刷新及服务重启恢复，但仍不是多机分布式任务队列。
+
+## 8. 持久化执行架构（2026-08-26）
+
+```mermaid
+flowchart LR
+    UI["React ConversationRuntime"] --> RUNAPI["AgentRun API"]
+    RUNAPI --> RUNDB["SQLite agent_runs / events"]
+    WORKER["AgentRunManager"] --> RUNDB
+    WORKER --> GRAPH["LangGraph StateGraph"]
+    GRAPH --> CP["AsyncSqliteSaver 独立数据库"]
+    GRAPH --> MCP["MCP Law RAG"]
+    RUNDB --> SSE["sequence SSE 重放"]
+    SSE --> UI
+```
+
+双层职责必须分开：`AgentRunManager` 管所有权、队列、租约、取消、事件和最终消息；`AsyncSqliteSaver` 管 Graph super-step 与节点级恢复。每个 Run 使用独立 thread ID，业务消息与结构化记忆仍是跨轮上下文唯一事实源。关键 symbol：`AgentRunManager`、`checkpoint_saver`、`AgentRuntime.stream`。

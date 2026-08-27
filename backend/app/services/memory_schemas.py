@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -55,3 +56,6 @@ class MemorySnapshot:
     selected_case_memories: int
     selected_profile_memories: int
     truncated: bool
+    current_user_message: str = ""
+    selected_memories: list[dict[str, str]] = field(default_factory=list)
+    snapshot_time: datetime | None = None

@@ -36,6 +36,7 @@ interface StreamSnapshot {
   userId: string;
   conversationId: string;
   assistantMessageId: string;
+  runId: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -204,16 +205,45 @@ export default function App() {
     setSidebarOpen(false);
     updateRuntime(key, (runtime) => ({ ...runtime, unread: false, updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     const cached = runtimeRef.current[key];
-    if (cached && (cached.messages.length > 0 || runtimeActive(cached))) return;
+    if (cached && runtimeActive(cached)) return;
 
     const sequence = (loadSequences.current.get(key) ?? 0) + 1;
     loadSequences.current.set(key, sequence);
     updateRuntime(key, (runtime) => ({ ...runtime, loading: true, error: '', updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     try {
-      const data = await api.messages(ownerId, id);
+      const [data, activeRun] = await Promise.all([
+        api.messages(ownerId, id),
+        api.activeRun(ownerId, id),
+      ]);
       const latest = runtimeRef.current[key];
       if (sequence !== loadSequences.current.get(key) || runtimeActive(latest)) return;
       updateRuntime(key, (runtime) => ({ ...runtime, messages: data, loading: false, updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
+      if (activeRun && !controllers.current.has(key)) {
+        const token = ++requestSequence.current;
+        const assistantMessageId = `assistant-${activeRun.id}`;
+        const snapshot: StreamSnapshot = {
+          token, key, userId: ownerId, conversationId: id, assistantMessageId, runId: activeRun.id,
+        };
+        const controller = new AbortController();
+        controllers.current.set(key, controller);
+        updateRuntime(key, (runtime) => ({
+          ...runtime,
+          messages: [
+            ...runtime.messages,
+            ...(runtime.messages.some((message) => message.id === assistantMessageId)
+              ? []
+              : [{ id: assistantMessageId, role: 'assistant' as const, content: '', status: 'streaming' as const }]),
+          ],
+          status: activeRun.current_stage,
+          runId: activeRun.id,
+          serverStatus: activeRun.status,
+          requestToken: token,
+          lastEventSequence: 0,
+          reconnecting: true,
+          updatedAt: Date.now(),
+        }), snapshot);
+        void followRun(snapshot, controller, activeRun.input_text);
+      }
     } catch (error) {
       updateRuntime(key, (runtime) => ({ ...runtime, loading: false, error: errorMessage(error), updatedAt: Date.now() }), { userId: ownerId, conversationId: id });
     }
@@ -227,15 +257,25 @@ export default function App() {
     if (!isCurrentStream(snapshot)) return;
     updateRuntime(snapshot.key, (runtime) => ({
       ...runtime,
-      messages: runtime.messages.map((message) => (
-        message.id === snapshot.assistantMessageId ? update(message) : message
-      )),
+      messages: runtime.messages.some((message) => message.id === snapshot.assistantMessageId)
+        ? runtime.messages.map((message) => (
+          message.id === snapshot.assistantMessageId ? update(message) : message
+        ))
+        : [...runtime.messages, update({ id: snapshot.assistantMessageId, role: 'assistant', content: '', status: 'streaming' })],
       updatedAt: Date.now(),
     }), snapshot);
   }
 
   function handleStreamEvent(snapshot: StreamSnapshot, item: SseEvent, streamFailure: { message: string }) {
     if (!isCurrentStream(snapshot)) return;
+    if (item.id !== undefined) {
+      updateRuntime(snapshot.key, (runtime) => ({
+        ...runtime,
+        lastEventSequence: Math.max(runtime.lastEventSequence ?? 0, item.id ?? 0),
+        reconnecting: false,
+        updatedAt: Date.now(),
+      }), snapshot);
+    }
     if (item.event === 'token') {
       const token = typeof item.data === 'string' ? item.data : '';
       updateAssistant(snapshot, (message) => ({ ...message, content: message.content + token }));
@@ -269,12 +309,14 @@ export default function App() {
       const citations = raw.filter((citation): citation is Citation => Boolean(citation && typeof citation === 'object'));
       updateAssistant(snapshot, (message) => ({ ...message, citations }));
     } else if (item.event === 'message_end') {
-      const data = item.data as { message_id?: string };
-      updateAssistant(snapshot, (message) => ({ ...message, id: data.message_id ?? message.id, status: 'complete' }));
+      const data = item.data as { message_id?: string; status?: 'completed' | 'interrupted' | 'failed' };
+      const messageStatus = data.status === 'interrupted' ? 'interrupted' : data.status === 'failed' ? 'error' : 'complete';
+      updateAssistant(snapshot, (message) => ({ ...message, id: data.message_id ?? message.id, status: messageStatus }));
       const visible = currentSelection.current.userId === snapshot.userId && currentSelection.current.conversationId === snapshot.conversationId;
       updateRuntime(snapshot.key, (runtime) => ({
         ...runtime,
-        status: 'completed',
+        status: data.status ?? 'completed',
+        serverStatus: data.status ?? 'completed',
         activeAgent: undefined,
         statusMessage: undefined,
         toolActivity: undefined,
@@ -310,6 +352,59 @@ export default function App() {
     }
   }
 
+  async function followRun(snapshot: StreamSnapshot, controller: AbortController, question: string) {
+    const streamFailure = { message: '' };
+    try {
+      while (!controller.signal.aborted && isCurrentStream(snapshot)) {
+        const after = runtimeRef.current[snapshot.key]?.lastEventSequence ?? 0;
+        try {
+          const response = await api.runEvents(
+            snapshot.userId, snapshot.runId, after, controller.signal,
+          );
+          await consumeSse(response, (item) => handleStreamEvent(snapshot, item, streamFailure));
+        } catch (error) {
+          if (controller.signal.aborted || !isCurrentStream(snapshot)) return;
+          updateRuntime(snapshot.key, (runtime) => ({
+            ...runtime, reconnecting: true, statusMessage: '连接中断，正在恢复任务进度', updatedAt: Date.now(),
+          }), snapshot);
+          await new Promise((resolve) => window.setTimeout(resolve, 750));
+          continue;
+        }
+        if (streamFailure.message) throw new Error(streamFailure.message);
+        const serverRun = await api.agentRun(snapshot.userId, snapshot.runId, controller.signal);
+        updateRuntime(snapshot.key, (runtime) => ({
+          ...runtime, serverStatus: serverRun.status, updatedAt: Date.now(),
+        }), snapshot);
+        if (['completed', 'interrupted', 'failed'].includes(serverRun.status)) {
+          const finalStage: AgentStage = serverRun.status === 'completed'
+            ? 'completed'
+            : serverRun.status === 'interrupted' ? 'interrupted' : 'failed';
+          const persisted = await api.messages(snapshot.userId, snapshot.conversationId, controller.signal);
+          const visible = currentSelection.current.userId === snapshot.userId
+            && currentSelection.current.conversationId === snapshot.conversationId;
+          updateRuntime(snapshot.key, (runtime) => ({
+            ...runtime,
+            messages: persisted,
+            status: finalStage,
+            activeAgent: undefined,
+            statusMessage: undefined,
+            toolActivity: undefined,
+            reconnecting: false,
+            unread: serverRun.status === 'completed' && !visible,
+            error: serverRun.status === 'failed' ? (serverRun.error_summary || '回答生成失败') : '',
+            failedQuestion: serverRun.status === 'failed' ? question : '',
+            updatedAt: Date.now(),
+          }), snapshot);
+          return;
+        }
+      }
+    } finally {
+      if (controllers.current.get(snapshot.key) === controller) {
+        controllers.current.delete(snapshot.key);
+      }
+    }
+  }
+
   async function send(questionOverride?: string) {
     const ownerId = userId;
     const question = (questionOverride ?? draft).trim();
@@ -323,66 +418,61 @@ export default function App() {
     const key = conversationKey(ownerId, targetConversationId);
     if (runtimeActive(runtimeRef.current[key]) || controllers.current.has(key)) return;
 
-    const token = ++requestSequence.current;
-    const assistantMessageId = `assistant-${token}`;
-    const snapshot: StreamSnapshot = { token, key, userId: ownerId, conversationId: targetConversationId, assistantMessageId };
-    const controller = new AbortController();
-    controllers.current.set(key, controller);
-    setDrafts((current) => ({ ...current, [draftKey]: '' }));
-    updateRuntime(key, (runtime) => ({
-      ...runtime,
-      messages: [
-        ...runtime.messages,
-        { id: `user-${token}`, role: 'user', content: question, status: 'complete' },
-        { id: assistantMessageId, role: 'assistant', content: '', status: 'streaming' },
-      ],
-      status: 'analyzing',
-      activeAgent: 'case_analyst',
-      statusMessage: '正在启动案情分析',
-      requestToken: token,
-      toolActivity: undefined,
-      memoryMessage: '',
-      error: '',
-      failedQuestion: '',
-      loading: false,
-      unread: false,
-      updatedAt: Date.now(),
-    }), snapshot);
-
-    const streamFailure = { message: '' };
     try {
-      const response = await api.streamMessage(ownerId, targetConversationId, question, controller.signal);
-      await consumeSse(response, (item) => handleStreamEvent(snapshot, item, streamFailure));
-      if (!isCurrentStream(snapshot)) return;
-      if (streamFailure.message) throw new Error(streamFailure.message);
-      updateAssistant(snapshot, (message) => ({ ...message, status: 'complete' }));
-      const visible = currentSelection.current.userId === ownerId && currentSelection.current.conversationId === targetConversationId;
+      const run = await api.createRun(ownerId, targetConversationId, question);
+      const token = ++requestSequence.current;
+      const assistantMessageId = `assistant-${run.id}`;
+      const snapshot: StreamSnapshot = {
+        token, key, userId: ownerId, conversationId: targetConversationId, assistantMessageId, runId: run.id,
+      };
+      const controller = new AbortController();
+      controllers.current.set(key, controller);
+      setDrafts((current) => ({ ...current, [draftKey]: '' }));
       updateRuntime(key, (runtime) => ({
         ...runtime,
-        status: 'completed',
-        activeAgent: undefined,
-        statusMessage: undefined,
+        messages: [
+          ...runtime.messages,
+          { id: `user-${run.id}`, role: 'user', content: question, status: 'complete' },
+          { id: assistantMessageId, role: 'assistant', content: '', status: 'streaming' },
+        ],
+        status: 'queued',
+        activeAgent: 'coordinator',
+        statusMessage: '咨询任务正在排队',
+        runId: run.id,
+        serverStatus: run.status,
+        lastEventSequence: 0,
+        requestToken: token,
         toolActivity: undefined,
-        unread: !visible,
+        memoryMessage: '',
+        error: '',
+        failedQuestion: '',
+        loading: false,
+        unread: false,
         updatedAt: Date.now(),
       }), snapshot);
+      await followRun(snapshot, controller, question);
     } catch (error) {
-      if (!isCurrentStream(snapshot)) return;
-      if (controller.signal.aborted) {
-        updateAssistant(snapshot, (message) => ({ ...message, status: 'interrupted' }));
-        updateRuntime(key, (runtime) => ({ ...runtime, status: 'interrupted', toolActivity: undefined, updatedAt: Date.now() }), snapshot);
-      } else {
-        updateAssistant(snapshot, (message) => ({ ...message, status: 'error' }));
-        updateRuntime(key, (runtime) => ({ ...runtime, status: 'failed', error: errorMessage(error), failedQuestion: question, toolActivity: undefined, updatedAt: Date.now() }), snapshot);
-      }
-    } finally {
-      if (controllers.current.get(key) === controller) controllers.current.delete(key);
+      updateRuntime(key, (runtime) => ({
+        ...runtime,
+        status: 'failed',
+        error: errorMessage(error),
+        failedQuestion: question,
+        toolActivity: undefined,
+        updatedAt: Date.now(),
+      }), { userId: ownerId, conversationId: targetConversationId });
     }
   }
 
-  function stopCurrentStream() {
+  async function stopCurrentStream() {
     if (!selectedKey) return;
-    controllers.current.get(selectedKey)?.abort('user-stop');
+    const runtime = runtimeRef.current[selectedKey];
+    if (runtime?.runId) {
+      try {
+        await api.cancelRun(runtime.userId, runtime.runId);
+      } finally {
+        controllers.current.get(selectedKey)?.abort('user-stop');
+      }
+    }
   }
 
   function setDraft(value: string) {

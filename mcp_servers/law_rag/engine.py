@@ -19,6 +19,7 @@ from rank_bm25 import BM25Okapi
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.logging import audit
 from backend.app.core.ollama import ollama_runtime_status
+from mcp_servers.law_rag.confidence import RetrievalConfidenceGate
 from mcp_servers.law_rag.embeddings import create_embedding_provider
 from mcp_servers.law_rag.reranker import (
     RerankCandidate,
@@ -111,6 +112,10 @@ class LawSearchEngine:
         self.embedding_descriptor = None
         self.reranker = create_reranker(self.settings)
         self.reranker_descriptor = None
+        self.confidence_gate = RetrievalConfidenceGate(
+            getattr(self.settings, "rag_match_gate_config_path", "./evals/config/retrieval-gate-v1.json"),
+            required=getattr(self.settings, "rag_match_gate_required", False),
+        )
         self.fingerprint = self._fingerprint()
         runtime = ollama_runtime_status()
         self._state = {
@@ -646,7 +651,16 @@ class LawSearchEngine:
                 })
             return ordered
 
-    async def search(self, query, top_k=8, filters=None, retrieval_mode: str | None = None):
+    async def search(
+        self,
+        query,
+        top_k=8,
+        filters=None,
+        retrieval_mode: str | None = None,
+        *,
+        envelope: bool = False,
+        apply_confidence_gate: bool = True,
+    ):
         mode = retrieval_mode or getattr(self.settings, "rag_retrieval_mode", "hybrid")
         async with trace(
             "law_rag.search_laws",
@@ -658,9 +672,10 @@ class LawSearchEngine:
             top_k = max(1, min(int(top_k), 20))
             eligible_indices = self._filtered_indices(filters)
             if eligible_indices == []:
+                empty = self._search_envelope([], None, "law_name_filter_has_no_candidates")
                 if run is not None:
-                    run.end(outputs={"documents": [], "retrieval_status": "no_match"})
-                return []
+                    run.end(outputs=empty)
+                return empty if envelope else []
             eligible = set(eligible_indices) if eligible_indices is not None else None
             candidate_count = len(eligible_indices) if eligible_indices is not None else len(self.docs)
             pool = min(candidate_count, max(30, top_k * 4))
@@ -770,12 +785,31 @@ class LawSearchEngine:
                 "dense_enabled": state["dense_enabled"],
                 "index_status": state["status"],
             } for rank, index in enumerate(ordered)]
+            gate = None
+            if getattr(self.settings, "rag_match_gate_enabled", False):
+                gate = self.confidence_gate.evaluate(query, results, tokens(query))
+                if apply_confidence_gate and not gate.matched:
+                    results = []
+            response = self._search_envelope(results, gate)
             if run is not None:
-                run.end(outputs={
-                    "documents": results,
-                    "retrieval_status": "matched" if results else "no_match",
-                })
-            return results
+                run.end(outputs=response)
+            return response if envelope else results
+
+    def _search_envelope(self, results, gate=None, reason: str | None = None) -> dict:
+        matched = bool(results)
+        diagnostics = {
+            "confidence": gate.confidence if gate is not None else (1.0 if matched else 0.0),
+            "gate_version": gate.gate_version if gate is not None else "retrieval-gate-v1",
+        }
+        if gate is not None:
+            diagnostics["features"] = gate.features
+        return {
+            "schema_version": "law-search-v2",
+            "retrieval_status": "matched" if matched else "no_match",
+            "no_match_reason": None if matched else (reason or (gate.reason if gate else "no_candidates")),
+            "documents": results,
+            "diagnostics": diagnostics,
+        }
 
     def get(self, law_name, article_number):
         with trace(

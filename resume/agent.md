@@ -203,3 +203,11 @@ LLM Reviewer 检查覆盖度、证据越界、事实忠实和矛盾；代码随�
 - matched 链路通常需要 Analyst、Research 多轮、Counsel、Reviewer，多模型调用导致首正文延迟较高。
 - 共享 ChatOpenAI 客户端的真实连接池和服务端限流需结合压测确认。
 - 模型输出质量仍依赖法规覆盖、检索阈值和 Prompt，确定性校验只能控制证据边界，不能保证法律意见本身完美。
+
+## 15. LangGraph 持久化与准确性状态
+
+- `LegalConsultationGraph._compile` 注入 `AsyncSqliteSaver`，节点成功后的 super-step 可恢复；Run 级 thread 为 `agent-run:<run_id>`，不会跨轮继承旧 Graph State。
+- `LegalConsultationState` 持久化模型/工具计数、trajectory、EvidencePacket、fact overrides、草稿、复核和最终引用；恢复时 `AgentRuntime.stream` 用 checkpoint 重新初始化调用计数，防止上限归零。
+- Research 将 `candidate_status` 与 `evidence_status` 分开，并保存 `accepted_chunk_ids/rejected_candidates`；候选未被明确处理时最多执行一次无工具 `evidence_selector`。
+- `CaseAnalysis.current_fact_overrides` 经 `_validate_fact_overrides` 所有权校验后写入 State；`_fact_boundary_errors` 阻止最终回答继续采用明确被替换的旧值。
+- 执行语义是“Graph 节点至少一次、节点间 Checkpoint 恢复、最终消息严格幂等”。只读 RAG 工具可安全重放，未来副作用工具需单独设计幂等键。

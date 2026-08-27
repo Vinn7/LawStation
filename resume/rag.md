@@ -33,6 +33,9 @@ flowchart LR
     DENSE --> RRF
     RRF --> RERANK["TEI BGE Cross-Encoder"]
     RERANK --> MCP["search_laws / get_law_article"]
+
+    MCP --> GATE["RetrievalConfidenceGate"]
+    GATE --> EVIDENCE["Research 接受 / 拒绝证据"]
     MCP --> RESEARCH["LegalResearchAgent"]
     RESEARCH --> EVIDENCE["EvidencePacket"]
     EVIDENCE --> ANSWER["法律意见与可追踪引用"]
@@ -455,6 +458,25 @@ tool_error、memory 各1条的 Agent Fixture 冒烟。
 完成状态必须全部通过。自动生成的简历语句只引用实际报告数字，并明确表述为“从600条源法条约束
 的合成候选中，按预先冻结的Hybrid Top12与双干扰项规则筛选200条排序挑战样本”。
 
+### 15.1 2026-08-26 实测结果
+
+最新正式运行目录为 `evals/reports/runs/20260826-095648-160455-compare/`，索引指纹为
+`9c95a6fe9f682fd3ca41d097e8b7463180503620d39e4b724a381f9fde718f0d`：
+
+- 300条 Dense 合成语义挑战集：BM25 → Hybrid 的 Recall@5 为 `86.67% → 96.33%`，MRR 为
+  `0.7699 → 0.8705`，Hit@1 为 `69.67% → 80.33%`；平均检索耗时 `176.36ms → 263.17ms`。
+- 200条合成排序挑战集：RRF → BGE 的 Hit@1 为 `95% → 97%`，MRR 为
+  `0.9725 → 0.9838`，Gold平均排名 `1.07 → 1.04`；BGE精排p95为`1740.61ms`，应用率100%、
+  降级率0%。
+- 100条源数据派生通用回归：BGE将 Recall@5 `98% → 100%`、Hit@1 `88% → 96%`；但两组
+  Retrieval Status Accuracy均为80%，说明现有阈值没有正确拒绝20条预设no-match。这是召回
+  空结果判别技术债，不能由Reranker排序解决。
+
+移除评测月度硬上限后，casual、clarification、matched、no_match、tool_error、memory六类Fixture
+已完整补跑。项目配置的路由、Schema、引用归属、no-match安全、循环上限、隔离和完成状态门禁均通过；
+matched检索状态与memory最新事实优先两个非门禁诊断各为83.33%。该结果用于工程约束验证，不能
+宣传为法律回答总体准确率。完整数字和边界见`resume/eval-results.md`。
+
 ## 16. 面试表达
 
 ### 简历描述
@@ -490,3 +512,9 @@ tool_error、memory 各1条的 Agent Fixture 冒烟。
 - `backend/app/agent/graph.py::_authoritative_evidence`
 - `backend/app/agent/graph.py::LegalConsultationGraph.finalize`
 - `backend/app/agent/middleware.py::ToolAuditMiddleware`
+
+## 17. 检索状态与证据状态分离
+
+`search_laws` 现在返回 `law-search-v2` Envelope：`retrieval_status/documents/no_match_reason/diagnostics`；MCP 入参保持不变，Agent 的递归解析器兼容旧数组结果。`RetrievalConfidenceGate` 综合 BGE、Top1/Top2 差距、BM25/Dense 共同命中、原始分数、RRF 和查询覆盖率，只判断候选是否达到检索置信度。
+
+Research 随后独立决定 `evidence_status=accepted|rejected|unavailable|error`，并记录 accepted chunk IDs 与 rejected candidates。因此“检索有候选但证据不适用”不会再和“工具失败”混为一谈。当前阈值文件为 `provisional`；`scripts/calibrate_retrieval_gate.py --write` 会在 120 条开发集网格搜索，并仅在 80 条冻结验证集通过准确率、no-match 与 Recall@5 门禁后原子写入 validated 配置。
