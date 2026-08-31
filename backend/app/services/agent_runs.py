@@ -377,13 +377,26 @@ class AgentRunManager:
             await asyncio.to_thread(
                 self._finish_completed, run.id, assistant_id, trace.trace_id, memory_payload
             )
-            await trace.finish(outputs={
-                "status": "success",
-                "final_answer": answer,
-                "citations": citations,
-                "model_call_count": agent.model_call_count,
-                "tool_call_count": agent.tool_call_count,
-            })
+            skill_ids = [item.get("skill_id") for item in agent.active_skills]
+            skill_versions = {
+                item.get("skill_id"): item.get("version")
+                for item in agent.active_skills
+            }
+            await trace.finish(
+                outputs={
+                    "status": "success",
+                    "final_answer": answer,
+                    "citations": citations,
+                    "model_call_count": agent.model_call_count,
+                    "tool_call_count": agent.tool_call_count,
+                    "skill_ids": skill_ids,
+                    "skill_versions": skill_versions,
+                },
+                metadata={
+                    "skill_ids": skill_ids,
+                    "skill_versions": skill_versions,
+                },
+            )
             audit("agent.run.completed", status="completed", run_id=run.id, assistant_message_id=assistant_id, **ctx.__dict__, conversation_id=run.conversation_id)
             await self._notify()
         except asyncio.CancelledError:

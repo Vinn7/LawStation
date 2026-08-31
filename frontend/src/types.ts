@@ -56,6 +56,12 @@ export interface ToolActivity {
   status: 'running' | 'success' | 'failed' | 'timeout';
 }
 
+export interface SkillActivity {
+  skillId: string;
+  status: 'selected' | 'running' | 'completed' | 'failed';
+  message: string;
+}
+
 export type MemoryScope = 'user' | 'conversation';
 export type MemoryStatus = 'pending' | 'active' | 'superseded' | 'rejected' | 'expired';
 
@@ -114,6 +120,7 @@ export interface ConversationRuntime {
   serverStatus?: AgentRunStatus;
   reconnecting?: boolean;
   toolActivity?: ToolActivity;
+  skillActivity?: SkillActivity;
   memoryMessage?: string;
   error?: string;
   failedQuestion?: string;
@@ -125,6 +132,7 @@ export interface ConversationRuntime {
 export type SseEventName =
   | 'message_start'
   | 'agent_status'
+  | 'skill_status'
   | 'tool_call_start'
   | 'tool_call_result'
   | 'token'

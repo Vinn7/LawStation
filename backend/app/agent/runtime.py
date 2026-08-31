@@ -7,6 +7,7 @@ from langchain_core.messages import BaseMessage
 from backend.app.agent.graph import LegalConsultationGraph
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
+from backend.app.agent.skills import SkillRegistry
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings, get_settings
 from backend.app.observability import LangSmithObservability
@@ -20,21 +21,27 @@ class AgentRuntime:
         settings: Settings | None = None,
         observability: LangSmithObservability | None = None,
         checkpointer: Any = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.registry = registry
         self.provider = provider
         self.settings = settings or get_settings()
+        self.skill_registry = skill_registry or SkillRegistry(self.settings)
         self.observability = observability or LangSmithObservability(self.settings)
         self.checkpointer = checkpointer
         self._compile_lock = asyncio.Lock()
         self._graph: LegalConsultationGraph | None = None
-        self._graph_key: tuple[int, tuple[str, ...]] | None = None
+        self._graph_key: tuple[int, tuple[str, ...], str] | None = None
 
     async def ensure_ready(self, context: AgentInvocationContext) -> LegalConsultationGraph:
         model = self.provider.get_chat_model()
         tools = await self.registry.get_tools(context.audit_fields)
         registry_status = self.registry.status()
-        key = (registry_status.version, tuple(tool.name for tool in tools))
+        key = (
+            registry_status.version,
+            tuple(tool.name for tool in tools),
+            self.skill_registry.status().catalog_digest,
+        )
         if self._graph is not None and self._graph_key == key:
             return self._graph
         async with self._compile_lock:
@@ -43,6 +50,7 @@ class AgentRuntime:
                     model=model,
                     tools=tools,
                     registry=self.registry,
+                    skill_registry=self.skill_registry,
                     settings=self.settings,
                     checkpointer=self.checkpointer,
                 )
@@ -72,6 +80,8 @@ class AgentRuntime:
             "citations": [],
             "errors": [],
             "current_fact_overrides": [],
+            "active_skills": [],
+            "skill_outputs": {},
             "model_call_count": 0,
             "tool_call_count": 0,
             "tool_trajectory": [],
@@ -94,6 +104,7 @@ class AgentRuntime:
                 context.metrics.tool_trajectory = list(
                     snapshot.values.get("tool_trajectory", [])
                 )
+                context.active_skills = list(snapshot.values.get("active_skills", []))
                 graph_input = None
         async for part in graph.compiled.astream(
             graph_input,
@@ -146,6 +157,8 @@ class AgentRuntime:
                 item.model_dump() if hasattr(item, "model_dump") else item
                 for item in final_state.get("errors", [])
             ],
+            "active_skills": list(final_state.get("active_skills", [])),
+            "skill_outputs": dict(final_state.get("skill_outputs", {})),
         }
         analysis = context.evaluation_output.get("case_analysis") or {}
         evidence = context.evaluation_output.get("evidence_packet") or {}

@@ -1,6 +1,41 @@
 # LawStation 配置、测试、脚本与部署
 
+## 0. Spec-Driven Development 开发闭环
+
+项目使用 `ai-context/SPEC.md` 作为版本化 Living Spec，并采用以下 SDD 流程推进功能迭代：
+
+```mermaid
+flowchart LR
+    R["需求与问题复现"] --> S["更新 Spec：边界、契约、状态与验收"]
+    S --> I["按最小变更原则实现"]
+    I --> T["单元测试、静态检查与生产构建"]
+    T --> E["RAG/Agent 离线评测与回归门禁"]
+    E --> D["回写 Spec、Resume 分册与架构核验"]
+    D --> R
+```
+
+实际执行规则：
+
+1. 开发前从代码确认现状，再将目标行为、输入输出、失败语义、并发/隔离边界及验收标准写入 Spec；README 或历史计划不能代替代码事实。
+2. 实现阶段优先原地修改现有 symbol，避免为局部需求删除重建文件；架构、API、数据模型、配置、安全规则变化必须同步维护 Spec。
+3. 验证阶段按变更范围执行 Pytest、Ruff、Vitest、TypeScript/Vite 构建，以及不消耗外部额度的 mock/离线评测；RAG 改造还需保留数据集 SHA、索引指纹、模型 revision 和时间戳报告。
+4. 交付阶段同步更新受影响的 `resume/` 分册并核验 `resume/architecture.md`；文档使用“已验证/部分实现/推测/文档偏差”表达真实完成度。
+5. Spec 不是单向需求文档：实现或实验发现设计假设不成立时，必须依据实际代码和数据修订 Spec。例如 BGE 精排完成消融后，可以通过 `RAG_RERANK_ENABLED=false` bypass，而保留模型接入、降级和评测能力。
+
+该流程让 Agent Prompt、LangGraph 状态、MCP Schema、RAG 证据边界、记忆所有权等难以仅靠类型系统约束的行为，转化为可审查、可测试、可追溯的工程契约。
+
 ## 1. 配置系统
+
+运行时 Skill 配置：
+
+```dotenv
+AGENT_SKILLS_ENABLED=true
+AGENT_SKILL_ROOT=./skills/runtime
+AGENT_MAX_ACTIVE_SKILLS=2
+AGENT_SKILL_STRICT_VALIDATION=true
+```
+
+`SkillRegistry` 在 FastAPI lifespan 创建。严格校验开启时，重复 ID、非法 SemVer、越界路径、未知输出 Schema 或未授权工具会阻止启动；关闭整个 Skill 功能后，原三 Agent 链路仍可独立运行。Skill 文件首期不热更新，修改后需重启重新加载。
 
 `backend/app/core/config.py::Settings` 基于 `pydantic-settings`，固定从仓库根 `.env` 读取，未知字段忽略；`get_settings` 使用 `lru_cache` 保证进程内配置稳定。
 
@@ -116,6 +151,7 @@ Pytest 配置位于 `pyproject.toml`，测试均在 `tests/`。
 | 模块 | 主要测试文件 |
 |---|---|
 | Agent/Graph/MCP Registry | `test_agent_runtime.py` |
+| Runtime Skill/路由数据 | `test_skills.py` |
 | 并发/SSE/SQLite PRAGMA | `test_concurrency.py` |
 | RAG 索引与混合检索 | `test_index_manager.py` |
 | Embedding Provider | `test_embeddings.py` |
@@ -131,6 +167,8 @@ Pytest 配置位于 `pyproject.toml`，测试均在 `tests/`。
 | 启动器 | `test_run.py` |
 
 绝大多数外部服务通过 fake/mock 隔离，不应在常规测试中消耗模型额度。
+
+仓库级开发约束由 `.agents/skills/lawstation-spec-change/SKILL.md` 和 `.agents/skills/lawstation-eval-review/SKILL.md` 固化，并使用 skill-creator 提供的 `quick_validate.py` 校验 Frontmatter、命名和占位符。它们不进入生产依赖或线上 Prompt。
 
 ## 7. 前端测试体系
 
@@ -195,7 +233,8 @@ npm run build
 ## 12. 新增依赖、迁移与测试
 
 - Python 新增 `langgraph-checkpoint-sqlite>=3,<4` 与 `aiosqlite>=0.20,<1`。
+- Python 新增 `PyYAML>=6.0`，仅用于解析受信任仓库内 `SKILL.md` Frontmatter；运行时不解析用户提供的 YAML。
 - Alembic head 为 `20260826_05`，创建 `agent_runs/agent_run_events` 与同会话 active 唯一索引；升级前备份名后缀为 `.pre-agent-runs.bak`。
 - Checkpoint 数据库与业务库分离为 `data/runtime/langgraph-checkpoints.db`，使用 `JsonPlusSerializer(pickle_fallback=False)`。
-- 新增 `tests/test_agent_runs.py` 与 `tests/test_retrieval_confidence.py`；本次离线后端全量回归为 144 passed，前端为 13 passed，生产构建通过。
+- 已覆盖 `tests/test_agent_runs.py`、`tests/test_retrieval_confidence.py` 和 `tests/test_skills.py`；本次离线后端全量回归为 153 passed，前端为 14 passed，生产构建通过。
 - 冻结数据由 `scripts/create_accuracy_datasets.py` 生成；真实阈值校准会调用本地检索服务，不在普通测试或开发完成后自动执行。

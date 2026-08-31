@@ -27,6 +27,7 @@ dependencies = [
   "rank-bm25>=0.2.2",
   "jieba>=0.42",
   "filelock>=3.16",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

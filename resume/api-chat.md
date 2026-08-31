@@ -92,6 +92,7 @@ sequenceDiagram
 |---|---|---|
 | `message_start` | 路由 | 建立本轮请求 |
 | `agent_status` | Graph 节点 | 排队、分析、检索、生成、复核、完成 |
+| `skill_status` | Skill 执行边界 | 展示已选择、执行中、完成或降级的安全领域能力状态 |
 | `tool_call_start` | `ToolAuditMiddleware` | 显示安全工具状态 |
 | `tool_call_result` | `ToolAuditMiddleware` | 清理或显示失败状态 |
 | `citations` | `AgentRuntime` | 绑定最终助手消息引用 |
@@ -101,6 +102,8 @@ sequenceDiagram
 | `error` | 路由 | 非成功状态和重试提示 |
 
 SSE comment `: heartbeat` 不属于应用事件，`frontend/src/sse.ts::parseSseBlock` 会忽略。
+
+`skill_status` 只允许公开 `skill_id/status/message`，不包含 `SKILL.md` 正文、输出 Schema、工具权限或模型生成的内部数据。AgentRun 模式会像其他非正文事件一样将其写入 `agent_run_events` 并分配递增 sequence，因此刷新后可以重放，但不会把 Skill 中间结果当作聊天消息。
 
 ## 6. “流式输出”的真实语义
 

@@ -2,6 +2,8 @@
 
 单进程、单端口的法律咨询 Agent：FastAPI 同时托管 React 页面、业务 API、SSE 对话与法律 RAG MCP Server。
 
+运行时内置 4 个可插拔领域 Skill：案情结构化、证据审查、程序路线和文书就绪检查。Case Analyst 只建议 Skill ID，服务端 `SkillRegistry` 校验白名单、角色、工具权限和最多 2 个组合，选中后才按需加载完整指令；Skill 关闭或一般执行失败时，原三 Agent 链路仍可运行。
+
 项目架构、开发准则、技术选型、验收基线与已知缺口见 [`ai-context/SPEC.md`](ai-context/SPEC.md)。后续涉及架构边界、API、数据模型、配置或安全规则的变更，应同步更新该 Spec。
 
 ## 首次安装
@@ -198,6 +200,21 @@ evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/
 咨询 SSE 每 15 秒发送一次不可见 heartbeat，避免长模型调用期间连接被代理关闭。低风险且没有可引用法条的回答通过确定性证据边界校验后可跳过 LLM Reviewer；中高风险、存在法规依据或检索异常时仍执行完整模型复核。
 
 咨询默认使用持久化 AgentRun：创建任务后，前端通过带 sequence 的 SSE 订阅事件；切换用户、临时断网或刷新页面不会取消服务端 Graph，重新打开会话可恢复进度。LangGraph 使用独立 SQLite Checkpoint 数据库保存 super-step，业务消息和记忆仍由主 SQLite 管理。停止生成必须调用 cancel API，而不是仅关闭浏览器连接。
+
+## 运行时与开发 Skill
+
+运行时 Skill 位于 `skills/runtime/*/SKILL.md`，可通过以下环境变量整体关闭或调整加载策略：
+
+```dotenv
+AGENT_SKILLS_ENABLED=true
+AGENT_SKILL_ROOT=./skills/runtime
+AGENT_MAX_ACTIVE_SKILLS=2
+AGENT_SKILL_STRICT_VALIDATION=true
+```
+
+Skill 是领域工作流与结构化输出约束，不是 MCP Tool。只有 Legal Research 能通过现有 MCP 调用 `search_laws/get_law_article`，Skill 不能绕过该协议边界。前端只接收安全的 `skill_status`，LangSmith 只记录 Skill ID 和版本，不上传完整 Skill Prompt。
+
+仓库开发 Skill 位于 `.agents/skills/`：`lawstation-spec-change` 固化 SDD 与文档同步闭环，`lawstation-eval-review` 固化公平消融、报告归档和简历数字真实性规则。开发 Skill 不进入线上 Agent Prompt。
 
 检索工具返回 `law-search-v2` Envelope，并由确定性置信度门控区分候选命中与正常 no-match。仓库内默认 gate 参数是 provisional；需要在 Ollama/TEI 和正式索引就绪后执行：
 

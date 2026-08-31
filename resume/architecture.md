@@ -30,6 +30,7 @@ flowchart TB
         MCP["FastMCP /mcp/"]
         GRAPH["共享 LangGraph"]
         REGISTRY["MCPToolRegistry"]
+        SKILLS["SkillRegistry"]
         MEMORY["MemoryTaskManager"]
         RAG["LawSearchEngine"]
         AUDIT["JSONL Audit"]
@@ -39,6 +40,7 @@ flowchart TB
     UI -->|"REST + SSE, X-User-ID"| API
     UI --> STATIC
     API --> GRAPH
+    GRAPH --> SKILLS
     GRAPH --> REGISTRY
     REGISTRY -->|"Streamable HTTP"| MCP
     MCP --> RAG
@@ -63,6 +65,7 @@ flowchart TB
 | 前端 | 用户切换、会话缓存、流消费、记忆治理和反馈 | `frontend/src/App.tsx::App` |
 | API | 所有权校验、短事务、SSE 协调、回答与任务持久化 | `backend/app/api/routes.py` |
 | Agent | 案情分析、法律研究、意见生成、复核 | `LegalConsultationGraph` |
+| Skill | 版本化领域工作流、渐进式指令加载、角色/工具策略与输出校验 | `SkillRegistry` |
 | MCP Client | 工具发现缓存和协议调用 | `MCPToolRegistry` |
 | MCP Server | 标准工具定义，不管理用户状态 | `mcp_servers/law_rag/server.py::mcp` |
 | RAG | 法规加载、索引构建、混合召回、精确查询 | `LawSearchEngine` |
@@ -76,6 +79,8 @@ flowchart TB
 |---|---|---|
 | `backend/app/api/` | REST/SSE 路由 | 是 |
 | `backend/app/agent/` | LangChain/LangGraph Agent Runtime | 是 |
+| `skills/runtime/` | 4 个运行时领域 Skill | Case Analyst 选中后按需进入 Graph |
+| `.agents/skills/` | SDD 与评测 Review 两个仓库开发 Skill | 仅开发流程使用，不进入线上 Prompt |
 | `backend/app/services/` | 记忆和所有权 Repository | 是 |
 | `backend/app/db/` | SQLAlchemy、连接和迁移入口 | 是 |
 | `backend/app/core/` | 配置、日志、身份、Ollama/TEI 进程管理、预算 | 是 |
@@ -102,6 +107,7 @@ flowchart LR
     API --> REPO["services/repositories"]
     SERVICE --> RUNTIME["agent/runtime"]
     RUNTIME --> GRAPH["agent/graph"]
+    GRAPH --> SKILLS["agent/skills"]
     GRAPH --> PROVIDER["agent/provider"]
     GRAPH --> REGISTRY["agent/registry"]
     REGISTRY --> MCP["mcp_servers/law_rag"]
@@ -124,6 +130,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - `AgentConcurrencyManager`。
 - `MemoryTaskManager` 单 Worker。
 - `LangSmithObservability`。
+- `SkillRegistry` 的可信 Skill 摘要、完整指令和内容 digest。
 
 其中 `LangSmithObservability` 只共享 Client、脱敏规则、进程 Session Budget 和随机 Bridge Token；当前 RunTree、Trace config、用户/会话哈希和 RAG 父上下文均为请求级数据。MCP 传播只接受同进程 Client 携带的内存 Bridge Token，外部 MCP 调试请求不会被拼接进咨询 Trace。
 
@@ -136,6 +143,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - 记忆上下文与近期消息快照。
 - `EvidencePacket`、草稿、复核结果和 citations。
 - 模型/工具调用计数和 SSE 流。
+- 本 Run 的 `active_skills` 与经 Schema 校验的 `skill_outputs`。
 - 数据库 Session。
 
 关键类型：`backend/app/agent/state.py::AgentInvocationContext`。共享 Graph 中没有保存用户、会话、当前消息或 SQLAlchemy Session。
@@ -147,6 +155,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 | Web API | FastAPI + Uvicorn | `backend/app/main.py` |
 | 前端 | React + TypeScript + Vite | `frontend/package.json` |
 | Agent | LangChain `create_agent` + LangGraph `StateGraph` | `backend/app/agent/graph.py` |
+| Skill | YAML Frontmatter + Markdown 指令 + Pydantic 输出 Schema | `backend/app/agent/skills.py`、`skills/runtime/` |
 | 主模型 | DeepSeek OpenAI-compatible API | `LLMProvider.get_chat_model` |
 | Embedding | Ollama `qwen3-embedding:0.6b`，保留 DashScope Provider | `create_embedding_provider` |
 | 精排 | TEI `BAAI/bge-reranker-v2-m3`，原生 `/rerank` | `TEIReranker.rerank` |
@@ -198,3 +207,16 @@ flowchart LR
 ```
 
 双层职责必须分开：`AgentRunManager` 管所有权、队列、租约、取消、事件和最终消息；`AsyncSqliteSaver` 管 Graph super-step 与节点级恢复。每个 Run 使用独立 thread ID，业务消息与结构化记忆仍是跨轮上下文唯一事实源。关键 symbol：`AgentRunManager`、`checkpoint_saver`、`AgentRuntime.stream`。
+
+## 9. 可插拔 Skill 架构（2026-08-31）
+
+```mermaid
+flowchart LR
+    CATALOG["Skill 摘要目录"] --> ANALYST["Case Analyst 建议 skill_ids"]
+    ANALYST --> VALIDATE["SkillRegistry 白名单/角色/数量校验"]
+    VALIDATE --> LOAD["按需加载完整 SKILL.md"]
+    LOAD --> NODES["授权 LangGraph 节点"]
+    NODES --> OUTPUT["Pydantic skill_outputs"]
+```
+
+Skill 与 MCP Tool 分层：Skill 描述领域工作流、输出协议和安全约束；Tool 执行外部能力。模型只有建议权，服务端用 `SkillRegistry.resolve()` 最终裁决。Registry 应用级共享且无用户状态，`active_skills/skill_outputs` 请求级隔离；普通 Skill 失败不阻断基础链路，工具越权和伪造输出则拒绝。关键文件：`backend/app/agent/skills.py`、`skills/runtime/`。

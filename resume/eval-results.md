@@ -25,7 +25,7 @@
 - 索引规模：55,374 chunks；Embedding 为 Ollama `qwen3-embedding:0.6b`、1024 维。
 - 固定随机种子：`42`。
 - 正式实验前指定模块回归：60 passed；预算改造与实验补跑后的全量离线回归：139 passed、2 条第三方 warning（Pydantic Settings 与 LangSmith），无项目测试失败。
-- 持久化 AgentRun 与准确性闭环改造后的离线回归：后端 144 passed、前端 13 passed，生产构建通过。新增200条检索校准集和30条事实冲突集只完成冻结与结构校验，尚未运行真实模型校准，因此不得将目标门禁写成实测成绩。
+- 持久化 AgentRun、准确性闭环与运行时 Skill 改造后的离线回归：后端 153 passed、前端 14 passed，生产构建通过。新增200条检索校准集、30条事实冲突集和24条 Skill 路由 fixture 只完成冻结/结构与确定性边界校验，尚未运行真实模型校准或 Skill 路由基准，因此不得将目标门禁写成实测成绩。
 
 ## 2. Dense 挑战：BM25 vs Hybrid（n=300）
 

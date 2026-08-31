@@ -50,6 +50,10 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 
 关键 symbol：`LangSmithObservability`、`MonthlyResourceBudget`、`ReportRun`。
 
+### 2.8 Skill 是受控编排能力，不是 Prompt 插件
+
+`SkillRegistry` 对模型建议的 ID 做白名单、角色、工具和数量校验，并只向选中节点渐进加载完整指令。Skill 结果进入请求级 Graph State，未知 ID、越权工具和伪造输出不能绕过服务端策略。关键 symbol：`backend/app/agent/skills.py::SkillRegistry`、`LegalConsultationGraph._activate_skills`。
+
 ## 3. 部分实现或语义边界
 
 ### 3.1 `MemorySnapshot` 已进入持久化任务主链路
@@ -99,6 +103,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 4. **Memory Worker 关闭与吞吐**：单 Worker、领取非多进程原子，关闭等待无硬超时。
 5. **任务恢复仍是单机能力**：刷新后可通过 `active-run + Last-Event-ID` 重放，服务重启可从 LangGraph checkpoint 续跑；但 AgentRun Worker、租约和事件通知仍基于单机 SQLite，不支持多实例竞争领取和跨节点实时推送。
 6. **反馈错误体验**：前端反馈失败没有独立可见提示。
+7. **Skill 路由尚缺真实效果基线**：已有 24 条合成 fixture 和确定性 evaluator，但尚未运行真实模型选择实验；应先冻结路由集再报告 precision/recall、Prompt token 增量和延迟变化。
 
 ### P2：性能与扩展
 
@@ -118,6 +123,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 - 实现多用户逻辑隔离、分层记忆、最新事实覆盖和并发会话。
 - 使用 `AsyncSqliteSaver` 持久化 LangGraph super-step，并以 AgentRun 租约、事件日志和幂等消息写入实现刷新/断线/单机服务重启恢复。
 - 建立 JSONL 审计、LangSmith 可选追踪和低资源评测。
+- 实现版本化运行时 Skill、Progressive Disclosure 和服务端 Tool Policy，并以仓库 Skill 固化 SDD/评测流程。
 - 实现可恢复全量索引、单入口和单端口部署。
 
 ### 不能说
@@ -144,6 +150,8 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 | 8 | `backend/app/services/repositories.py` | 数据所有权安全边界 |
 | 9 | `backend/app/observability/langsmith.py` | Trace、隐私、采样和 fail-open |
 | 10 | `tests/test_agent_runtime.py` | 从测试理解关键行为与设计意图 |
+
+补充阅读：`backend/app/agent/skills.py` 用于理解 Skill 与 Tool、共享 Registry 与请求级 State 的边界。
 
 ## 8. 建议面试讲解顺序
 

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     mcp_tool_discovery_retry_seconds: int = 30
     agent_max_tool_calls: int = 4
     agent_max_model_calls: int = 10
+    agent_skills_enabled: bool = True
+    agent_skill_root: str = "./skills/runtime"
+    agent_max_active_skills: int = 2
+    agent_skill_strict_validation: bool = True
     agent_global_concurrency: int = 6
     agent_per_user_concurrency: int = 2
     agent_per_conversation_concurrency: int = 1

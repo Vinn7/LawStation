@@ -178,8 +178,8 @@ class RootTrace:
 class LangSmithObservability:
     """Application-scoped, fail-open LangSmith integration."""
 
-    graph_version = "three-agent-v2-chunk-evidence-fast-review"
-    prompt_version = "legal-consultation-v2-no-match-safe"
+    graph_version = "three-agent-v3-runtime-skills"
+    prompt_version = "legal-consultation-v3-progressive-skills"
     app_version = "0.2.0"
 
     def __init__(self, settings: Settings | None = None) -> None:

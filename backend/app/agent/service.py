@@ -27,6 +27,7 @@ class AgentService:
         self.model_call_count = 0
         self.final_answer = ""
         self.langsmith_trace_id: str | None = trace_id
+        self.active_skills: list[dict[str, str]] = []
         self.trace_config = trace_config
         self.run_id = run_id
         self.resume = resume
@@ -83,3 +84,6 @@ class AgentService:
         self.tool_call_count = invocation.metrics.tool_call_count
         self.model_call_count = invocation.metrics.model_call_count
         self.langsmith_trace_id = invocation.langsmith_trace_id
+        self.active_skills = list(
+            invocation.evaluation_output.get("active_skills", [])
+        )

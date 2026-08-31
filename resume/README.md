@@ -6,6 +6,16 @@
 
 LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 页面通过 FastAPI REST/SSE 访问三 Agent LangGraph，研究 Agent 经标准 MCP 协议调用 BM25 + Ollama Dense + FAISS 法规检索；SQLite 保存会话、审计和分层记忆，LangSmith 提供可选的链路追踪与低资源评测。
 
+## 可直接用于简历的 SDD 工程实践
+
+- 采用 **Spec-Driven Development（SDD）** 管理 Agent 项目演进：在 `ai-context/SPEC.md` 中先定义架构边界、Agent/RAG/记忆状态语义、API 与配置契约、安全约束和验收标准，再按最小变更原则实现；每次功能变更同步回写 Spec、受影响的 `resume/` 模块说明和架构核验结果，形成“需求澄清 → Spec 冻结 → 代码实现 → 自动化测试/离线评测 → 文档回写”的可追溯闭环。
+- 将 Spec 作为开发约束而非实现事实的替代品：Review 时仍以代码、配置、Alembic 迁移和测试交叉验证，并用“已验证/部分实现/推测/文档偏差”区分完成度，避免把计划能力误写成已落地能力。
+- 把关键非功能需求固化为可验收规则，包括租户与会话隔离、`no_match` 防幻觉、chunk 级引用归属、模型/工具循环上限、SSE 中断恢复、密钥与推理内容保护，以及后端测试、静态检查、前端测试和生产构建门禁。
+
+简历精简写法：
+
+> 采用 Spec-Driven Development（SDD）推进多 Agent 系统迭代，将架构边界、状态机、API/配置契约、安全规则和验收指标沉淀为版本化 Living Spec；建立 Spec—代码—测试—评测—文档的双向追溯机制，并以自动化回归和量化实验验证每次 Agent、RAG 与记忆链路变更。
+
 状态标签：
 
 - **已验证**：当前代码存在完整调用链或对应测试。
@@ -37,6 +47,7 @@ flowchart LR
     UI["React 工作台"] --> API["FastAPI REST / SSE"]
     API --> MEMORY["用户隔离的记忆快照"]
     API --> GRAPH["LangGraph 三 Agent"]
+    GRAPH --> SKILLS["受控运行时 Skills"]
     GRAPH --> LLM["DeepSeek"]
     GRAPH --> TOOLS["缓存的 MCP Tools"]
     TOOLS --> MCP["/mcp/"]
@@ -59,6 +70,8 @@ flowchart LR
 - **文档偏差**：非 8000 端口启动时，默认 `MCP_LAW_SERVER_URL` 不会自动跟随 `--port` 调整。
 - **已验证**：`tools/` 是参考/遗留工具集合，正式 Agent、MCP 和 API 代码没有导入它。
 - **已验证**：启动器提供 LangSmith `config/all/off` 进程级开关；全量模式把 SSE 编排、三 Agent、MCP 和 RAG 内部阶段关联为一个咨询根 Trace，并以 Session 上限保护线上资源。
+- **已验证**：运行时 Skill 采用“模型建议 + 服务端裁决”，只在选中后加载完整指令；4 个领域 Skill 受角色、工具和最多 2 个组合约束，关闭或普通执行失败时基础三 Agent 链路仍可运行。
+- **已验证**：`.agents/skills/` 将 SDD 变更闭环和评测真实性审核固化为仓库开发 Skill；它们不进入线上 Agent Prompt。
 
 ## 建议 Review 顺序
 
@@ -66,8 +79,8 @@ flowchart LR
 
 ## 本次验证结果
 
-- 后端：Conda `LawStation` 环境、临时 SQLite，`97 passed`；两条第三方依赖 warning，不影响结果。
-- 前端：Vitest `4` 个测试文件、`13 passed`。
+- 后端：Conda `LawStation` 环境、临时 SQLite，`153 passed`；两条第三方依赖 warning，不影响结果。
+- 前端：Vitest `4` 个测试文件、`14 passed`。
 - 文档：导航目标、关键 symbol、Markdown 围栏和敏感信息扫描通过。
-- 已执行：前端 Vitest `4` 个测试文件、`13 passed`，Vite 生产构建成功。
+- 已执行：前端 Vitest `4` 个测试文件、`14 passed`，Vite 生产构建成功；两个仓库开发 Skill 通过 `quick_validate.py`。
 - 未执行：服务启动、Ollama、真实 Embedding、DeepSeek 和 LangSmith 上传。

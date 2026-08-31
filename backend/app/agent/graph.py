@@ -28,6 +28,7 @@ from backend.app.agent.schemas import (
     ReviewResult,
     UnresolvedIssue,
 )
+from backend.app.agent.skills import CaseIntakeResult, SkillRegistry
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings
 from backend.app.core.logging import audit, summary
@@ -45,7 +46,8 @@ legal_domain, key_facts[], missing_facts[], legal_issues[], research_tasks[{issu
 risk_level(low|medium|high), next_action(direct_answer|ask_clarification|research), direct_answer,
 clarification_questions[], current_fact_overrides[{canonical_key,new_value,old_value,
 replaced_memory_id,confidence}]。只有当前消息明确修正历史记忆时才填写override。普通闲聊填写
-direct_answer；关键事实不足时给出简洁澄清问题。"""
+direct_answer；关键事实不足时给出简洁澄清问题。根据服务端提供的Skill目录填写
+requested_skill_ids[]；只选择与本轮任务直接相关的ID，不得生成目录外ID。"""
 
 RESEARCH_PROMPT = """你是法律研究 Agent，也是唯一可以调用法律检索工具的角色。针对每个 research task，
     先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实返回结果。
@@ -64,7 +66,8 @@ retrieval_status=no_match 时仍要提供有帮助的一般性、条件化分析
 未检索到可引用法条。tool_unavailable/tool_error 时应明确说明检索服务状态，不得冒充 no_match。
 区分已知事实、条件性推论、法律依据和行动建议。
     返回严格 JSON：answer, claims[{claim,evidence_chunk_ids}], confidence(low|medium|high),
-limitations[], follow_up_questions[]。answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
+limitations[], follow_up_questions[], skill_outputs{}。只为服务端提供的 active_skills 输出对应
+skill_outputs；answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
 
 REVIEW_PROMPT = """你是 Case Analyst 的复核阶段。检查草稿是否覆盖争议点、是否存在无证据法条、
 结论与证据是否一致、是否把推测写成事实、是否自相矛盾，以及是否错误采用了与用户最新消息
@@ -78,6 +81,13 @@ next_action(finalize|research_again|revise_draft)。只有明确证据缺口才 
 EVIDENCE_SELECTOR_PROMPT = """你是受限证据选择器，不允许调用任何工具。输入只包含本轮已检索到的
 候选法条和争议点。逐个候选决定接受或拒绝：只有直接支持争议点的候选才能进入 accepted_chunk_ids；
 其余必须进入 rejected_candidates 并给出简短原因。不得生成输入中不存在的 chunk_id。仅输出 JSON。"""
+
+SKILL_STATUS_MESSAGES = {
+    "case-intake": "正在结构化案情",
+    "evidence-audit": "正在审查证据准备情况",
+    "procedure-roadmap": "正在整理程序路线",
+    "document-readiness": "正在检查文书材料完整性",
+}
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -286,6 +296,8 @@ def _payload(state: LegalConsultationState) -> dict[str, Any]:
         "counsel_draft": state["counsel_draft"].model_dump() if state["counsel_draft"] else None,
         "review_result": state["review_result"].model_dump() if state["review_result"] else None,
         "current_fact_overrides": state.get("current_fact_overrides", []),
+        "active_skills": state.get("active_skills", []),
+        "skill_outputs": state.get("skill_outputs", {}),
     }
 
 
@@ -295,12 +307,14 @@ class LegalConsultationGraph:
         model: Any,
         tools: list[BaseTool],
         registry: MCPToolRegistry,
+        skill_registry: SkillRegistry,
         settings: Settings,
         checkpointer: Any = None,
     ) -> None:
         self.model = model
         self.tools = tools
         self.registry = registry
+        self.skill_registry = skill_registry
         self.settings = settings
         self.checkpointer = checkpointer
         self.research_agent = create_agent(
@@ -362,6 +376,88 @@ class LegalConsultationGraph:
             audit("agent.node.failed", level=logging.ERROR, status="failed", agent=agent_name, error_type=type(exc).__name__, error=summary(str(exc)), duration_ms=int((time.perf_counter() - started) * 1000), **context.audit_fields)
             raise
 
+    @staticmethod
+    def _active_skill_ids(state: LegalConsultationState) -> list[str]:
+        return [str(item.get("skill_id")) for item in state.get("active_skills", [])]
+
+    def _skill_event(
+        self,
+        runtime: Runtime[AgentInvocationContext],
+        skill_id: str,
+        status: str,
+        message: str | None = None,
+    ) -> None:
+        runtime.stream_writer({
+            "event": "skill_status",
+            "data": {
+                "skill_id": skill_id,
+                "status": status,
+                "message": message or SKILL_STATUS_MESSAGES.get(skill_id, "正在执行领域能力"),
+            },
+        })
+
+    async def _activate_skills(
+        self,
+        state: LegalConsultationState,
+        runtime: Runtime[AgentInvocationContext],
+        analysis: CaseAnalysis,
+    ) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
+        resolved = self.skill_registry.resolve(
+            analysis.requested_skill_ids,
+            audit_fields=runtime.context.audit_fields,
+        )
+        active = self.skill_registry.public_skills(resolved)
+        runtime.context.active_skills = active
+        outputs = dict(state.get("skill_outputs", {}))
+        for item in resolved:
+            skill_id = item.summary.skill_id
+            audit(
+                "skill.selection.accepted",
+                status="selected",
+                skill_id=skill_id,
+                skill_version=item.summary.version,
+                content_digest=item.summary.content_digest,
+                **runtime.context.audit_fields,
+            )
+            self._skill_event(runtime, skill_id, "selected")
+        if any(item.summary.skill_id == "case-intake" for item in resolved):
+            self._skill_event(runtime, "case-intake", "running")
+            audit(
+                "skill.execution.started",
+                status="started",
+                skill_id="case-intake",
+                **runtime.context.audit_fields,
+            )
+            try:
+                result = await self._invoke_json(
+                    runtime,
+                    "skill_case_intake",
+                    self.skill_registry.prompt_for(["case-intake"], "case_analyst"),
+                    _payload(state) | {"case_analysis": analysis.model_dump()},
+                    CaseIntakeResult,
+                )
+                outputs["case-intake"] = result.model_dump()
+                self._skill_event(runtime, "case-intake", "completed", "案情结构化完成")
+                audit(
+                    "skill.execution.completed",
+                    status="success",
+                    skill_id="case-intake",
+                    **runtime.context.audit_fields,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional skill is fail-open
+                outputs.pop("case-intake", None)
+                self._skill_event(runtime, "case-intake", "failed", "案情结构化未完成，继续基础分析")
+                audit(
+                    "skill.execution.failed",
+                    level=logging.WARNING,
+                    status="failed",
+                    skill_id="case-intake",
+                    error_type=type(exc).__name__,
+                    error=summary(str(exc)),
+                    **runtime.context.audit_fields,
+                )
+        return active, outputs
+
     async def case_analyst(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "analyzing", "message": "正在分析案情"}})
         if runtime.context.evaluation_case_analysis is not None:
@@ -370,11 +466,17 @@ class LegalConsultationGraph:
                 _validate_fact_overrides, analysis.current_fact_overrides, runtime.context
             )
             analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
+            active_skills, skill_outputs = await self._activate_skills(
+                state, runtime, analysis
+            )
             update: dict[str, Any] = {
                 "case_analysis": analysis,
                 "current_fact_overrides": [
                     item.model_dump() for item in analysis.current_fact_overrides
                 ],
+                "active_skills": active_skills,
+                "skill_outputs": skill_outputs,
+                "model_call_count": runtime.context.metrics.model_call_count,
             }
             if analysis.next_action == "direct_answer":
                 update["final_answer"] = analysis.direct_answer
@@ -385,7 +487,10 @@ class LegalConsultationGraph:
                 )
             return update
         try:
-            analysis = await self._invoke_json(runtime, "case_analyst", ANALYST_PROMPT, _payload(state), CaseAnalysis)
+            analyst_prompt = f"{ANALYST_PROMPT}\n\n{self.skill_registry.catalog_prompt()}"
+            analysis = await self._invoke_json(
+                runtime, "case_analyst", analyst_prompt, _payload(state), CaseAnalysis
+            )
         except (ValueError, ValidationError, RuntimeError) as exc:
             question = _message_text(state["messages"][-1]) if state["messages"] else ""
             analysis = CaseAnalysis(request_type="legal_consultation", case_summary=question, legal_issues=[question], research_tasks=[ResearchTask(issue_id="issue-1", query=question, purpose="核验法律依据")], next_action="research")
@@ -398,11 +503,14 @@ class LegalConsultationGraph:
             _validate_fact_overrides, analysis.current_fact_overrides, runtime.context
         )
         analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
+        active_skills, skill_outputs = await self._activate_skills(state, runtime, analysis)
         update: dict[str, Any] = {
             "case_analysis": analysis,
             "current_fact_overrides": [
                 item.model_dump() for item in analysis.current_fact_overrides
             ],
+            "active_skills": active_skills,
+            "skill_outputs": skill_outputs,
             "model_call_count": runtime.context.metrics.model_call_count,
         }
         if analysis.next_action == "direct_answer":
@@ -434,8 +542,11 @@ class LegalConsultationGraph:
             seen_tool_messages: set[str] = set()
             successful_tool_result = False
             failed_tool_result = False
+            skill_prompt = self.skill_registry.prompt_for(
+                self._active_skill_ids(state), "legal_researcher"
+            )
             async for part in self.research_agent.astream(
-                {"messages": [SystemMessage(content=RESEARCH_PROMPT), HumanMessage(content=json.dumps(research_payload, ensure_ascii=False, default=str))]},
+                {"messages": [SystemMessage(content="\n\n".join(item for item in (RESEARCH_PROMPT, skill_prompt) if item)), HumanMessage(content=json.dumps(research_payload, ensure_ascii=False, default=str))]},
                 context=context,
                 stream_mode=["updates", "custom"],
                 version="v2",
@@ -588,18 +699,76 @@ class LegalConsultationGraph:
         payload["answer_mode"] = "general_analysis_without_citations" if no_match else "evidence_based"
         if state["review_result"] and state["review_result"].revision_instruction:
             payload["revision_instruction"] = state["review_result"].revision_instruction
+        active_ids = self._active_skill_ids(state)
+        counsel_skills = self.skill_registry.resolve(active_ids, "legal_counsel")
+        for item in counsel_skills:
+            self._skill_event(runtime, item.summary.skill_id, "running")
+            audit(
+                "skill.execution.started",
+                status="started",
+                skill_id=item.summary.skill_id,
+                **runtime.context.audit_fields,
+            )
         try:
-            draft = await self._invoke_json(runtime, "legal_counsel", COUNSEL_PROMPT, payload, CounselDraft)
+            skill_prompt = self.skill_registry.prompt_for(active_ids, "legal_counsel")
+            draft = await self._invoke_json(
+                runtime,
+                "legal_counsel",
+                "\n\n".join(item for item in (COUNSEL_PROMPT, skill_prompt) if item),
+                payload,
+                CounselDraft,
+            )
+            try:
+                validated_outputs = self.skill_registry.validate_outputs(
+                    draft.skill_outputs, active_ids, "legal_counsel"
+                )
+            except ValidationError as exc:
+                validated_outputs = {}
+                audit(
+                    "skill.execution.failed",
+                    level=logging.WARNING,
+                    status="failed",
+                    skill_id="counsel_skill_outputs",
+                    error_type=type(exc).__name__,
+                    error=summary(str(exc)),
+                    **runtime.context.audit_fields,
+                )
+            draft = draft.model_copy(update={"skill_outputs": validated_outputs})
+            merged_outputs = {**state.get("skill_outputs", {}), **validated_outputs}
+            for item in counsel_skills:
+                skill_id = item.summary.skill_id
+                completed = skill_id in validated_outputs
+                self._skill_event(
+                    runtime,
+                    skill_id,
+                    "completed" if completed else "failed",
+                    "领域分析完成" if completed else "领域分析未完成，继续基础回答",
+                )
+                audit(
+                    "skill.execution.completed" if completed else "skill.execution.failed",
+                    level=logging.INFO if completed else logging.WARNING,
+                    status="success" if completed else "failed",
+                    skill_id=skill_id,
+                    **runtime.context.audit_fields,
+                )
             if no_match:
                 disclosure = "本轮法规检索正常完成，但当前法规库中未检索到可引用法条。以上属于一般性分析，不构成已经过法规核验的确定性法律结论。"
                 answer = draft.answer if _no_match_disclosure_present(draft.answer) else f"{draft.answer.rstrip()}\n\n## 检索说明\n\n{disclosure}"
                 draft = draft.model_copy(update={"answer": answer, "confidence": "low"})
             return {
                 "counsel_draft": draft,
+                "skill_outputs": merged_outputs,
                 "revision_count": state["revision_count"] + (1 if state["review_result"] else 0),
                 "model_call_count": runtime.context.metrics.model_call_count,
             }
         except Exception as exc:  # noqa: BLE001 - counsel failures use a safe user-facing fallback
+            for item in counsel_skills:
+                self._skill_event(
+                    runtime,
+                    item.summary.skill_id,
+                    "failed",
+                    "领域分析未完成，继续安全兜底回答",
+                )
             fallback_answer = _no_match_safe_answer(state) if no_match else (evidence.research_summary if evidence else "暂时无法形成完整法律意见。") + "\n\n当前回答生成失败，建议稍后重试或咨询专业律师。"
             fallback = CounselDraft(answer=fallback_answer, confidence="low", limitations=["回答生成或法规核验未完整完成"])
             return {
@@ -611,7 +780,16 @@ class LegalConsultationGraph:
     async def reviewer(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "reviewing", "message": "正在核验回答"}})
         try:
-            review = await self._invoke_json(runtime, "case_analyst_reviewer", REVIEW_PROMPT, _payload(state), ReviewResult)
+            skill_prompt = self.skill_registry.prompt_for(
+                self._active_skill_ids(state), "reviewer"
+            )
+            review = await self._invoke_json(
+                runtime,
+                "case_analyst_reviewer",
+                "\n\n".join(item for item in (REVIEW_PROMPT, skill_prompt) if item),
+                _payload(state),
+                ReviewResult,
+            )
         except Exception as exc:  # noqa: BLE001 - review failures finalize with explicit limitations
             review = ReviewResult(approved=False, revision_instruction="自动复核未完成，最终回答应保留风险提示。", next_action="finalize")
             return {

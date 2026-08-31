@@ -95,10 +95,12 @@ sequenceDiagram
 
 - token 只追加到本轮占位助手消息；
 - agent_status 清除旧 toolActivity；
+- skill_status 只更新当前 `ConversationKey` 的 `skillActivity`，展示服务端安全状态文本；
 - 成功 tool result 清除检索中提示；
 - citations 绑定当前助手消息；
 - memory_status 启动 MemoryJob 轮询；
 - message_end 强制清理 Agent 和工具状态；
+- message_end、error 或新一轮 Run 同时清理 Skill 状态，避免旧能力提示残留；
 - error 暂存，流结束后统一进入失败状态。
 
 ## 8. 记忆面板
@@ -142,6 +144,8 @@ MessageList 仅在用户距离底部不足 96px 时维持自动滚动；主动�
 - `frontend/src/test/MemoryPanel.test.tsx`
 
 生产构建命令：`npm run build`；组件测试命令：`npm test`。
+
+Skill 状态由 `frontend/src/types.ts::SkillActivity` 表示，`StatusNotice` 在工具状态之后、Agent 状态之前展示。前端不接收 Skill Prompt、工具策略或结构化 Skill 输出；测试明确验证页面只出现“正在审查证据准备情况”等安全文案。
 
 ## 13. 持久化任务恢复
 

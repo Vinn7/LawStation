@@ -91,6 +91,8 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 两个原子索引区分；跨运行复用 Baseline 时校验数据集、样本哈希、种子、Graph/Prompt 和索引
 版本，并在新报告中保留来源。这使面试中展示的指标可以追溯到一次确定的代码、数据和实验运行。
 
+Skill 启用后，咨询根 Trace 的 outputs 与最终 metadata 增加 `skill_ids/skill_versions`，便于按领域能力比较延迟、模型调用数和结果质量；完整 Skill Prompt、输出 Schema 和内部执行指令不上传。离线确定性 evaluator 新增 Skill selection precision/recall 与 policy compliance，24 条合成 fixture 只用于路由与安全边界验证，尚不能代表生产选择准确率。
+
 ## 用户反馈闭环
 
 回答赞踩先按 `tenant_id + user_id + message_id` 写入 SQLite，再异步同步 LangSmith。其他用户即使猜到消息 ID 也不能提交反馈。点踩 trace 可进入 Annotation Queue，经人工脱敏和标注后回流离线数据集。

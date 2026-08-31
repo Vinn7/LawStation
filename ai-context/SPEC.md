@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：3.7
-> 基线日期：2026-08-26
+> 版本：3.8
+> 基线日期：2026-08-31
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -352,6 +352,10 @@ AGENT_GLOBAL_CONCURRENCY
 AGENT_PER_USER_CONCURRENCY
 AGENT_PER_CONVERSATION_CONCURRENCY
 AGENT_QUEUE_TIMEOUT_SECONDS
+AGENT_SKILLS_ENABLED
+AGENT_SKILL_ROOT
+AGENT_MAX_ACTIVE_SKILLS
+AGENT_SKILL_STRICT_VALIDATION
 LLM_REQUEST_TIMEOUT_SECONDS
 LLM_MAX_RETRIES
 LLM_TEMPERATURE
@@ -553,6 +557,7 @@ SSE_HEARTBEAT_SECONDS
 - `tests/test_run.py`：前端过期检测与 `--no-build` 失败语义。
 - `frontend/src/test/sse.test.ts`：分块 SSE、全部事件解析和 HTTP 错误语义。
 - `tests/test_agent_runtime.py`：三 Agent 路由、工具研究、matched/no_match、chunk 级引用边界、确定性复核快速路径、MCP 内容块审计解析、共享 Runtime 隔离和并发准入。
+- `tests/test_skills.py`：Skill Registry、渐进式加载、角色/工具白名单、组合上限、输出 Schema、伪造 ID 拒绝和路由评测数据。
 - `frontend/src/test/App.test.tsx`：切换用户隔离显示、后台流继续、返回会话恢复进度和 no_match 工具状态清理。
 - `frontend/src/test/components.test.tsx`：输入快捷键、停止生成、索引降级和安全工具状态。
 - `frontend/src/test/MemoryPanel.test.tsx`：记忆面板用户限定加载、仅展示 active 最新事实和记忆治理。
@@ -612,6 +617,7 @@ SSE_HEARTBEAT_SECONDS
 11. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
 12. `backend/app/observability/langsmith.py::LangSmithObservability`：采样、隐私过滤、trace 与反馈。
 13. `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`：发布质量门禁。
+14. `backend/app/agent/skills.py::SkillRegistry`：运行时 Skill 加载、白名单解析、渐进式指令注入与输出校验。
 
 ## 18. Spec 维护规则
 
@@ -651,6 +657,7 @@ SSE_HEARTBEAT_SECONDS
 - **3.5 / 2026-08-26**：完成100条通用回归、300条Dense挑战和200条Reranker挑战的六组本地消融，共1,200次检索；正式报告记录Hybrid Recall@5 `86.67% → 96.33%`、BGE Hit@1 `95% → 97%`、精排应用率100%及降级率0%。
 - **3.6 / 2026-08-26**：移除评测Trace、Agent模型和Judge的月度硬阻断，保留实际用量账本、显式上传确认、生产Trace月度保护及全量追踪Session上限；补跑casual/clarification/matched/no_match/tool_error/memory六类Agent Fixture，配置门禁全部通过，检索状态和最新事实优先两个非门禁诊断均为83.33%。原始预算失败manifest保留，恢复结果单独归档，禁止覆盖审计历史。
 - **3.7 / 2026-08-26**：咨询主入口升级为 SQLite `AgentRun + AgentRunEvent` 持久化任务，并以独立 `AsyncSqliteSaver` 保存每个 Run 的 LangGraph super-step；新增租约恢复、取消、SSE sequence 重放和页面刷新恢复。RAG 增加 `law-search-v2` Envelope 与确定性 `RetrievalConfidenceGate`，Research 明确记录候选接受/拒绝；MemorySnapshot 与当前事实 override 进入 Graph State，并在服务端校验替换目标所有权。新增 200 条冻结检索校准集、30 条事实冲突集及离线网格校准脚本。当前 gate 配置标记为 `provisional`，只有运行 `scripts/calibrate_retrieval_gate.py --write` 且冻结验证集通过门禁后才可标记为已校准。
+- **3.8 / 2026-08-31**：引入 4 个版本化运行时 Agent Skill 与 2 个仓库开发 Skill；实现模型建议、服务端白名单/角色/工具/数量校验、Progressive Disclosure、请求级 Skill State、安全 SSE 状态、LangSmith 版本 metadata 和 24 条 Skill 路由 fixture。Skill 关闭或一般执行失败时保持三 Agent 主链路可用，越权工具和伪造输出由服务端拒绝。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 
@@ -669,3 +676,21 @@ SSE_HEARTBEAT_SECONDS
 - Case Analyst 的 `current_fact_overrides` 进入 Graph State；带 memory ID 的 override 必须用同一 SQL 同时校验 tenant、user、active 状态和作用域。
 - `FactBoundaryValidator` 发现回答继续使用旧金额、日期、名称等明确被替换值时，只回到 Counsel 修改一次，不重新检索。
 - 冻结校准门禁：status accuracy ≥95%、no-match precision/recall ≥90%、matched Recall@5 回退≤1pp；未实际运行并通过校准脚本前不得把 provisional 阈值写成实测达标。
+
+## 20. 运行时 Skill 与开发 Skill
+
+### 20.1 运行时能力
+
+- **[已实现]** `backend/app/agent/skills.py::SkillRegistry` 在应用启动时扫描 `skills/runtime/*/SKILL.md`，校验名称、SemVer、Agent 角色、工具白名单、输出 Schema、路径边界和内容摘要，并以应用级只读对象复用。
+- **[已实现]** Case Analyst 首轮只接收 Skill 名称、描述与触发语义；模型通过 `CaseAnalysis.requested_skill_ids` 提出建议，服务端按注册顺序、白名单和 `AGENT_MAX_ACTIVE_SKILLS` 最终裁决。只有选中后，完整 Skill 指令才通过 `prompt_for()` 注入获授权的 Graph 节点。
+- **[已实现]** 首期 Skill 为 `case-intake`、`evidence-audit`、`procedure-roadmap`、`document-readiness`。`procedure-roadmap` 只允许 Legal Research 继续使用现有 `search_laws/get_law_article`；其他 Skill 不获得工具权限。
+- **[已实现]** `LegalConsultationState.active_skills/skill_outputs` 与 `AgentInvocationContext.active_skills` 均为请求级数据，不写入共享 Graph、Registry 或其他用户上下文。Checkpoint 只保存本 Run 的结果。
+- **[已实现]** 普通解析/生成失败记录 `skill.execution.failed` 并 fail-open；未知 ID、未授权工具、越权角色和未选中输出被服务端拒绝。Skill 不得绕过 MCP，不得成为用户记忆或数据库 Session 的持有者。
+- **[已实现]** SSE `skill_status` 只包含 `skill_id/status/message`；前端只展示安全中文状态，不发送完整 Skill 指令、Schema 或工具参数。LangSmith 根 Trace metadata/outputs 保存 `skill_ids/skill_versions`，不保存完整 Skill Prompt。
+- **[部分实现]** 已生成 `lawstation-skills-v1` 24 条合成路由 fixture，并提供 selection precision/recall 与 policy compliance evaluator；尚未运行真实模型路由基准，因此不得宣称实际 Skill 选择准确率。
+
+### 20.2 仓库开发能力
+
+- **[已实现]** `.agents/skills/lawstation-spec-change/SKILL.md` 固化 SDD、最小原地修改、配置/API/迁移同步、测试、resume 同步和禁止自动启动服务的交付闭环。
+- **[已实现]** `.agents/skills/lawstation-eval-review/SKILL.md` 固化公平消融、版本/哈希冻结、安全门禁、时间戳归档与简历数字真实性约束。
+- 两个开发 Skill 随仓库版本化，并通过 `quick_validate.py` 结构校验；它们只约束开发过程，不进入线上 Agent Prompt。

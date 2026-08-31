@@ -10,6 +10,7 @@ from backend.app.agent.concurrency import AgentConcurrencyManager
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
+from backend.app.agent.skills import SkillRegistry
 from backend.app.api.routes import router
 from backend.app.core.config import get_settings
 from backend.app.core.logging import audit, setup_logging
@@ -57,8 +58,10 @@ async def lifespan(app: FastAPI):
     initialize_database()
     await initialize_engine()
     registry = MCPToolRegistry(observability=observability)
+    skill_registry = SkillRegistry()
     provider = LLMProvider()
     app.state.mcp_tool_registry = registry
+    app.state.skill_registry = skill_registry
     async with checkpoint_saver(get_settings()) as checkpointer:
         app.state.langgraph_checkpointer = checkpointer
         app.state.agent_runtime = AgentRuntime(
@@ -66,6 +69,7 @@ async def lifespan(app: FastAPI):
             provider,
             observability=observability,
             checkpointer=checkpointer,
+            skill_registry=skill_registry,
         )
         app.state.agent_concurrency = AgentConcurrencyManager()
         app.state.memory_tasks = MemoryTaskManager(provider, observability=observability)
@@ -106,7 +110,8 @@ app.include_router(router)
 def health():
     index = get_index_status()
     langsmith = getattr(app.state, "langsmith_observability", None)
-    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False), "langsmith": langsmith.status() if langsmith else {"enabled": False, "export_status": "uninitialized"}}
+    skills = getattr(app.state, "skill_registry", None)
+    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False), "langsmith": langsmith.status() if langsmith else {"enabled": False, "export_status": "uninitialized"}, "skills": skills.status_dict() if skills else {"enabled": False, "status": "uninitialized"}}
 
 
 app.mount("/mcp", mcp_app)

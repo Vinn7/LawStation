@@ -216,6 +216,58 @@ def completion_success(run: Any, example: Any) -> dict[str, Any]:
     return _feedback("completion_success", valid)
 
 
+def _active_skill_ids(run: Any) -> list[str]:
+    return [
+        str(item.get("skill_id"))
+        for item in _outputs(run).get("active_skills", [])
+        if isinstance(item, dict) and item.get("skill_id")
+    ]
+
+
+def skill_selection_precision(run: Any, example: Any) -> dict[str, Any]:
+    reference = _reference(example)
+    if "expected_skill_ids" not in reference:
+        return _feedback("skill_selection_precision", 1.0, "no skill reference")
+    expected = {str(item) for item in reference.get("expected_skill_ids", [])}
+    actual = set(_active_skill_ids(run))
+    score = len(expected & actual) / len(actual) if actual else float(not expected)
+    return _feedback(
+        "skill_selection_precision", score, f"expected={sorted(expected)}, actual={sorted(actual)}"
+    )
+
+
+def skill_selection_recall(run: Any, example: Any) -> dict[str, Any]:
+    reference = _reference(example)
+    if "expected_skill_ids" not in reference:
+        return _feedback("skill_selection_recall", 1.0, "no skill reference")
+    expected = {str(item) for item in reference.get("expected_skill_ids", [])}
+    actual = set(_active_skill_ids(run))
+    score = len(expected & actual) / len(expected) if expected else float(not actual)
+    return _feedback(
+        "skill_selection_recall", score, f"expected={sorted(expected)}, actual={sorted(actual)}"
+    )
+
+
+def skill_policy_compliance(run: Any, example: Any) -> dict[str, Any]:
+    del example
+    output = _outputs(run)
+    active = _active_skill_ids(run)
+    known = {"case-intake", "evidence-audit", "procedure-roadmap", "document-readiness"}
+    skill_outputs = output.get("skill_outputs", {})
+    output_ids = set(skill_outputs) if isinstance(skill_outputs, dict) else set()
+    tools_are_research_only = all(
+        isinstance(item, dict) and item.get("agent") == "legal_researcher"
+        for item in output.get("tool_trajectory", [])
+    )
+    valid = (
+        len(active) <= 2
+        and set(active) <= known
+        and output_ids <= set(active)
+        and tools_are_research_only
+    )
+    return _feedback("skill_policy_compliance", valid)
+
+
 DETERMINISTIC_EVALUATORS = [
     route_correctness,
     schema_validity,
@@ -234,4 +286,7 @@ DETERMINISTIC_EVALUATORS = [
     latest_fact_priority,
     tenant_isolation,
     completion_success,
+    skill_selection_precision,
+    skill_selection_recall,
+    skill_policy_compliance,
 ]
