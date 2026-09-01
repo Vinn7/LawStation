@@ -516,17 +516,43 @@ class LegalConsultationGraph:
         白名单、角色和数量校验。完整 SKILL.md 仅在选中后由 prompt_for 注入。
         """
 
-        # 模型输出只是建议；未知 ID、越权角色和超过数量上限的项会被拒绝。
+        # 步骤 1：读取 Analyst 的 Skill 选择建议。
+        # requested_skill_ids 来自 CaseAnalysis 的结构化模型输出，因此只能视为“不可信
+        # 建议”；模型不能凭一个字符串直接取得本地 Skill 指令或额外工具权限。
+        # 步骤 2：交给应用级 SkillRegistry 做确定性裁决。
+        # resolve() 不调用模型，也不进行向量/关键词搜索；它只接受启动时已经扫描并校验
+        # 的 Skill ID，按注册表固定顺序去重，并执行未知 ID、角色和最大数量限制。这里
+        # 没有指定 agent_role，是因为本阶段先确定“本轮全局激活集合”；具体节点稍后在
+        # prompt_for()/validate_outputs() 中还会再次按照 case_analyst/legal_counsel 等角色过滤。
         resolved = self.skill_registry.resolve(
             analysis.requested_skill_ids,
             audit_fields=runtime.context.audit_fields,
         )
-        # Graph State/Trace 只保存安全元数据与 digest，不保存完整 Skill 指令。
+
+        # 步骤 3：把内部 ResolvedSkill 转换成可以进入运行状态的公开元数据。
+        # public_skills() 只保留 ID、版本、描述和内容摘要，不包含 SKILL.md 完整指令。
+        # 这样 LangGraph Checkpoint、LangSmith metadata 和后续节点可以识别 Skill 版本，
+        # 又不会让内部 Prompt 因状态持久化或事件输出而泄露。
         active = self.skill_registry.public_skills(resolved)
+
+        # 步骤 4：将本轮激活结果写入请求级 Invocation Context。
+        # runtime.context 属于当前 AgentRun，不是共享 Graph 的实例字段；AgentRuntime 会用
+        # 这里的数据补充 Trace 和最终运行元数据。不同用户并发调用时各自持有独立 context。
         runtime.context.active_skills = active
+
+        # 步骤 5：继承当前 Graph State 中已经存在的 Skill 输出。
+        # 使用 dict() 创建浅拷贝，避免直接原地修改传入 State；节点返回 outputs 后，
+        # LangGraph 才会把它合并进 state.skill_outputs 并在节点边界写入 Checkpoint。
         outputs = dict(state.get("skill_outputs", {}))
+
+        # 步骤 6：逐个记录服务端最终接受的 Skill。
+        # 这里只发送选择状态，不执行 Skill，也不把完整 Prompt 写入审计或 SSE。
         for item in resolved:
+            # ResolvedSkill.summary 是启动时经过 Frontmatter、版本、权限和路径校验的摘要。
             skill_id = item.summary.skill_id
+
+            # 本地 JSONL 审计记录 ID、版本和 digest，便于重现本轮使用了哪个 Skill 版本；
+            # audit_fields 携带 request/tenant/user/conversation 关联信息，但不记录 Skill 正文。
             audit(
                 "skill.selection.accepted",
                 status="selected",
@@ -535,9 +561,19 @@ class LegalConsultationGraph:
                 content_digest=item.summary.content_digest,
                 **runtime.context.audit_fields,
             )
+
+            # custom stream 事件随后由 AgentRuntime/AgentRunManager 转换为可重放事件和 SSE。
+            # 前端只能看到安全的 skill_id、status 和中文提示，不能读取 Skill 内部指令。
             self._skill_event(runtime, skill_id, "selected")
+
+        # 步骤 7：判断是否需要立即执行 Analyst 专属的 case-intake Skill。
+        # 其他 Skill（如 evidence-audit、procedure-roadmap、document-readiness）主要作为
+        # 后续节点的约束或结构化输出协议，不在这里统一执行，以免绕过角色边界。
         if any(item.summary.skill_id == "case-intake" for item in resolved):
+            # 步骤 7.1：先向事件流声明 case-intake 已进入运行状态。
             self._skill_event(runtime, "case-intake", "running")
+
+            # 审计开始事件与完成/失败事件配对，用于统计 Skill 调用次数和定位失败阶段。
             audit(
                 "skill.execution.started",
                 status="started",
@@ -545,8 +581,17 @@ class LegalConsultationGraph:
                 **runtime.context.audit_fields,
             )
             try:
-                # case-intake 是 Analyst 角色的可选结构化调用，不允许工具。Schema
-                # 校验通过后才进入 skill_outputs；失败则移除输出并继续基础主链路。
+                # 步骤 7.2：按 case_analyst 角色加载 case-intake 的完整可信指令。
+                # prompt_for() 会再次调用 Registry.resolve(..., agent_role="case_analyst")，
+                # 未授权角色无法获得 Skill 正文。这一步体现 Progressive Disclosure：Analyst
+                # 首次选择时只看到目录摘要，真正选中并通过权限校验后才加载完整 SKILL.md。
+                # 步骤 7.3：组装本次 Skill 模型调用的结构化输入。
+                # _payload(state) 包含当前问题、记忆快照和已有 Graph 结果；新的
+                # case_analysis 由当前节点显式覆盖进去，保证 Skill 读取的是本轮最新分析。
+                # 步骤 7.4：通过统一的无工具模型边界执行 Skill。
+                # _invoke_json() 会检查模型调用额度、调用共享 ChatOpenAI.ainvoke()、提取
+                # AIMessage JSON，并用 CaseIntakeResult 做 Pydantic 校验。它没有 bind_tools，
+                # 所以 case-intake 不能调用 MCP，也不会进入 Research Agent 的工具循环。
                 result = await self._invoke_json(
                     runtime,
                     "skill_case_intake",
@@ -554,7 +599,13 @@ class LegalConsultationGraph:
                     _payload(state) | {"case_analysis": analysis.model_dump()},
                     CaseIntakeResult,
                 )
+
+                # 步骤 7.5：只有模型响应通过 JSON 与 Schema 校验后才写入输出集合。
+                # model_dump() 将 Pydantic 对象转换为可由 LangGraph Checkpoint 序列化的字典；
+                # 原始 AIMessage、模型内部字段和未经校验的文本都不会进入 Graph State。
                 outputs["case-intake"] = result.model_dump()
+
+                # 步骤 7.6：分别发送用户可见的安全完成状态和本地审计完成事件。
                 self._skill_event(runtime, "case-intake", "completed", "案情结构化完成")
                 audit(
                     "skill.execution.completed",
@@ -563,8 +614,18 @@ class LegalConsultationGraph:
                     **runtime.context.audit_fields,
                 )
             except Exception as exc:  # noqa: BLE001 - optional skill is fail-open
+                # 步骤 7.7：可选 Skill 失败采用 fail-open。
+                # 无论失败发生在模型请求、JSON 解析还是 Schema 校验，都先删除可能遗留的
+                # case-intake 输出，避免半成品被后续 Counsel 或 Checkpoint 当成可信结果。
                 outputs.pop("case-intake", None)
+
+                # 告知前端该增强能力未完成，但基础三 Agent 链路会继续执行；这里不会把
+                # Skill 异常升级成整轮咨询失败，也不会触发 MCP 工具重试。
                 self._skill_event(runtime, "case-intake", "failed", "案情结构化未完成，继续基础分析")
+
+                # 审计只记录异常类型和经过 summary() 截断/清洗的摘要，不上传完整模型响应、
+                # Skill Prompt 或用户敏感正文。若属于越权 Skill/工具，Registry 会更早拒绝，
+                # 不会进入这个普通执行失败分支。
                 audit(
                     "skill.execution.failed",
                     level=logging.WARNING,
@@ -574,6 +635,10 @@ class LegalConsultationGraph:
                     error=summary(str(exc)),
                     **runtime.context.audit_fields,
                 )
+
+        # 步骤 8：把“激活的安全元数据”和“已验证的 Skill 输出”返回给 case_analyst。
+        # 调用方会将二者写入 LegalConsultationState；启用了但无需立即执行的 Skill 可以只有
+        # active 元数据而没有 outputs，这是正常状态，后续节点会按各自角色加载和使用它们。
         return active, outputs
 
     async def case_analyst(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
