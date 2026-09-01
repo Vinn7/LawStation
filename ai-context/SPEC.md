@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：3.8
-> 基线日期：2026-08-31
+> 版本：4.0
+> 基线日期：2026-09-01
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -658,6 +658,8 @@ SSE_HEARTBEAT_SECONDS
 - **3.6 / 2026-08-26**：移除评测Trace、Agent模型和Judge的月度硬阻断，保留实际用量账本、显式上传确认、生产Trace月度保护及全量追踪Session上限；补跑casual/clarification/matched/no_match/tool_error/memory六类Agent Fixture，配置门禁全部通过，检索状态和最新事实优先两个非门禁诊断均为83.33%。原始预算失败manifest保留，恢复结果单独归档，禁止覆盖审计历史。
 - **3.7 / 2026-08-26**：咨询主入口升级为 SQLite `AgentRun + AgentRunEvent` 持久化任务，并以独立 `AsyncSqliteSaver` 保存每个 Run 的 LangGraph super-step；新增租约恢复、取消、SSE sequence 重放和页面刷新恢复。RAG 增加 `law-search-v2` Envelope 与确定性 `RetrievalConfidenceGate`，Research 明确记录候选接受/拒绝；MemorySnapshot 与当前事实 override 进入 Graph State，并在服务端校验替换目标所有权。新增 200 条冻结检索校准集、30 条事实冲突集及离线网格校准脚本。当前 gate 配置标记为 `provisional`，只有运行 `scripts/calibrate_retrieval_gate.py --write` 且冻结验证集通过门禁后才可标记为已校准。
 - **3.8 / 2026-08-31**：引入 4 个版本化运行时 Agent Skill 与 2 个仓库开发 Skill；实现模型建议、服务端白名单/角色/工具/数量校验、Progressive Disclosure、请求级 Skill State、安全 SSE 状态、LangSmith 版本 metadata 和 24 条 Skill 路由 fixture。Skill 关闭或一般执行失败时保持三 Agent 主链路可用，越权工具和伪造输出由服务端拒绝。
+- **3.9 / 2026-08-31**：增加18类多轮对话场景蓝图和独立DeepSeek JSON生成器；模型只生成合成用户话术，测试动作、预期事件和Skill权限由服务端模板控制。一次性生成并冻结36条场景，记录数据集/蓝图SHA、19次实际模型调用和1次定向泄漏修复；场景尚未执行，不能作为Agent通过率。
+- **4.0 / 2026-09-01**：增加默认关闭的前端“场景观察模式”；后端仅加载`evals/conversations/`白名单冻结JSONL，前端为Actor/会话创建专用数据，逐步执行真实AgentRun，支持取消、SSE断开/按sequence重连、消息/记忆检查和预期/实际对照。Fixture不注入真实服务，相关断言标记`inconclusive`；观察结果不等于自动化通过率。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 
@@ -694,3 +696,19 @@ SSE_HEARTBEAT_SECONDS
 - **[已实现]** `.agents/skills/lawstation-spec-change/SKILL.md` 固化 SDD、最小原地修改、配置/API/迁移同步、测试、resume 同步和禁止自动启动服务的交付闭环。
 - **[已实现]** `.agents/skills/lawstation-eval-review/SKILL.md` 固化公平消融、版本/哈希冻结、安全门禁、时间戳归档与简历数字真实性约束。
 - 两个开发 Skill 随仓库版本化，并通过 `quick_validate.py` 结构校验；它们只约束开发过程，不进入线上 Agent Prompt。
+
+## 21. 多轮对话场景与观察模式
+
+- **[已实现]** 运行时开关为`TEST_SCENARIOS_ENABLED=false`；`TEST_SCENARIO_DATA_PATHS`是优先白名单，旧`TEST_SCENARIO_DATA_PATH`仅作兼容回退，`TEST_SCENARIO_STEP_TIMEOUT_SECONDS`只控制前端单步等待上限。
+- **[已实现]** `run.py --test-scenarios/--no-test-scenarios`互斥且只覆盖当前进程；开启时在Ollama、TEI和Uvicorn之前校验冻结数据集并打印Dataset ID、样本数和入口位置，不修改`.env`。
+- **[已实现]** `backend/app/evaluation/conversation_scenarios.py` 定义18类确定性场景蓝图，覆盖路由、matched/no-match/tool-error、4个运行时Skill、记忆替换/隔离、多用户切换、取消、SSE重连和同会话互斥。
+- **[已实现]** `scripts/generate_conversation_scenarios.py` 提供 `prepare/generate/validate/freeze` 四阶段命令。DeepSeek 使用非流式、关闭Thinking的JSON Output；只允许填写标题和用户消息，不能生成Actor、会话、API动作、事件断言、Skill ID或工具权限。
+- **[已实现]** 生成结果必须通过Pydantic结构、动作/Skill白名单、重复、长度、手机号/身份证/银行卡/邮箱/密钥、Prompt Injection及法规法名/条号/连续原文泄漏校验。单个变体失败时只定向修复该变体，已通过同级变体保持不变。
+- **[已实现]** `evals/conversations/lawstation-dialogue-scenarios-v1.jsonl` 当前冻结36条合成场景，manifest记录`synthetic=true`、`human_verified=false`、Prompt版本、模型、类别和内容哈希。
+- **[已实现]** `ScenarioCatalog` 启用时校验白名单路径、符号链接边界、JSONL Schema、ID唯一性、manifest样本数和SHA256；任一数据集无效都阻止测试模式启动。关闭时不读取文件，场景API统一返回404。
+- **[已实现]** 前端使用`checking/ready/disabled/error`显式可用状态；仅后端404时隐藏入口，其他加载失败在顶部栏和侧栏显示可重试诊断。`ScenarioPanel/ScenarioExecutor`固定primary/secondary用户，为每个Actor/逻辑会话创建`[场景]`前缀专用会话，每次点击只执行一个步骤。普通聊天与场景共用`startRun/followRun`、SSE parser和`ConversationRuntime`，不复制第二套状态机。
+- **[已实现]** 场景断言遵循“有证据才通过”：未知字段或缺少Checkpoint/来源消息时为`inconclusive`；后台运行和跨会话并发保存实际Run重叠证据；SSE重连要求服务端已形成事件缺口并核对订阅epoch、游标和重复sequence；记忆断言使用持久化消息ID与`source_message_id`，不使用空集合恒真判断。
+- **[已实现]** 安全outcome API只返回终态、事件名、retrieval status、Skill ID、引用与调用计数；不返回完整Checkpoint、Prompt或推理内容。场景清理API只允许删除当前所有者的`[场景]`会话，活动Run返回409。
+- **[部分实现]** AgentRun可跨刷新继续，但场景步骤游标和对照结果仅在当前页面生命周期保留。仍未提供自动连续Runner，不得把36条样例写成端到端通过数。
+- **[已实现]** `resume/conversation-scenario-generation-guide.md` 同时记录生成/冻结和手工场景观察流程。
+- **[禁止]** 应用启动时自动生成场景、让模型自由生成测试动作、上传真实用户事实作为样例，或用合成场景冒充真实用户/律师标注数据。

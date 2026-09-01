@@ -1,5 +1,5 @@
-import { BookOpenText, BrainCircuit, ChevronDown, MessageSquareText, Plus, Scale, X } from 'lucide-react';
-import type { AgentStage, Conversation, User } from '../types';
+import { Beaker, BookOpenText, BrainCircuit, ChevronDown, MessageSquareText, Plus, RotateCcw, Scale, X } from 'lucide-react';
+import type { AgentStage, Conversation, ScenarioAvailability, User } from '../types';
 
 interface SidebarProps {
   users: User[];
@@ -16,6 +16,9 @@ interface SidebarProps {
   onOpenConversation: (id: string) => void;
   onClose: () => void;
   onOpenMemories: () => void;
+  scenarioAvailability: ScenarioAvailability;
+  onOpenScenarios: () => void;
+  onRetryScenarios: () => void;
 }
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
@@ -45,6 +48,9 @@ export function Sidebar({
   onOpenConversation,
   onClose,
   onOpenMemories,
+  scenarioAvailability,
+  onOpenScenarios,
+  onRetryScenarios,
 }: SidebarProps) {
   return (
     <>
@@ -104,6 +110,20 @@ export function Sidebar({
           <BrainCircuit size={17} />
           管理我的记忆
         </button>
+        {scenarioAvailability.status !== 'disabled' && (
+          <button
+            className={`memory-manage-button scenario-open-button is-${scenarioAvailability.status}`}
+            onClick={scenarioAvailability.status === 'ready' ? onOpenScenarios : onRetryScenarios}
+            disabled={!userId || disabled || scenarioAvailability.status === 'checking'}
+            title={scenarioAvailability.message}
+          >
+            <Beaker size={17} />
+            {scenarioAvailability.status === 'ready' ? '场景观察模式'
+              : scenarioAvailability.status === 'checking' ? '正在检查场景模式'
+                : '场景模式加载失败'}
+            {scenarioAvailability.status === 'error' && <RotateCcw size={14} aria-label="重试加载场景" />}
+          </button>
+        )}
 
         <div className="conversation-section-heading">
           <span>历史对话</span>

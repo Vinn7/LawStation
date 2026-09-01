@@ -71,7 +71,7 @@ flowchart TB
 | RAG | 法规加载、索引构建、混合召回、精确查询 | `LawSearchEngine` |
 | Memory | 上下文选择、异步提取、摘要和替换 | `MemoryService`、`MemoryTaskManager` |
 | Data | 所有权约束、原始消息、审计和迁移 | `OwnedRepository`、`db/models.py` |
-| Evaluation | 进程级追踪、确定性指标、Judge、预算、Codex 源法条挑战集、资格冻结和分组报告 | `LangSmithObservability`、`ReportRun`、`prepare_source_pack` |
+| Evaluation | 进程级追踪、确定性指标、Judge、挑战集、资格冻结、分组报告与多轮场景生成 | `LangSmithObservability`、`ReportRun`、`prepare_source_pack`、`blueprint_definitions` |
 
 ## 3. 顶层目录职责
 
@@ -91,6 +91,7 @@ flowchart TB
 | `alembic/` | SQLite 版本化迁移 | 启动时进入 |
 | `scripts/` | 建库、数据集和评测命令 | 手工命令进入 |
 | `evals/` | 数据集、批次、报告与学习指南 | 评测使用 |
+| `evals/conversations/` | 18类蓝图、DeepSeek生成候选、冻结多轮场景与manifest | 后续流程测试输入，不进入线上咨询 |
 | `data/knowledge/` | 法规源数据 | RAG 使用 |
 | `data/indexes/` | 生成的向量索引与 staging | RAG 使用，不作为源码分析 |
 | `data/runtime/` | SQLite 和资源用量账本 | 运行时使用 |
@@ -119,6 +120,8 @@ flowchart LR
 
 Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持协议边界。评测模块 `backend/app/evaluation/targets.py::RetrievalTarget` 会直接创建 `LawSearchEngine` 做 RAG 消融，这是评测专用路径，不是生产 Agent 绕过 MCP。
 
+多轮对话场景由`conversation_scenarios.py::blueprint_definitions`固定Actor、会话、动作和断言，模型只生成用户话术。运行时`ScenarioCatalog`仅在显式开关或`run.py --test-scenarios`下加载`evals/conversations/`内的冻结白名单，并在外部模型进程启动前预检。前端顶部栏/侧栏共享`ScenarioAvailability`，只有明确404才隐藏入口；`ScenarioPanel`逐步调用真实AgentRun和持久化SSE，但不自动连续执行。场景控制状态与`ConversationRuntime`分离，底层发送/订阅逻辑共用同一主链；断言采用Run重叠、SSE sequence和记忆来源消息等证据，缺证据时为`inconclusive`。因此可描述“可交互场景观察与安全对照”，仍不能描述“36条端到端测试通过”。
+
 ## 5. 生命周期与状态边界
 
 ### 应用级共享
@@ -131,6 +134,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - `MemoryTaskManager` 单 Worker。
 - `LangSmithObservability`。
 - `SkillRegistry` 的可信 Skill 摘要、完整指令和内容 digest。
+- `ScenarioCatalog` 的已校验数据集摘要和安全场景内容（仅开关启用时）。
 
 其中 `LangSmithObservability` 只共享 Client、脱敏规则、进程 Session Budget 和随机 Bridge Token；当前 RunTree、Trace config、用户/会话哈希和 RAG 父上下文均为请求级数据。MCP 传播只接受同进程 Client 携带的内存 Bridge Token，外部 MCP 调试请求不会被拼接进咨询 Trace。
 
@@ -145,6 +149,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 - 模型/工具调用计数和 SSE 流。
 - 本 Run 的 `active_skills` 与经 Schema 校验的 `skill_outputs`。
 - 数据库 Session。
+- `ScenarioSession`、Actor/会话映射、步骤游标与对照结果（浏览器页面级）。
 
 关键类型：`backend/app/agent/state.py::AgentInvocationContext`。共享 Graph 中没有保存用户、会话、当前消息或 SQLAlchemy Session。
 
@@ -206,7 +211,7 @@ flowchart LR
     SSE --> UI
 ```
 
-双层职责必须分开：`AgentRunManager` 管所有权、队列、租约、取消、事件和最终消息；`AsyncSqliteSaver` 管 Graph super-step 与节点级恢复。每个 Run 使用独立 thread ID，业务消息与结构化记忆仍是跨轮上下文唯一事实源。关键 symbol：`AgentRunManager`、`checkpoint_saver`、`AgentRuntime.stream`。
+双层职责必须分开：`AgentRunManager` 管所有权、队列、租约、取消、事件和最终消息；`AsyncSqliteSaver` 管 Graph super-step 与节点级恢复。每个 Run 使用独立 thread ID，业务消息与结构化记忆仍是跨轮上下文唯一事实源。关键 symbol：`AgentRunManager`、`checkpoint_saver`、`AgentRuntime.stream`。状态机、租约、幂等窗口和断线/重启恢复的完整代码级分析见 [Agent 任务持久化](agent-task-persistence.md)。
 
 ## 9. 可插拔 Skill 架构（2026-08-31）
 

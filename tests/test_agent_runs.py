@@ -38,6 +38,17 @@ def _manager():
     return AgentRunManager(None, None, None, None, settings=settings)
 
 
+class _ScenarioRuntime:
+    async def scenario_outcome(self, thread_id):
+        assert thread_id.startswith("agent-run:")
+        return {
+            "checkpoint_available": True,
+            "retrieval_status": "matched",
+            "selected_skill_ids": ["evidence-audit"],
+            "citation_count": 1,
+        }
+
+
 def test_agent_run_creation_is_owner_scoped_and_conversation_unique(monkeypatch):
     sessions = _database(monkeypatch)
     manager = _manager()
@@ -71,6 +82,31 @@ async def test_queued_run_cancel_is_replayable_and_idempotent(monkeypatch):
     assert run.status == "interrupted"
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].event_type == "message_end"
+
+
+@pytest.mark.asyncio
+async def test_scenario_outcome_is_owner_scoped_and_checkpoint_safe(monkeypatch):
+    _database(monkeypatch)
+    manager = _manager()
+    manager.runtime = _ScenarioRuntime()
+    owner = RequestUserContext("tenant", "user-a", "request-a")
+    other = RequestUserContext("tenant", "user-b", "request-b")
+    created = manager.create(owner, "conversation-a", "问题")
+
+    outcome = await manager.scenario_outcome(owner, created.id)
+
+    assert outcome == {
+        "terminal_status": "queued",
+        "observed_events": ["message_start", "agent_status"],
+        "retrieval_status": "matched",
+        "selected_skill_ids": ["evidence-audit"],
+        "citation_count": 1,
+        "model_call_count": 0,
+        "tool_call_count": 0,
+        "last_event_sequence": 2,
+        "checkpoint_available": True,
+    }
+    assert await manager.scenario_outcome(other, created.id) is None
 
 
 @pytest.mark.asyncio

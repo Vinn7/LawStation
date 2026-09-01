@@ -1,3 +1,5 @@
+"""各 Agent 结构化输出协议及证据链数据模型。"""
+
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -68,6 +70,7 @@ class CaseAnalysis(BaseModel):
 
 
 class EvidenceItem(BaseModel):
+    """经代码映射回真实 MCP 候选后，允许进入 EvidencePacket 的 chunk 证据。"""
     document_id: str
     chunk_id: str = ""
     law_name: str = ""
@@ -100,6 +103,11 @@ class EvidenceSelectionResult(BaseModel):
 
 
 class EvidencePacket(BaseModel):
+    """Research 向 Counsel/Reviewer 交付的唯一法规证据边界。
+
+    candidate_status 描述召回候选，evidence_status 描述候选是否被采纳，最终
+    retrieval_status 再区分 matched、正常 no_match 与工具不可用/异常。
+    """
     retrieval_status: Literal["matched", "no_match", "tool_unavailable", "tool_error"] = "no_match"
     candidate_status: Literal["matched", "no_match"] = "no_match"
     evidence_status: Literal["accepted", "rejected", "unavailable", "error"] = "rejected"
@@ -140,6 +148,7 @@ class EvidencePacket(BaseModel):
 
 
 class CounselClaim(BaseModel):
+    """草稿中的单项论证及其证据 ID；Finalize 据此筛选实际使用的 Citation。"""
     claim: str
     evidence_chunk_ids: list[str] = Field(default_factory=list)
     # Backward-compatible input for older prompts/evaluation fixtures. New
@@ -167,6 +176,7 @@ class ReviewResult(BaseModel):
 
 
 class Citation(BaseModel):
+    """最终用户可见引用；元数据必须来自 EvidencePacket 中真实 chunk。"""
     document_id: str
     chunk_id: str = ""
     law_name: str = ""

@@ -1,3 +1,5 @@
+"""LangChain Agent 中间件：限制模型/工具调用并记录脱敏工具审计。"""
+
 import asyncio
 import json
 import logging
@@ -20,12 +22,15 @@ class AgentModelLimitError(RuntimeError):
 
 
 class InvocationModelLimitMiddleware(AgentMiddleware):
+    """在每次 Research Agent 模型调用前更新请求级总模型计数。"""
     """Count model calls across the entire three-agent graph invocation."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def abefore_model(self, state, runtime):
+        # 该计数跨外层 Graph 节点共享；LangChain 自带 ModelCallLimitMiddleware
+        # 还会限制 Research 子 Agent 自己的循环，两者作用域不同。
         context = runtime.context
         if context.metrics.model_call_count >= self.settings.agent_max_model_calls:
             raise AgentModelLimitError("本轮模型调用次数已达到上限")
@@ -89,6 +94,7 @@ def _persist_tool_audit(
     status: str,
     duration_ms: int,
 ) -> None:
+    """用独立短 Session 保存工具元数据，避免异步模型期间持有业务事务。"""
     metadata = result_metadata(result)
     with SessionLocal() as db:
         db.add(
@@ -119,6 +125,7 @@ def _persist_tool_audit(
 
 
 class ToolAuditMiddleware(AgentMiddleware):
+    """包裹每一次真实 LangChain Tool Call，统一超时、错误和审计语义。"""
     def __init__(
         self,
         registry: MCPToolRegistry,
@@ -128,6 +135,8 @@ class ToolAuditMiddleware(AgentMiddleware):
         self.settings = settings or get_settings()
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        # request 来自 create_agent 识别出的 tool_call；handler 才会通过 MCP Adapter
+        # 执行远程工具。模型不能借此修改 tenant/user/conversation 身份。
         context = request.runtime.context
         call = request.tool_call
         name = call["name"]
@@ -159,6 +168,8 @@ class ToolAuditMiddleware(AgentMiddleware):
         status = "success"
         business_error = False
         try:
+            # wait_for 对单次工具设置硬超时。成功和业务失败都会得到 ToolMessage，
+            # 使模型可以基于失败状态继续形成受控回答。
             message = await asyncio.wait_for(
                 handler(request), timeout=self.settings.mcp_tool_timeout_seconds
             )
@@ -183,7 +194,7 @@ class ToolAuditMiddleware(AgentMiddleware):
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 **fields,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - tool failures must become safe ToolMessages
             status = "error"
             result = f"工具调用失败：{summary(str(exc))}"
             message = ToolMessage(
@@ -192,6 +203,8 @@ class ToolAuditMiddleware(AgentMiddleware):
                 name=name,
                 status="error",
             )
+            # 连接、协议或未知 Schema 异常可能代表工具目录过期；只标记 Registry
+            # stale，当前调用不自动重试，避免未来副作用工具被重复执行。
             self.registry.invalidate(f"{type(exc).__name__}: {exc}", fields)
             audit(
                 "tool.call.failed",
@@ -205,11 +218,12 @@ class ToolAuditMiddleware(AgentMiddleware):
             )
         duration_ms = int((time.perf_counter() - started) * 1000)
         if context.persist_tool_audit:
+            # 审计写库失败必须 fail-open，不能改变真实工具结果或中断用户回答。
             try:
                 await asyncio.to_thread(
                     _persist_tool_audit, context, name, args, result, status, duration_ms
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - audit persistence must not fail the tool call
                 audit(
                     "tool.call.audit_failed",
                     level=logging.ERROR,

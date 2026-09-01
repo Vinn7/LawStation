@@ -96,12 +96,19 @@ sequenceDiagram
 - token 只追加到本轮占位助手消息；
 - agent_status 清除旧 toolActivity；
 - skill_status 只更新当前 `ConversationKey` 的 `skillActivity`，展示服务端安全状态文本；
+
 - 成功 tool result 清除检索中提示；
 - citations 绑定当前助手消息；
 - memory_status 启动 MemoryJob 轮询；
 - message_end 强制清理 Agent 和工具状态；
 - message_end、error 或新一轮 Run 同时清理 Skill 状态，避免旧能力提示残留；
 - error 暂存，流结束后统一进入失败状态。
+
+### 7.1 场景观察
+
+场景观察模式是“每次点击一步”的人工观察器，不是自动连续Runner。前端先把后端能力探测建模为`checking/ready/disabled/error`：只有明确404才隐藏；其他异常会在顶部栏和侧栏显示可重试诊断，避免接口异常被误认为功能不存在。`ScenarioPanel`负责数据集/类别/场景选择、Actor和预期/实际展示；`ScenarioExecutor`创建`[场景]`专用会话，并逐步执行发送、用户/会话切换、等待、取消、SSE断开/重连和消息/记忆检查。
+
+普通聊天与场景共用`startRun/attachRun/followRun`、`consumeSse`和`ConversationRuntime`，避免复制第二套状态机。`disconnect_stream`只停止浏览器订阅；重连记录subscription epoch、连接游标和首个接收sequence，并要求服务端在断开期间已经形成可重放事件。未知预期、缺少安全Outcome或来源消息时返回`inconclusive`，不会空检查后误判通过。记忆检查以真实消息ID和`source_message_id`验证最新事实与会话隔离。Fixture不注入真实服务，仅依赖Fixture的结果显示`inconclusive`。`ScenarioSession`独立保存步骤游标和对照结果；页面刷新后AgentRun仍可在普通会话恢复，但场景游标不自动恢复。
 
 ## 8. 记忆面板
 
@@ -142,6 +149,7 @@ MessageList 仅在用户距离底部不足 96px 时维持自动滚动；主动�
 - `frontend/src/test/App.test.tsx`
 - `frontend/src/test/components.test.tsx`
 - `frontend/src/test/MemoryPanel.test.tsx`
+- `frontend/src/test/scenarioExecutor.test.ts`
 
 生产构建命令：`npm run build`；组件测试命令：`npm test`。
 

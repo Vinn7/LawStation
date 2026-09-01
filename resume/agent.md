@@ -228,6 +228,12 @@ Case Analyst 的结构化输出新增 `requested_skill_ids`。`SkillRegistry.cat
 
 `case-intake` 使用独立结构化调用；Counsel 返回的 `skill_outputs` 必须通过注册表绑定的 Pydantic Schema，未选中或伪造 Skill 输出会被丢弃。`procedure-roadmap` 即使需要法条，也只能由 Legal Research 通过既有 MCP 工具获得证据。一般 Skill 执行失败会发送安全 `skill_status` 后回到基础链路；安全策略违规不会降级为自由模型输出。
 
+## 多轮流程样例
+
+`backend/app/evaluation/conversation_scenarios.py::blueprint_definitions` 将Agent流程拆成18类合成场景，覆盖直接回答、澄清、matched/no-match/tool-error、Skill选择、最新事实覆盖、跨会话记忆、多用户后台任务、取消、SSE重放和409互斥。DeepSeek只生成每轮用户话术，动作和预期事件来自确定性模板，避免模型自行定义测试结论。
+
+当前`lawstation-dialogue-scenarios-v1`含36条冻结样例，并已提供默认关闭的前端场景观察模式。用户可逐步触发真实AgentRun，观察Agent/Skill/工具事件、SSE重放、取消及记忆结果；系统不会自动连续跑完数据集，也尚未实跑36条，因此不构成Agent质量或流程通过率数据。
+
 关键 symbol：`SkillRegistry`、`LegalConsultationGraph._activate_skills`、`CaseAnalysis.requested_skill_ids`、`CounselDraft.skill_outputs`。
 
 ## 17. Skill 测试与当前边界

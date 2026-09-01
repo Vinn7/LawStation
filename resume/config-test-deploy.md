@@ -55,11 +55,14 @@ AGENT_SKILL_STRICT_VALIDATION=true
 | 日志 | 目录、级别、轮转和摘要长度 |
 | LangSmith | `config/all/off` 运行模式、Session 根 Trace 上限、采样、隐私、Judge 和生产 Trace 月度保护 |
 | Eval | 实际用量账本、缓存和时间戳报告目录；不设月度硬上限 |
+| Dialogue Scenarios | `TEST_SCENARIOS_ENABLED/DATA_PATHS/STEP_TIMEOUT`控制运行时观察；`GENERATOR_MODEL/TEMPERATURE/MAX_CALLS/VARIANTS/SEED`只由显式生成脚本使用 |
 | Durable Run | `AGENT_RUN_LEASE_SECONDS/RECOVERY_MAX_ATTEMPTS/WORKER_POLL_SECONDS` |
 | LangGraph | `LANGGRAPH_CHECKPOINT_ENABLED/PATH/RETENTION_DAYS/STRICT_MSGPACK` |
 | Retrieval Gate | `RAG_MATCH_GATE_ENABLED/CONFIG_PATH/REQUIRED` |
 
 密钥只应存在 `.env`；`.env.example` 提供空值模板。前端使用同源 `/api`，没有构建期 API Key。
+
+场景观察默认关闭。开发时优先使用`python run.py --test-scenarios`临时开启；`--no-test-scenarios`可强制关闭。两个参数互斥、只作用当前进程，启动器在外部模型进程前完成数据集预检。前端非404加载错误会保留诊断和重试入口。
 
 ## 2. Python 与 Node 环境
 
@@ -122,6 +125,9 @@ npm run build
 | `scripts/run_langsmith_eval.py` | 单次 learn/smoke/compare/release | Profile 决定 |
 | `scripts/run_staged_langsmith_eval.py` | 分阶段对比与实际用量记录 | 需要显式上传确认，不受月度累计值阻断 |
 | `scripts/run_resume_rag_challenge_eval.py` | 回归测试、数据校验、资格冻结、通用/Dense/BGE 消融、6类 Agent 冒烟、硬门禁与简历结论归档 | 本地 Ollama + TEI；冒烟少量 DeepSeek；不上传 LangSmith、不调用 Judge |
+| `scripts/generate_conversation_scenarios.py` | 18类蓝图准备、DeepSeek JSON话术生成、确定性校验、定向修复和36条多轮场景冻结 | prepare/validate/freeze无外部调用；generate显式调用DeepSeek |
+
+多轮场景生成的逐步命令、checkpoint续跑、文件产物，以及前端观察模式的开关/清理步骤见`resume/conversation-scenario-generation-guide.md`。生成脚本不执行Agent；只有用户启用开关并在页面逐步点击时，才会使用真实Agent/MCP/RAG资源。
 
 2026-08-26实跑说明：六组RAG消融完成后，旧月度上限曾在外部调用前阻止6条Agent冒烟。移除评测
 硬上限后已补跑六类Fixture，项目配置门禁通过。原始`run-manifest.json`仍保留失败审计，恢复事实
@@ -164,6 +170,7 @@ Pytest 配置位于 `pyproject.toml`，测试均在 `tests/`。
 | JSONL 审计 | `test_audit_logging.py` |
 | LangSmith | `test_langsmith_observability.py`、`test_agent_runtime.py`（预算、开关、MCP header 传播） |
 | 评测用量/报告 | `test_eval_resource_budget.py`、`test_eval_reporting.py`、`test_challenge_datasets.py` |
+| 多轮场景 | `test_conversation_scenarios.py`验证生成/冻结；`test_scenario_catalog.py/test_scenario_cleanup.py/test_agent_runs.py`验证白名单、SHA、所有权、安全outcome与清理；`scenarioExecutor.test.ts`验证对照规则 |
 | 启动器 | `test_run.py` |
 
 绝大多数外部服务通过 fake/mock 隔离，不应在常规测试中消耗模型额度。

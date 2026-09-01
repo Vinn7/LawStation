@@ -105,6 +105,12 @@ SSE comment `: heartbeat` 不属于应用事件，`frontend/src/sse.ts::parseSse
 
 `skill_status` 只允许公开 `skill_id/status/message`，不包含 `SKILL.md` 正文、输出 Schema、工具权限或模型生成的内部数据。AgentRun 模式会像其他非正文事件一样将其写入 `agent_run_events` 并分配递增 sequence，因此刷新后可以重放，但不会把 Skill 中间结果当作聊天消息。
 
+多轮场景观察增加了一组默认关闭的`/api/test-scenarios/*`接口：数据集/场景为只读，outcome按`tenant_id+user_id+run_id`返回安全结果摘要，清理接口只能删除当前所有者的`[场景]`会话。安全摘要包含终态、事件名、retrieval status、Skill ID、引用与模型/工具调用计数，不包含完整Graph State、Prompt和推理内容。
+
+前端将数据集接口的404解释为“功能关闭”，而401、5xx、网络失败和空数据集均解释为可重试错误；因此非关闭类错误不会再导致入口静默消失。启动参数只改变进程配置，不新增绕过所有权的调试API。
+
+前端场景步骤仍复用前述AgentRun创建、SSE sequence重放、cancel和active-run语义，不存在第二条问答API。活动Run存在时场景清理返回409；否则同时删除会话级消息、记忆、MemoryJob、AgentRun/事件、工具/检索审计和LangGraph Checkpoint。模式关闭时所有场景API统一返回404。
+
 ## 6. “流式输出”的真实语义
 
 **已验证**：Agent 节点状态、工具状态和 heartbeat 是实时的；最终回答正文不是 DeepSeek token 原样转发。

@@ -5,7 +5,7 @@ import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from backend.app.agent.concurrency import (
@@ -18,7 +18,16 @@ from backend.app.agent.service import AgentService
 from backend.app.core.config import get_settings
 from backend.app.core.context import RequestUserContext, get_user_context
 from backend.app.core.logging import audit, summary
-from backend.app.db.models import Conversation, MemoryJob, Message, MessageFeedback, User
+from backend.app.db.models import (
+    AgentRun,
+    Conversation,
+    MemoryJob,
+    Message,
+    MessageFeedback,
+    RetrievalTrace,
+    ToolCallRecord,
+    User,
+)
 from backend.app.db.session import SessionLocal, get_db
 from backend.app.schemas import (
     ChatRequest,
@@ -37,11 +46,115 @@ from backend.app.services.repositories import OwnedRepository
 from mcp_servers.law_rag.server import get_index_status
 
 router = APIRouter(prefix="/api")
+SCENARIO_CONVERSATION_PREFIX = "[场景] "
 
 
 @router.get("/index/status")
 def index_status():
     return get_index_status()
+
+
+def _scenario_catalog(request: Request):
+    catalog = getattr(request.app.state, "scenario_catalog", None)
+    if catalog is None or not catalog.enabled:
+        raise HTTPException(404, "场景观察模式未启用")
+    return catalog
+
+
+@router.get("/test-scenarios/datasets")
+def scenario_datasets(request: Request, _ctx=Depends(get_user_context)):
+    return _scenario_catalog(request).datasets()
+
+
+@router.get("/test-scenarios/datasets/{dataset_id}/scenarios")
+def scenario_summaries(dataset_id: str, request: Request, _ctx=Depends(get_user_context)):
+    result = _scenario_catalog(request).scenario_summaries(dataset_id)
+    if result is None:
+        raise HTTPException(404, "测试数据集不存在")
+    return result
+
+
+@router.get("/test-scenarios/datasets/{dataset_id}/scenarios/{scenario_id}")
+def scenario_detail(
+    dataset_id: str, scenario_id: str, request: Request, _ctx=Depends(get_user_context)
+):
+    result = _scenario_catalog(request).scenario(dataset_id, scenario_id)
+    if result is None:
+        raise HTTPException(404, "测试场景不存在")
+    return result
+
+
+@router.get("/test-scenarios/agent-runs/{run_id}/outcome")
+async def scenario_run_outcome(run_id: str, request: Request, ctx=Depends(get_user_context)):
+    _scenario_catalog(request)
+    result = await request.app.state.agent_runs.scenario_outcome(ctx, run_id)
+    if result is None:
+        raise HTTPException(404, "任务不存在或无权访问")
+    return result
+
+
+def _delete_scenario_conversation(ctx, conversation_id: str) -> list[str]:
+    with SessionLocal() as db:
+        conversation = db.scalar(select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.tenant_id == ctx.tenant_id,
+            Conversation.user_id == ctx.user_id,
+        ))
+        if conversation is None:
+            raise LookupError("会话不存在或无权访问")
+        if not conversation.title.startswith(SCENARIO_CONVERSATION_PREFIX):
+            raise PermissionError("只能清理场景观察模式创建的会话")
+        active = db.scalar(select(AgentRun.id).where(
+            AgentRun.tenant_id == ctx.tenant_id,
+            AgentRun.user_id == ctx.user_id,
+            AgentRun.conversation_id == conversation_id,
+            AgentRun.status.in_(("queued", "running")),
+        ).limit(1))
+        if active:
+            raise RuntimeError("场景会话仍有任务运行，请先停止或等待完成")
+        thread_ids = list(db.scalars(select(AgentRun.langgraph_thread_id).where(
+            AgentRun.tenant_id == ctx.tenant_id,
+            AgentRun.user_id == ctx.user_id,
+            AgentRun.conversation_id == conversation_id,
+        )))
+        owner = (
+            MemoryJob.tenant_id == ctx.tenant_id,
+            MemoryJob.user_id == ctx.user_id,
+            MemoryJob.conversation_id == conversation_id,
+        )
+        db.execute(delete(MemoryJob).where(*owner))
+        db.execute(delete(ToolCallRecord).where(
+            ToolCallRecord.tenant_id == ctx.tenant_id,
+            ToolCallRecord.user_id == ctx.user_id,
+            ToolCallRecord.conversation_id == conversation_id,
+        ))
+        db.execute(delete(RetrievalTrace).where(
+            RetrievalTrace.tenant_id == ctx.tenant_id,
+            RetrievalTrace.user_id == ctx.user_id,
+            RetrievalTrace.conversation_id == conversation_id,
+        ))
+        db.delete(conversation)
+        db.commit()
+        return thread_ids
+
+
+@router.delete("/test-scenarios/conversations/{conversation_id}", status_code=204)
+async def delete_scenario_conversation(
+    conversation_id: str, request: Request, ctx=Depends(get_user_context)
+):
+    _scenario_catalog(request)
+    try:
+        thread_ids = await asyncio.to_thread(
+            _delete_scenario_conversation, ctx, conversation_id
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    for thread_id in thread_ids:
+        await request.app.state.agent_runtime.delete_checkpoint_thread(thread_id)
 
 
 def obj(row):
@@ -188,6 +301,8 @@ async def create_agent_run(
     request: Request,
     ctx=Depends(get_user_context),
 ):
+    """接受一个后台 AgentRun；202 只表示已排队，不表示回答已经生成。"""
+
     identity = ConcurrencyIdentity(
         request_id=ctx.request_id,
         tenant_id=ctx.tenant_id,
@@ -247,6 +362,10 @@ async def agent_run_events(
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     ctx=Depends(get_user_context),
 ):
+    """从 sequence 游标重放历史事件，并继续等待该 Run 的新事件。"""
+
+    # Query 游标和标准 Last-Event-ID 二者取较大值，既支持显式重连，也兼容浏览器
+    # EventSource 语义；非法游标在开始 StreamingResponse 前即被拒绝。
     try:
         cursor = max(after_sequence, int(last_event_id or 0))
     except ValueError as exc:
@@ -267,10 +386,13 @@ async def agent_run_events(
                 yield persisted_sse(
                     row.sequence, row.event_type, json.loads(row.payload_json)
                 )
+            # 只有终态且所有持久事件均已发送时才关闭流。浏览器主动断开只结束这个
+            # generator，不会取消独立运行的 AgentRun Worker。
             if run.status in TERMINAL_STATUSES and cursor >= run.last_event_seq:
                 return
             await manager.wait_for_events(get_settings().sse_heartbeat_seconds)
             if not rows:
+                # SSE comment 不属于 AgentRunEvent，不占 sequence，也不会生成空消息。
                 yield ": heartbeat\n\n"
 
     return StreamingResponse(

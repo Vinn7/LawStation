@@ -1,0 +1,46 @@
+{
+  "dataset": "lawstation-dialogue-scenarios-v1",
+  "schema_version": "dialogue-scenario-v1",
+  "status": "frozen",
+  "synthetic": true,
+  "human_verified": false,
+  "created_at": "2026-08-31T06:40:40.908726+00:00",
+  "prompt_version": "lawstation-dialogue-generator-v1",
+  "generator_models": [
+    "deepseek-v4-flash"
+  ],
+  "blueprint_count": 18,
+  "sample_count": 36,
+  "variants_per_blueprint": 2,
+  "generator_seed": 42,
+  "blueprints_sha256": "862a649ec5d9d1f36f41e8fccffc8bdf96c02a9cf31ac35ac8ce31d2c190b3ac",
+  "dataset_sha256": "a13e18feef7ba90c153b17f0133fd47d9eb17a555c7e3a76e9b07e08a1b3f27f",
+  "generation_checkpoint_count": 18,
+  "model_call_count": 19,
+  "initial_model_call_count": 18,
+  "repair_model_call_count": 1,
+  "historical_rejected_count": 1,
+  "repair_history": [
+    {
+      "blueprint_id": "matched-law-citation",
+      "variant": 2,
+      "reasons": [
+        "source_leak"
+      ]
+    }
+  ],
+  "rejected_count": 0,
+  "category_counts": {
+    "concurrency": 4,
+    "durable_run": 4,
+    "memory": 6,
+    "rag": 6,
+    "routing": 4,
+    "skill": 12
+  },
+  "limitations": [
+    "由DeepSeek生成并经确定性规则校验，不是真实用户对话。",
+    "未经过律师人工标注，不能用于声明法律结论准确率。",
+    "场景断言用于Agent流程与安全约束测试。"
+  ]
+}

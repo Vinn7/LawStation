@@ -24,6 +24,96 @@ function run(id: string, conversationId: string, status: 'queued' | 'running' | 
 describe('App user isolation', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('shows scenario entry in both header and sidebar when the catalog is ready', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/users')) return json(users.slice(0, 1));
+      if (url.endsWith('/api/index/status')) return json({ status: 'ready', message: '就绪', dense_enabled: true });
+      if (url.endsWith('/api/conversations')) return json([]);
+      if (url.endsWith('/api/test-scenarios/datasets')) return json([{
+        id: 'dialogue-v1', schema_version: '1', sha256: 'sha', sample_count: 36,
+        synthetic: true, human_verified: false, categories: { routing: 2 }, step_timeout_seconds: 60,
+      }]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: '打开场景观察模式' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '场景观察模式' })).toBeInTheDocument();
+  });
+
+  it('hides scenario entry only when the API explicitly reports disabled', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/users')) return json(users.slice(0, 1));
+      if (url.endsWith('/api/index/status')) return json({ status: 'ready', message: '就绪', dense_enabled: true });
+      if (url.endsWith('/api/conversations')) return json([]);
+      if (url.endsWith('/api/test-scenarios/datasets')) return json({ detail: '未启用' }, 404);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    render(<App />);
+
+    await screen.findByRole('textbox', { name: '法律咨询问题' });
+    await waitFor(() => expect(screen.queryByRole('button', { name: '场景观察模式' })).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: '打开场景观察模式' })).not.toBeInTheDocument();
+  });
+
+  it('shows a retryable diagnostic instead of hiding non-404 scenario errors', async () => {
+    let attempts = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/users')) return json(users.slice(0, 1));
+      if (url.endsWith('/api/index/status')) return json({ status: 'ready', message: '就绪', dense_enabled: true });
+      if (url.endsWith('/api/conversations')) return json([]);
+      if (url.endsWith('/api/test-scenarios/datasets')) {
+        attempts += 1;
+        return attempts === 1 ? json({ detail: '目录暂时不可用' }, 500) : json([{
+          id: 'dialogue-v1', schema_version: '1', sha256: 'sha', sample_count: 36,
+          synthetic: true, human_verified: false, categories: {}, step_timeout_seconds: 60,
+        }]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    const retry = (await screen.findAllByText('场景模式加载失败'))[0].closest('button');
+    expect(retry).not.toBeNull();
+    await user.click(retry as HTMLButtonElement);
+    expect(await screen.findByRole('button', { name: '打开场景观察模式' })).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it('ignores a late scenario catalog response from the previously selected user', async () => {
+    let resolveUserA: ((response: Response) => void) | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      const owner = new Headers(init?.headers).get('X-User-ID');
+      if (url.endsWith('/api/users')) return json(users);
+      if (url.endsWith('/api/index/status')) return json({ status: 'ready', message: '就绪', dense_enabled: true });
+      if (url.endsWith('/api/conversations')) return json([]);
+      if (url.endsWith('/api/test-scenarios/datasets') && owner === 'user-a') {
+        return new Promise<Response>((resolve) => { resolveUserA = resolve; });
+      }
+      if (url.endsWith('/api/test-scenarios/datasets') && owner === 'user-b') {
+        return json({ detail: '未启用' }, 404);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(await screen.findByLabelText('当前用户'), 'user-b');
+    await waitFor(() => expect(screen.queryByRole('button', { name: '场景观察模式' })).not.toBeInTheDocument());
+    await act(async () => {
+      resolveUserA?.(json([{
+        id: 'late-a', schema_version: '1', sha256: 'sha', sample_count: 36,
+        synthetic: true, human_verified: false, categories: {}, step_timeout_seconds: 60,
+      }]));
+    });
+    expect(screen.queryByRole('button', { name: '打开场景观察模式' })).not.toBeInTheDocument();
+  });
+
   it('clears the previous conversation list when switching users', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);

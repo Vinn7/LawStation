@@ -33,6 +33,41 @@ brew install text-embeddings-inference
 python scripts/create_law_sample.py --size 100 --seed 42
 ```
 
+项目还提供版本化的多轮 Agent 流程样例。18 类确定性蓝图约束用户切换、消息发送、取消、SSE 重连、记忆检查和 Skill 断言，DeepSeek 只负责生成合成案件话术，不能生成测试动作或权限。当前已冻结 36 条样例：
+
+```text
+evals/conversations/lawstation-dialogue-scenarios-v1.jsonl
+```
+
+重新准备或生成时需显式执行，不会随应用启动自动调用模型：
+
+```bash
+python scripts/generate_conversation_scenarios.py prepare
+python scripts/generate_conversation_scenarios.py generate
+python scripts/generate_conversation_scenarios.py validate
+python scripts/generate_conversation_scenarios.py freeze
+```
+
+该数据集由 DeepSeek 生成并经过 Schema、敏感信息、Prompt Injection、动作白名单、Skill 权限和法规来源泄漏校验；它不是真实用户数据，也未经过律师人工标注。默认不加载、不执行。
+
+如需逐步观察真实 Agent 链路，推荐使用本次进程启动参数：
+
+```bash
+python run.py --test-scenarios
+```
+
+也可以在 `.env` 显式设置（不推荐长期保持开启）：
+
+```dotenv
+TEST_SCENARIOS_ENABLED=true
+TEST_SCENARIO_DATA_PATHS=["./evals/conversations/lawstation-dialogue-scenarios-v1.jsonl"]
+TEST_SCENARIO_STEP_TIMEOUT_SECONDS=60
+```
+
+启动器会在 Ollama、TEI 和 Uvicorn 之前校验白名单数据集，并打印数据集与样本数。启动后可从顶部栏或左侧栏进入“场景观察”。如需强制覆盖 `.env` 关闭本次进程，可使用 `python run.py --no-test-scenarios`。每次点击只执行一个步骤，会为 Actor 创建独立的 `[场景]` 会话，并可手工清理。该模式使用真实 Agent/MCP/RAG/Skill/记忆链路，不注入离线 Fixture；依赖 Fixture 或缺少可验证证据的预期会标为“不可判定”。它是人工观察器，不是自动连续 Runner，不能把场景数量当作通过率。
+
+完整的前置配置、四阶段命令、checkpoint 续跑、限额控制、产物说明和失败排查见 [`resume/conversation-scenario-generation-guide.md`](resume/conversation-scenario-generation-guide.md)。
+
 临时使用样本时，可将 `.env` 的 `LAW_DATA_PATH` 改为 `./data/knowledge/law/law_sample.json`；生产默认保持全量路径。
 
 ## 统一启动

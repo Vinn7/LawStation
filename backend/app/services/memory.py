@@ -67,6 +67,7 @@ def _pack_memories(
 
 
 class MemoryService:
+    """为 Agent 读取预算受控的记忆快照；记忆不是法规证据来源。"""
     def __init__(self, db: Session, ctx: RequestUserContext):
         self.db, self.ctx = db, ctx
         self.repo = OwnedRepository(db, ctx)
@@ -87,6 +88,11 @@ class MemoryService:
         question: str = "",
         exclude_message_id: str | None = None,
     ) -> MemorySnapshot:
+        """在 Agent 获得运行配额后构造本轮不可变 MemorySnapshot。
+
+        当前用户消息拥有最高时序优先级；会话摘要、active 案件记忆和用户偏好只作
+        背景数据，不能覆盖本轮修正，也不能进入 EvidencePacket 充当法律依据。
+        """
         summary = self.db.scalar(
             select(ConversationSummary).where(
                 ConversationSummary.tenant_id == self.ctx.tenant_id,

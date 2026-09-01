@@ -1,10 +1,13 @@
-import { Database, Menu, Scale } from 'lucide-react';
-import type { IndexStatus } from '../types';
+import { Beaker, Database, Menu, RotateCcw, Scale } from 'lucide-react';
+import type { IndexStatus, ScenarioAvailability } from '../types';
 
 interface ChatHeaderProps {
   conversationTitle: string;
   index: IndexStatus;
   onOpenSidebar: () => void;
+  scenarioAvailability: ScenarioAvailability;
+  onOpenScenarios: () => void;
+  onRetryScenarios: () => void;
 }
 
 function indexLabel(index: IndexStatus): string {
@@ -17,7 +20,14 @@ function indexLabel(index: IndexStatus): string {
   return index.status === 'building' ? `正在构建 ${progress}%` : '正在检查法规库';
 }
 
-export function ChatHeader({ conversationTitle, index, onOpenSidebar }: ChatHeaderProps) {
+export function ChatHeader({
+  conversationTitle,
+  index,
+  onOpenSidebar,
+  scenarioAvailability,
+  onOpenScenarios,
+  onRetryScenarios,
+}: ChatHeaderProps) {
   return (
     <header className="chat-header">
       <div className="header-identity">
@@ -31,6 +41,19 @@ export function ChatHeader({ conversationTitle, index, onOpenSidebar }: ChatHead
         </div>
       </div>
       <div className="header-context">
+        {scenarioAvailability.status !== 'disabled' && (
+          <button
+            className={`scenario-header-button is-${scenarioAvailability.status}`}
+            onClick={scenarioAvailability.status === 'ready' ? onOpenScenarios : onRetryScenarios}
+            disabled={scenarioAvailability.status === 'checking'}
+            title={scenarioAvailability.message}
+            aria-label={scenarioAvailability.status === 'ready' ? '打开场景观察模式' : scenarioAvailability.message}
+          >
+            {scenarioAvailability.status === 'error' ? <RotateCcw size={14} /> : <Beaker size={14} />}
+            <span>{scenarioAvailability.status === 'ready' ? '场景观察'
+              : scenarioAvailability.status === 'checking' ? '场景检查中' : '场景加载失败'}</span>
+          </button>
+        )}
         <span className={`index-badge is-${index.status}`} title={index.message}>
           <Database size={14} />
           {indexLabel(index)}

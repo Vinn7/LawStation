@@ -1,6 +1,6 @@
 # LawStation 全项目 Review 文档
 
-> Review 基线：2026-08-25 当前工作区代码。结论以代码、配置、迁移和测试交叉验证为准。
+> Review 基线：2026-09-01 当前工作区代码。结论以代码、配置、迁移和测试交叉验证为准。
 
 ## 项目定位
 
@@ -29,16 +29,18 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 2. [启动与生命周期](startup.md)：`python run.py` 到应用关闭。
 3. [API 与聊天链路](api-chat.md)：所有权、SSE、心跳和持久化。
 4. [三 Agent 编排](agent.md)：分析、检索、生成、复核与引用。
-5. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
-6. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
-7. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
-8. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
-9. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
-10. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
-11. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
-12. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
-13. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
-14. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+5. [Agent 任务持久化](agent-task-persistence.md)：AgentRun、LangGraph Checkpoint、租约、SSE 重放、取消与重启恢复。
+6. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
+7. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
+8. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
+9. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
+10. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
+11. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
+12. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
+13. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
+14. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
+15. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
+16. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 
 ## 一句话主链路
 

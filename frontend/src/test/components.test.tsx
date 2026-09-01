@@ -35,7 +35,14 @@ describe('Composer', () => {
 
 describe('status presentation', () => {
   it('shows dense degradation without disabling the chat', () => {
-    render(<ChatHeader conversationTitle="劳动争议" index={{ status: 'degraded', message: '缺少密钥' }} onOpenSidebar={vi.fn()} />);
+    render(<ChatHeader
+      conversationTitle="劳动争议"
+      index={{ status: 'degraded', message: '缺少密钥' }}
+      onOpenSidebar={vi.fn()}
+      scenarioAvailability={{ status: 'disabled', datasets: [], message: '未启用' }}
+      onOpenScenarios={vi.fn()}
+      onRetryScenarios={vi.fn()}
+    />);
     expect(screen.getByText('仅使用 BM25')).toBeInTheDocument();
     expect(screen.getByText('劳动争议')).toBeInTheDocument();
   });

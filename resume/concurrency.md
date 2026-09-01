@@ -108,6 +108,8 @@ assistantMessageId
 
 消息加载还用 `loadSequences` 防止旧 REST 响应覆盖新的加载或正在运行的流。
 
+场景目录探测也使用独立递增sequence。用户快速切换时，旧用户的数据集响应不能覆盖当前用户的`ScenarioAvailability`。场景并发断言记录两个AgentRun实际同时处于queued/running的证据；仅仅成功创建两个会话不足以判定并发测试通过。
+
 ## 8. 取消和释放
 
 “停止生成”只中止当前打开会话的 controller。服务端取消路径：
@@ -152,3 +154,7 @@ assistantMessageId
 ## 13. 租约与重启恢复
 
 `AgentRunManager` 在运行中每 `lease/3` 续约，启动时把遗留 running 任务重新置为 queued，并使用原 `langgraph_thread_id` 从最新 checkpoint 恢复；超过 `AGENT_RUN_RECOVERY_MAX_ATTEMPTS` 后终止。进程正常关闭不会把正在执行任务误标为用户中断。事件和 checkpoint 默认保留 7 天，由启动清理过程删除过期终态 Run 的恢复数据。
+
+## 14. 场景观察的并发语义
+
+场景Actor映射在开始时固定，普通用户/会话切换不改变已运行Run的所有权。`send_message`立即创建后台Run，后续步骤可切换Actor或取消指定会话的Run。`disconnect_stream`仅abort该`ConversationKey`的浏览器controller，服务端Graph继续；`reconnect_stream`从已保存sequence订阅，重复sequence会被标记为观察失败。清理前必须确认所有专用会话没有queued/running Run。

@@ -46,6 +46,17 @@ def parse_args(settings):
     group.add_argument("--no-build", action="store_true", help="禁止自动构建前端")
     parser.add_argument("--host", default=settings.app_host)
     parser.add_argument("--port", type=int, default=settings.app_port)
+    scenarios = parser.add_mutually_exclusive_group()
+    scenarios.add_argument(
+        "--test-scenarios",
+        action="store_true",
+        help="本次进程启用前端场景观察模式",
+    )
+    scenarios.add_argument(
+        "--no-test-scenarios",
+        action="store_true",
+        help="本次进程强制关闭前端场景观察模式",
+    )
     tracing = parser.add_mutually_exclusive_group()
     tracing.add_argument(
         "--langsmith-trace-all",
@@ -65,6 +76,32 @@ def parse_args(settings):
         help="全量 Trace 模式的本次进程根 Trace 上限（默认 200）",
     )
     return parser.parse_args()
+
+
+def apply_scenario_cli(args) -> None:
+    """Apply process-only scenario observer overrides without editing .env."""
+    if args.test_scenarios:
+        os.environ["TEST_SCENARIOS_ENABLED"] = "true"
+    elif args.no_test_scenarios:
+        os.environ["TEST_SCENARIOS_ENABLED"] = "false"
+
+
+def preflight_scenarios(settings) -> None:
+    """Validate enabled scenario datasets before external model processes start."""
+    if not settings.test_scenarios_enabled:
+        print("场景观察模式：未启用，可使用 --test-scenarios 开启")
+        return
+    from backend.app.evaluation.scenario_catalog import ScenarioCatalog
+
+    try:
+        catalog = ScenarioCatalog(settings)
+    except Exception as exc:
+        raise SystemExit(f"场景观察模式启动检查失败：{exc}") from exc
+    datasets = catalog.datasets()
+    summary = "，".join(
+        f"{item['id']}（{item['sample_count']}条）" for item in datasets
+    )
+    print(f"场景观察模式：已启用；数据集：{summary}；入口：顶部栏 / 左侧栏")
 
 
 def apply_langsmith_cli(settings, args):
@@ -96,9 +133,11 @@ def main() -> None:
 
     settings = get_settings()
     args = parse_args(settings)
+    apply_scenario_cli(args)
     apply_langsmith_cli(settings, args)
     get_settings.cache_clear()
     settings = get_settings()
+    preflight_scenarios(settings)
     if settings.langsmith_runtime_mode == "all":
         from backend.app.observability.langsmith import validate_langsmith_startup
 

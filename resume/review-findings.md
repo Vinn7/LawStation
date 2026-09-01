@@ -54,6 +54,10 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 
 `SkillRegistry` 对模型建议的 ID 做白名单、角色、工具和数量校验，并只向选中节点渐进加载完整指令。Skill 结果进入请求级 Graph State，未知 ID、越权工具和伪造输出不能绕过服务端策略。关键 symbol：`backend/app/agent/skills.py::SkillRegistry`、`LegalConsultationGraph._activate_skills`。
 
+### 2.9 场景观察具有显式能力探测和证据化断言
+
+场景模式可通过`run.py --test-scenarios`按进程启用，并在外部模型启动前校验冻结数据。前端只有明确404时隐藏入口，其他异常提供顶部栏/侧栏诊断与重试。执行结果不再以“操作未抛错”作为通过条件：未知断言为`inconclusive`，并发、SSE重放和记忆隔离分别依赖Run重叠、sequence缺口及`source_message_id`证据。
+
 ## 3. 部分实现或语义边界
 
 ### 3.1 `MemorySnapshot` 已进入持久化任务主链路
@@ -71,6 +75,10 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 ### 3.4 流式不是原始模型 token
 
 状态和心跳实时，但正文等待 Graph 和 Reviewer 完成后才分片发送。这是“安全后流式呈现”，不能在简历中表述为“模型实时 token 全链路转发”。
+
+### 3.5 场景控制状态仍是页面级
+
+AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅epoch与预期/实际对照仍保存在浏览器内存。刷新后可从普通会话继续观察任务，不能自动恢复到场景面板原步骤。
 
 ## 4. 文档偏差
 
@@ -163,3 +171,10 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 6. 用 staging/checkpoint/指纹解释工程可靠性。
 7. 用 LangSmith + 本地 evaluator 解释质量闭环。
 8. 主动说明认证、数据质量和跨刷新恢复尚未生产化。
+# 新增：多轮对话场景生成与观察
+
+**已验证**：项目已实现18类确定性蓝图和DeepSeek离线话术生成器，冻结36条合成多轮场景；动作、事件断言和Skill权限不由模型生成，并通过敏感信息、Prompt Injection及法规来源泄漏校验。
+
+**已验证**：前端已增加配置开关控制的场景观察面板，可为Actor创建隔离会话并逐步执行真实AgentRun，覆盖取消、SSE sequence重放、消息/记忆检查与安全清理。后端仅加载项目内冻结白名单，outcome不暴露Graph State和Prompt。
+
+**当前不足**：它仍是每次点击一步的人工观察器，不会自动连续跑完36条场景；步骤游标也不跨刷新恢复。简历可描述“可交互场景观察与预期/实际对照”，不能写“36条端到端测试全部通过”。

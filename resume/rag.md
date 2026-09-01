@@ -194,6 +194,33 @@ data/indexes/law/
 
 仅有一个旧 `law.faiss` 文件不视为有效索引。验证失败后进入后台重建，页面和 API 仍可使用已经初始化的 BM25。
 
+### 5.1 向量存储与索引类型
+
+严格来说，本项目**没有引入独立的向量数据库服务**。稠密检索使用的是
+[FAISS](https://github.com/facebookresearch/faiss) 本地文件化向量索引；如果在简历或面试中使用“向量数据库”这一宽泛说法，应表述为“基于 FAISS 的本地向量索引”，而不是 Milvus、Pinecone、Chroma、Weaviate 或 pgvector。
+
+| 组成 | 当前实现 | 职责 |
+|---|---|---|
+| 向量搜索引擎 | FAISS | 在进程内执行 Dense 相似度检索，不需要独立数据库进程或网络服务 |
+| 索引类型 | `faiss.IndexFlatIP` | 对全部向量执行精确内积搜索，不使用近似最近邻结构 |
+| 向量文件 | `embeddings.npy` | 以 `float32`、`1024` 维 NumPy 数组保存归一化后的完整向量，支持 shape 和数值完整性校验 |
+| FAISS 文件 | `law.faiss` | `faiss.write_index()` 持久化；启动时通过 `faiss.read_index()` 加载到内存 |
+| 元数据文件 | `chunks.jsonl` | 按 FAISS 行号保存对应的 `document_id`、`chunk_id`、法律名称、条号及 chunk 内容 |
+| 版本文件 | `manifest.json` | 保存数据、切分、Embedding 模型、模型 digest、维度和查询指令版本形成的索引指纹 |
+| SQLite `index_manifests` | 仅登记索引版本 | 保存数据版本、Embedding 模型、维度和文档数量，不保存法规向量 |
+
+`IndexFlatIP` 中的 `Flat` 表示不训练、不压缩、不过滤候选，每次查询都会与索引中的全部向量计算距离；`IP` 表示 Inner Product（内积）。建库和查询时都先执行 L2 归一化，因此：
+
+```text
+normalized_query · normalized_document = cosine_similarity
+```
+
+也就是说，本项目实际执行的是**基于内积实现的精确余弦相似度搜索**。它没有 IVF 的 `nlist/nprobe`，也没有 HNSW 的 `M/efSearch` 等近似索引参数，因此不会产生 ANN 索引本身带来的召回损失。
+
+选择这一索引的原因是当前法规规模约 5.5 万个 chunk，精确扫描的延迟和内存仍可接受，同时实现简单、结果稳定，适合用作法律检索和评测基线。代价是查询复杂度约为 `O(N × d)`，数据规模显著增长后，内存和检索耗时会近似线性上升；届时可以在保持 chunk 元数据和指纹体系不变的前提下，评估 `IndexHNSWFlat`、`IndexIVFFlat` 或独立向量数据库。
+
+当前索引不是在线逐条 CRUD 模型：`law.json`、切分配置、Embedding 模型或模型 digest 变化后，通过新指纹在 staging 中重新构建完整索引，校验通过后再原子切换。这样牺牲了在线增量更新能力，换取了法规数据版本、chunk 元数据、向量矩阵和 FAISS 行号的一致性。
+
 ## 6. 可恢复、原子化的全量建库
 
 新索引先写入指纹专属 staging：
@@ -285,7 +312,82 @@ index_status
 
 这些字段既支持 Agent 判断，也便于后续使用 LangSmith 数据集标定阈值。
 
-### 7.5 TEI BGE Cross-Encoder 精排
+### 7.5 双路召回核心参数速查
+
+以下参数以当前代码和配置为准，查询入口为
+`mcp_servers/law_rag/server.py::search_laws`，核心实现为
+`mcp_servers/law_rag/engine.py::LawSearchEngine.search`。其中“默认值”来自
+`backend/app/core/config.py::Settings` 和 `.env.example`；调用方传入的
+`top_k`、`filters` 只影响当前请求，不修改全局配置。
+
+#### 请求与候选池
+
+| 参数 | 当前默认值/公式 | 实际作用 | 调整影响 |
+|---|---:|---|---|
+| `RAG_RETRIEVAL_MODE` | `hybrid` | `bm25` 只执行词法召回；`hybrid` 在 Dense 索引可用时执行 BM25 + FAISS | 切为 `bm25` 可用于降级或消融，不会请求查询 Embedding |
+| `top_k` | MCP 默认 `8`；服务端限制为 `1～20` | 最终最多返回多少个 chunk | 同时影响初始候选池；不是直接传给每路检索的固定数量 |
+| `filters.law_name` | 可选 | 先按标准化法律名称确定候选范围，再执行两路排序 | 避免“先全库 Top N、后过滤”导致目标法律被漏掉；其他过滤字段直接报错 |
+| 初始 `pool` | `min(candidate_count, max(30, top_k * 4))` | BM25 最多保留的候选数；无法律名称过滤时也是 Dense 的搜索宽度 | 默认 `top_k=8` 时为 `32`；`top_k<=7` 时至少为 `30` |
+| Rerank 候选上限 | `max(top_k, RAG_RERANK_CANDIDATE_COUNT)`，后者默认 `12` | RRF 在截断最终结果前为下游精排保留的候选数 | 属于融合后的阶段，不改变 BM25/Dense 的原始召回计算 |
+
+#### BM25 路径
+
+| 参数 | 当前值 | 实际作用 |
+|---|---:|---|
+| 索引文本 | `法律名称 + 条号 + chunk 正文` | `load_chunks()` 写入 `document["text"]`，标题、条号和正文共同参与词法匹配 |
+| 分词 | `jieba.lcut(text.lower())` | 英文字母转小写，去除空白 token；当前没有停用词表和领域词典配置 |
+| BM25 实现 | `rank_bm25.BM25Okapi` | 当前未显式覆盖库参数，因此实际使用 `k1=1.5`、`b=0.75`、`epsilon=0.25` |
+| `RAG_BM25_MIN_SCORE` | `0.01` | 先按原始 BM25 分数倒序取 `pool`，再丢弃低于阈值的候选 |
+| RRF 输入排名 | 过滤后的零基排名 | 第一名贡献 `1/61`，后续候选按排名递减；原始 BM25 分数只记录和参与置信度门控，不直接与 Dense 分数相加 |
+
+#### Dense 路径
+
+| 参数 | 当前值 | 实际作用 |
+|---|---:|---|
+| `EMBEDDING_PROVIDER` | `ollama` | 查询向量通过本地 Ollama `/api/embed` 生成 |
+| `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | 必须与当前 FAISS manifest 中的模型及 digest 一致 |
+| `EMBEDDING_DIMENSION` | `1024` | 查询向量、文档向量和 `IndexFlatIP` 的统一维度 |
+| 查询指令 | `Given a legal consultation query, retrieve relevant Chinese laws and regulations that answer the query` | Ollama 查询实际编码为 `Instruct: ...\nQuery: <query>`；文档直接编码，不加查询指令 |
+| 查询指令版本 | `legal-query-v1` | 进入向量索引指纹；修改查询指令文本时必须同步提升该版本，否则新文本本身不会自动改变指纹 |
+| 相似度 | L2 归一化 + `faiss.IndexFlatIP` | 文档和查询向量都归一化后，内积等价于余弦相似度 |
+| `RAG_DENSE_MIN_SCORE` | `0.20` | Dense 原始相似度低于该值的候选不进入 RRF |
+| Dense 搜索宽度 | 无过滤时为 `pool` | 指定 `law_name` 时先从全库 FAISS 取候选并按允许集合过滤，直到接受 `pool` 个或结果耗尽 |
+| RRF 输入排名 | 通过阈值和过滤后的 `accepted_rank` | 被过滤候选不占 Dense 排名；第一条有效 Dense 结果贡献 `1/61` |
+
+#### RRF 融合与最终候选门控
+
+系统没有直接相加 BM25 原始分数和 Dense 余弦分数，而是给两路排名等权执行 RRF：
+
+```text
+rrf(chunk) = Σ 1 / (61 + zero_based_rank_in_source)
+```
+
+这等价于常见写法 `1 / (60 + one_based_rank)`。单路第一名得分约为
+`0.016393`，同一 chunk 同时是两路第一名时约为 `0.032787`。
+
+| 参数 | 当前值 | 实际作用 |
+|---|---:|---|
+| 两路权重 | 等权 | 每个来源仅按排名贡献一次 RRF；当前没有独立 BM25/Dense 权重配置 |
+| `RAG_RRF_MIN_SCORE` | `0.01` | 融合分低于阈值的 chunk 不进入候选顺序 |
+| `RAG_MATCH_GATE_ENABLED` | `true` | RRF/精排结束后再判断候选是否足以构成 `matched` |
+| Gate 配置 | `./evals/config/retrieval-gate-v1.json` | 当前版本 `retrieval-gate-v1`，状态为 `provisional` |
+| Gate 阈值 | `0.25` | 综合置信度低于阈值时，候选被转成正常的 `no_match`，不是工具错误 |
+| Gate 权重 | rerank `0.30`、dense `0.15`、bm25 `0.15`、rrf `0.10`、双路共同命中 `0.15`、查询覆盖率 `0.10`、Top1/Top2 差距 `0.05` | 只决定候选状态，不替代 Research Agent 对证据适用性的判断 |
+
+Gate 对原始分数先做归一化：BM25 使用
+`1 - exp(-max(score, 0) / 6)`，Dense 和 Rerank 截断到 `0～1`，RRF
+按理论双路最高值 `2/61` 归一化。`source_agreement=1` 表示 Top1 chunk
+同时由 BM25 与 Dense 命中。当前 Gate 配置仍为 provisional，正式修改阈值前应运行冻结校准集，不能只凭单条查询手工调参。
+
+#### 降级与参数关系
+
+- `RAG_RETRIEVAL_MODE=hybrid` 但 FAISS 或 Embedding Descriptor 未就绪时，实际只执行 BM25，结果中的 `dense_enabled=false` 会暴露这一状态。
+- Dense 阈值过高会降低语义召回覆盖，BM25 阈值过高会削弱法律名称、条号和术语精确命中；两者过低则会增加 RRF 噪声候选。
+- `top_k` 不只是输出数量：它通过 `max(30, top_k * 4)` 同时影响两路候选池宽度。比较实验必须固定 `top_k`，否则不是单变量对比。
+- `RAG_RRF_MIN_SCORE=0.01` 对当前默认 `pool=32` 较宽松；提高它会更偏向两路共同命中或排名靠前的单路候选。
+- 精排和置信度 Gate 均位于双路召回之后。关闭 Reranker 不会关闭 Dense；若要做纯 BM25 对比，应显式使用 `retrieval_mode=bm25` 或 `RAG_RETRIEVAL_MODE=bm25`。
+
+### 7.6 TEI BGE Cross-Encoder 精排
 
 `mcp_servers/law_rag/reranker.py::TEIReranker` 调用独立的 Hugging Face Text Embeddings Inference 服务。TEI 加载 `BAAI/bge-reranker-v2-m3`，一次 `/rerank` 请求批量提交查询和前 12 个 RRF 候选，直接返回 Cross-Encoder 相关性分数。
 

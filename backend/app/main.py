@@ -1,3 +1,5 @@
+"""FastAPI 组装入口及 Agent/RAG/持久化组件的应用生命周期。"""
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from backend.app.core.logging import audit, setup_logging
 from backend.app.db.migrations import upgrade_database
 from backend.app.db.models import Tenant, User
 from backend.app.db.session import Base, SessionLocal, engine
+from backend.app.evaluation.scenario_catalog import ScenarioCatalog
 from backend.app.observability import LangSmithObservability
 from backend.app.services.agent_runs import AgentRunManager
 from backend.app.services.memory_tasks import MemoryTaskManager
@@ -49,6 +52,12 @@ def initialize_database() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """按依赖顺序创建应用级共享对象，并以相反方向安全关闭。
+
+    Registry、Provider、Runtime、Checkpointer 和 Worker 均应用级共享；每个用户的
+    State、Invocation Context、数据库 Session 与 MCP 执行 Session 仍按请求隔离。
+    """
+
     setup_logging()
     audit("application.starting", status="starting")
     observability = LangSmithObservability()
@@ -56,12 +65,15 @@ async def lifespan(app: FastAPI):
     app.state.langsmith_observability = observability
     mcp_app.bind(observability)
     initialize_database()
+    app.state.scenario_catalog = ScenarioCatalog()
     await initialize_engine()
     registry = MCPToolRegistry(observability=observability)
     skill_registry = SkillRegistry()
     provider = LLMProvider()
     app.state.mcp_tool_registry = registry
     app.state.skill_registry = skill_registry
+    # AsyncSqliteSaver 必须覆盖 AgentRuntime/AgentRunWorker 的完整生命周期，确保
+    # Graph 执行和恢复期间连接始终有效，退出时再统一关闭。
     async with checkpoint_saver(get_settings()) as checkpointer:
         app.state.langgraph_checkpointer = checkpointer
         app.state.agent_runtime = AgentRuntime(
@@ -79,8 +91,12 @@ async def lifespan(app: FastAPI):
             app.state.memory_tasks,
             observability,
         )
+        # 先启动回答后记忆 Worker，再启动 AgentRun Worker；后者完成回答时才能可靠
+        # enqueue MemoryJob。两个 Worker 都不持有长生命周期 SQLAlchemy Session。
         await app.state.memory_tasks.start()
         await app.state.agent_runs.start()
+        # 内嵌 MCP ASGI 与 FastAPI 同进程，但 Agent 仍通过 HTTP 协议调用；Session
+        # Manager 必须运行后，首次懒发现和后续 Tool Call 才能建立短期 MCP Session。
         async with mcp.session_manager.run():
             audit("application.started", status="ready")
             try:
@@ -111,7 +127,8 @@ def health():
     index = get_index_status()
     langsmith = getattr(app.state, "langsmith_observability", None)
     skills = getattr(app.state, "skill_registry", None)
-    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False), "langsmith": langsmith.status() if langsmith else {"enabled": False, "export_status": "uninitialized"}, "skills": skills.status_dict() if skills else {"enabled": False, "status": "uninitialized"}}
+    scenarios = getattr(app.state, "scenario_catalog", None)
+    return {"status": "ok", "mcp": "/mcp/", "index_status": index["status"], "dense_enabled": index.get("dense_enabled", False), "langsmith": langsmith.status() if langsmith else {"enabled": False, "export_status": "uninitialized"}, "skills": skills.status_dict() if skills else {"enabled": False, "status": "uninitialized"}, "test_scenarios": scenarios.status() if scenarios else {"enabled": False, "status": "uninitialized"}}
 
 
 app.mount("/mcp", mcp_app)

@@ -1,4 +1,5 @@
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -77,3 +78,41 @@ def test_langsmith_trace_limit_requires_all_mode():
     )
     with pytest.raises(SystemExit, match="只能与"):
         run.apply_langsmith_cli(settings, args)
+
+
+def test_scenario_cli_sets_process_only_override(monkeypatch):
+    monkeypatch.delenv("TEST_SCENARIOS_ENABLED", raising=False)
+    run.apply_scenario_cli(SimpleNamespace(
+        test_scenarios=True,
+        no_test_scenarios=False,
+    ))
+    assert os.environ["TEST_SCENARIOS_ENABLED"] == "true"
+
+    run.apply_scenario_cli(SimpleNamespace(
+        test_scenarios=False,
+        no_test_scenarios=True,
+    ))
+    assert os.environ["TEST_SCENARIOS_ENABLED"] == "false"
+
+
+def test_scenario_preflight_rejects_invalid_catalog_before_runtime(monkeypatch):
+    class BrokenCatalog:
+        def __init__(self, _settings):
+            raise RuntimeError("invalid dataset")
+
+    monkeypatch.setattr(
+        "backend.app.evaluation.scenario_catalog.ScenarioCatalog",
+        BrokenCatalog,
+    )
+    settings = SimpleNamespace(test_scenarios_enabled=True)
+    with pytest.raises(SystemExit, match="场景观察模式启动检查失败"):
+        run.preflight_scenarios(settings)
+
+
+def test_scenario_cli_flags_are_mutually_exclusive(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "run.py", "--test-scenarios", "--no-test-scenarios",
+    ])
+    settings = SimpleNamespace(app_host="127.0.0.1", app_port=8000)
+    with pytest.raises(SystemExit):
+        run.parse_args(settings)

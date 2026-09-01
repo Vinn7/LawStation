@@ -1,3 +1,5 @@
+"""进程内 AgentRun 的会话互斥、用户配额与全局配额。"""
+
 import asyncio
 import time
 from collections import defaultdict
@@ -32,7 +34,11 @@ class ConcurrencyIdentity:
 
 
 class AgentConcurrencyManager:
-    """Process-local admission control without head-of-line global blocking."""
+    """避免全局队首阻塞的进程内准入控制。
+
+    reservation 从用户点击发送起锁住会话；active slot 只在 Worker 真正执行模型时
+    占用用户/全局额度。二者分开可防止排队任务提前吃掉稀缺运行容量。
+    """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -45,6 +51,7 @@ class AgentConcurrencyManager:
         self._active_requests: set[str] = set()
 
     async def reserve(self, identity: ConcurrencyIdentity) -> None:
+        """立即预占 tenant/user/conversation，阻止同会话创建第二个 Run。"""
         async with self._condition:
             if identity.conversation_key in self._reserved_conversations:
                 raise ConversationBusyError("该会话正在生成回答，请等待完成或先停止生成。")
@@ -60,6 +67,7 @@ class AgentConcurrencyManager:
             return not self._has_capacity(identity)
 
     async def acquire(self, identity: ConcurrencyIdentity) -> None:
+        """等待用户和全局容量同时可用；等待期间不增加任何 active 计数。"""
         deadline = time.monotonic() + self.settings.agent_queue_timeout_seconds
         async with self._condition:
             while not self._has_capacity(identity):
@@ -67,6 +75,8 @@ class AgentConcurrencyManager:
                 if remaining <= 0:
                     raise AgentQueueTimeoutError("系统当前咨询任务较多，请稍后重试。")
                 try:
+                    # Condition 在其他任务 release 后被唤醒；wait_for 同时提供排队
+                    # 超时和取消传播，不需要占用一个全局 semaphore。
                     await asyncio.wait_for(self._condition.wait(), timeout=remaining)
                 except TimeoutError as exc:
                     raise AgentQueueTimeoutError("系统当前咨询任务较多，请稍后重试。") from exc
@@ -75,6 +85,7 @@ class AgentConcurrencyManager:
             self._active_requests.add(identity.request_id)
 
     async def release(self, identity: ConcurrencyIdentity) -> None:
+        """幂等释放运行配额，并唤醒所有可能满足条件的排队任务。"""
         async with self._condition:
             if identity.request_id in self._active_requests:
                 self._active_requests.remove(identity.request_id)
@@ -86,6 +97,7 @@ class AgentConcurrencyManager:
 
     @asynccontextmanager
     async def slot(self, identity: ConcurrencyIdentity):
+        """供非持久化调用使用的 finally-safe 上下文管理器。"""
         acquired = False
         try:
             await self.acquire(identity)

@@ -144,6 +144,15 @@ class Settings(BaseSettings):
     langsmith_test_cache: str = "./data/runtime/langsmith-test-cache"
     eval_report_root: str = "./evals/reports/runs"
     eval_report_timezone: str = "Asia/Singapore"
+    test_scenarios_enabled: bool = False
+    test_scenario_data_path: str = "./evals/conversations/lawstation-dialogue-scenarios-v1.jsonl"
+    test_scenario_data_paths: list[str] = []
+    test_scenario_step_timeout_seconds: float = 60.0
+    test_scenario_generator_model: str = ""
+    test_scenario_generator_temperature: float = 0.7
+    test_scenario_generator_max_calls: int = 18
+    test_scenario_variants_per_blueprint: int = 2
+    test_scenario_generator_seed: int = 42
 
 
 @lru_cache

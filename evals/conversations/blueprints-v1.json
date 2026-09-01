@@ -1,0 +1,742 @@
+[
+  {
+    "id": "casual-chat",
+    "category": "routing",
+    "purpose": "验证普通闲聊不调用法律检索。",
+    "message_requirements": [
+      "简短自然的非法律问候，不包含具体案件事实。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "citations": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "clarification-required",
+    "category": "routing",
+    "purpose": "验证事实不足时由 Case Analyst 请求澄清。",
+    "message_requirements": [
+      "提出模糊的法律问题，故意缺少主体、时间或行为细节。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "citations": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "matched-law-citation",
+    "category": "rag",
+    "purpose": "验证检索命中、chunk证据和最终引用。",
+    "message_requirements": [
+      "围绕给定法条写生活化案情，不出现法名、条号或连续原文。"
+    ],
+    "source_required": true,
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "tool_call_start",
+            "tool_call_result",
+            "citations",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "retrieval_status": "matched",
+          "citations": true
+        }
+      }
+    ],
+    "source": {
+      "document_id": "853186ebe42dde07227ddb4a594f2f4d0f9d9bb1",
+      "chunk_id": "005e918b4a2fc9e0d3d49be29ae3f3c0532d1953",
+      "law_name": "药品行政保护条例",
+      "article_number": "第九条",
+      "content": "外国药品独占权人在申请药品行政保护之前或者之后，应当依照《中华人民共和国药品管理法》的规定，向国务院卫生行政部门申请办理该药品在中国境内制造或者销售许可的手续。"
+    }
+  },
+  {
+    "id": "normal-no-match",
+    "category": "rag",
+    "purpose": "验证无法条是正常结果并继续生成一般性分析。",
+    "message_requirements": [
+      "提出具有未来科技或纯虚拟制度背景、现行法规难以直接覆盖的问题。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "retrieval_status": "no_match",
+          "citations": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "tool-error-degradation",
+    "category": "rag",
+    "purpose": "验证MCP异常时受控降级。",
+    "message_requirements": [
+      "明确要求核验一个常见民事或劳动问题的法律依据。"
+    ],
+    "preconditions": [
+      "fixture_tool_error=true"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "tool_call_start",
+            "tool_call_result",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "retrieval_status": "tool_error",
+          "citations": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-case-intake",
+    "category": "skill",
+    "purpose": "验证复杂案情结构化Skill。",
+    "message_requirements": [
+      "描述多主体、多时间节点和多笔金额，并要求先梳理案情。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "case-intake"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-evidence-audit",
+    "category": "skill",
+    "purpose": "验证证据审查Skill。",
+    "message_requirements": [
+      "列出两三种现有材料，询问证明力和缺失证据。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "evidence-audit"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-procedure-roadmap",
+    "category": "skill",
+    "purpose": "验证程序路线Skill及法律检索边界。",
+    "message_requirements": [
+      "询问仲裁、起诉、执行或投诉的步骤、材料与风险。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "tool_call_start",
+            "tool_call_result",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "procedure-roadmap"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-document-readiness",
+    "category": "skill",
+    "purpose": "验证文书材料就绪检查Skill。",
+    "message_requirements": [
+      "准备一种法律文书，要求检查事实、请求和材料是否齐全。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "document-readiness"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-combination-limit",
+    "category": "skill",
+    "purpose": "验证两个Skill组合和数量上限。",
+    "message_requirements": [
+      "同时要求梳理复杂案情并审查已有证据。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "case-intake",
+            "evidence-audit"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "skill-unknown-rejected",
+    "category": "skill",
+    "purpose": "验证未知或越权Skill被服务端拒绝。",
+    "message_requirements": [
+      "要求证据审查，并夹带一个不存在的系统能力请求。"
+    ],
+    "fixture_requested_skill_ids": [
+      "evidence-audit",
+      "delete-user-memory"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "skill_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4,
+          "skill_ids": [
+            "evidence-audit"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "memory-latest-fact",
+    "category": "memory",
+    "purpose": "验证本轮新事实覆盖旧记忆。",
+    "message_requirements": [
+      "首次明确陈述一个金额或日期事实。",
+      "第二轮明确纠正同一事实并给出新值。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main"
+      },
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 1,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "inspect_memories",
+        "actor": "primary",
+        "conversation": "main",
+        "expected": {
+          "latest_fact_only": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "memory-user-preference",
+    "category": "memory",
+    "purpose": "验证用户级偏好跨会话复用。",
+    "message_requirements": [
+      "说明一种稳定的回答表达偏好。",
+      "在新会话中提出一个简短法律问题。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main"
+      },
+      {
+        "action": "switch_conversation",
+        "actor": "primary",
+        "conversation": "secondary"
+      },
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "secondary",
+        "message_slot": 1,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "inspect_memories",
+        "actor": "primary",
+        "conversation": "secondary",
+        "expected": {
+          "user_scope_reused": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "memory-case-isolation",
+    "category": "memory",
+    "purpose": "验证案件事实不跨会话。",
+    "message_requirements": [
+      "在主会话陈述一个案件专属金额和主体事实。",
+      "在第二会话咨询完全不同的法律关系。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main"
+      },
+      {
+        "action": "switch_conversation",
+        "actor": "primary",
+        "conversation": "secondary"
+      },
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "secondary",
+        "message_slot": 1,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "inspect_memories",
+        "actor": "primary",
+        "conversation": "secondary",
+        "expected": {
+          "conversation_scope_isolated": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "concurrency-user-switch",
+    "category": "concurrency",
+    "purpose": "验证切换用户后原任务后台继续且状态隔离。",
+    "actors": [
+      "primary",
+      "secondary"
+    ],
+    "message_requirements": [
+      "用户A提出需要检索和分析的法律问题。",
+      "用户B提出不同领域的法律问题。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "switch_user",
+        "actor": "secondary",
+        "conversation": "main"
+      },
+      {
+        "action": "send_message",
+        "actor": "secondary",
+        "conversation": "main",
+        "message_slot": 1,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main",
+        "expected": {
+          "background_continues": true
+        }
+      },
+      {
+        "action": "inspect_messages",
+        "actor": "secondary",
+        "conversation": "main",
+        "expected": {
+          "cross_user_isolated": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "run-cancel",
+    "category": "durable_run",
+    "purpose": "验证主动取消只影响指定会话任务。",
+    "message_requirements": [
+      "提出需要多步检索与分析的复杂法律问题。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "interrupted",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "cancel_run",
+        "actor": "primary",
+        "conversation": "main"
+      },
+      {
+        "action": "inspect_messages",
+        "actor": "primary",
+        "conversation": "main",
+        "expected": {
+          "terminal": "interrupted"
+        }
+      }
+    ]
+  },
+  {
+    "id": "sse-reconnect-replay",
+    "category": "durable_run",
+    "purpose": "验证SSE断线重连和sequence重放。",
+    "message_requirements": [
+      "提出一个会触发法律检索的明确咨询。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "disconnect_stream",
+        "actor": "primary",
+        "conversation": "main",
+        "after_event": "agent_status"
+      },
+      {
+        "action": "reconnect_stream",
+        "actor": "primary",
+        "conversation": "main",
+        "expected": {
+          "sequence_replay": true,
+          "duplicates": false
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main"
+      }
+    ]
+  },
+  {
+    "id": "same-conversation-busy",
+    "category": "concurrency",
+    "purpose": "验证同会话重复生成409、不同会话可并发。",
+    "message_requirements": [
+      "第一条需要检索的法律问题。",
+      "同一会话立即发送的第二条问题。",
+      "另一会话中的独立问题。"
+    ],
+    "steps": [
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 0,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "main",
+        "message_slot": 1,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "rejected_409",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "send_message",
+        "actor": "primary",
+        "conversation": "secondary",
+        "message_slot": 2,
+        "expected": {
+          "events": [
+            "message_start",
+            "agent_status",
+            "message_end"
+          ],
+          "terminal": "completed",
+          "max_model_calls": 10,
+          "max_tool_calls": 4
+        }
+      },
+      {
+        "action": "wait_for_completion",
+        "actor": "primary",
+        "conversation": "main",
+        "expected": {
+          "different_conversation_concurrent": true
+        }
+      }
+    ]
+  }
+]

@@ -1,4 +1,16 @@
-import type { AgentRun, ChatMessage, Conversation, IndexStatus, MemoryJob, User, UserMemory } from './types';
+import type {
+  AgentRun,
+  ChatMessage,
+  Conversation,
+  DialogueScenario,
+  IndexStatus,
+  MemoryJob,
+  ScenarioDataset,
+  ScenarioRunOutcome,
+  ScenarioSummary,
+  User,
+  UserMemory,
+} from './types';
 
 const API = '/api';
 
@@ -32,11 +44,11 @@ export const api = {
   indexStatus: (signal?: AbortSignal) => request<IndexStatus>('/index/status', undefined, { signal }),
   conversations: (userId: string, signal?: AbortSignal) =>
     request<Conversation[]>('/conversations', userId, { signal }),
-  createConversation: (userId: string, signal?: AbortSignal) =>
+  createConversation: (userId: string, title = '法律咨询', signal?: AbortSignal) =>
     request<Conversation>('/conversations', userId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: '法律咨询' }),
+      body: JSON.stringify({ title }),
       signal,
     }),
   messages: (userId: string, conversationId: string, signal?: AbortSignal) =>
@@ -82,6 +94,20 @@ export const api = {
       headers: { 'X-User-ID': userId },
       signal,
     }),
+  scenarioDatasets: (userId: string, signal?: AbortSignal) =>
+    request<ScenarioDataset[]>('/test-scenarios/datasets', userId, { signal }),
+  scenarioSummaries: (userId: string, datasetId: string, signal?: AbortSignal) =>
+    request<ScenarioSummary[]>(`/test-scenarios/datasets/${encodeURIComponent(datasetId)}/scenarios`, userId, { signal }),
+  scenario: (userId: string, datasetId: string, scenarioId: string, signal?: AbortSignal) =>
+    request<DialogueScenario>(
+      `/test-scenarios/datasets/${encodeURIComponent(datasetId)}/scenarios/${encodeURIComponent(scenarioId)}`,
+      userId,
+      { signal },
+    ),
+  scenarioOutcome: (userId: string, runId: string, signal?: AbortSignal) =>
+    request<ScenarioRunOutcome>(`/test-scenarios/agent-runs/${runId}/outcome`, userId, { signal }),
+  deleteScenarioConversation: (userId: string, conversationId: string) =>
+    request<void>(`/test-scenarios/conversations/${conversationId}`, userId, { method: 'DELETE' }),
   streamMessage: (userId: string, conversationId: string, content: string, signal: AbortSignal) =>
     fetch(`${API}/conversations/${conversationId}/messages/stream`, {
       method: 'POST',

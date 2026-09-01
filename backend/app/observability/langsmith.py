@@ -1,3 +1,5 @@
+"""LangSmith Trace 的可选导出层；Trace 不是业务状态或恢复事实源。"""
+
 import asyncio
 import contextlib
 import hashlib
@@ -126,6 +128,7 @@ class TraceInvocation:
 
 @dataclass
 class RootTrace:
+    """一次咨询或记忆任务的根 Trace 句柄，支持子 Span 与幂等结束。"""
     enabled: bool
     trace_id: str | None
     config: dict[str, Any]
@@ -134,6 +137,7 @@ class RootTrace:
     _finished: bool = False
 
     def activate(self):
+        """把根 RunTree 放入当前上下文，使 LangChain/LangGraph 子调用自动嵌套。"""
         if not self.enabled or self.run_tree is None:
             return contextlib.nullcontext()
         return tracing_context(parent=self.run_tree, client=self.client, enabled=True)
@@ -176,7 +180,11 @@ class RootTrace:
 
 
 class LangSmithObservability:
-    """Application-scoped, fail-open LangSmith integration."""
+    """应用级、运行期 fail-open 的 LangSmith 集成。
+
+    AgentRun/AgentRunEvent 和 LangGraph Checkpoint 才负责业务恢复；LangSmith 只负责
+    调用链观察。导出异常会降级本组件，但不得中断回答、MCP 或记忆任务。
+    """
 
     graph_version = "three-agent-v3-runtime-skills"
     prompt_version = "legal-consultation-v3-progressive-skills"

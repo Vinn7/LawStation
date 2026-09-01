@@ -202,6 +202,11 @@ class MemoryJob(Base):
 
 
 class AgentRun(Base):
+    """后台咨询任务的业务事实源，不等同于 LangGraph Checkpoint。
+
+    部分唯一索引保证同一 tenant/user/conversation 最多一个 queued/running Run；
+    langgraph_thread_id 标识本次执行，conversation_id 才是业务会话边界。
+    """
     __tablename__ = "agent_runs"
     __table_args__ = (
         ForeignKeyConstraint(
@@ -254,6 +259,7 @@ class AgentRun(Base):
 
 
 class AgentRunEvent(Base):
+    """按单 Run sequence 排序的可重放事件日志，供 SSE 断线续传和状态观察。"""
     __tablename__ = "agent_run_events"
     __table_args__ = (
         ForeignKeyConstraint(
