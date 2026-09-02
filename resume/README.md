@@ -25,22 +25,25 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 
 ## 阅读导航
 
-1. [架构总览](architecture.md)：边界、依赖、共享状态与技术栈。
-2. [启动与生命周期](startup.md)：`python run.py` 到应用关闭。
-3. [API 与聊天链路](api-chat.md)：所有权、SSE、心跳和持久化。
-4. [三 Agent 编排](agent.md)：分析、检索、生成、复核与引用。
-5. [Agent 任务持久化](agent-task-persistence.md)：AgentRun、LangGraph Checkpoint、租约、SSE 重放、取消与重启恢复。
-6. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
-7. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
-8. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
-9. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
-10. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
-11. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
-12. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
-13. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
-14. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
-15. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
-16. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+1. [AI Agent 岗位简历项目说明](lawstation-resume-description.md)：可直接复制的标准版、精简版、面试介绍和数字边界。
+2. [架构总览](architecture.md)：边界、依赖、共享状态与技术栈。
+3. [启动与生命周期](startup.md)：`python run.py` 到应用关闭。
+4. [API 与聊天链路](api-chat.md)：所有权、SSE、心跳和持久化。
+5. [三 Agent 编排](agent.md)：分析、检索、生成、复核与引用。
+6. [三 Agent 行为详解](three-agent-behavior.md)：逐角色输入、决策、工具权限、输出、失败语义、复核与典型路径。
+7. [LangChain 与 LangGraph 实现详解](langchain-langgraph.md)：模型封装、Message、工具 Agent、StateGraph、Middleware、Streaming 与 Checkpoint。
+8. [Agent 任务持久化](agent-task-persistence.md)：AgentRun、LangGraph Checkpoint、租约、SSE 重放、取消与重启恢复。
+9. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
+10. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
+11. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
+12. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
+13. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
+14. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
+15. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
+16. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
+17. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
+18. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
+19. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 
 ## 一句话主链路
 
@@ -49,7 +52,6 @@ flowchart LR
     UI["React 工作台"] --> API["FastAPI REST / SSE"]
     API --> MEMORY["用户隔离的记忆快照"]
     API --> GRAPH["LangGraph 三 Agent"]
-    GRAPH --> SKILLS["受控运行时 Skills"]
     GRAPH --> LLM["DeepSeek"]
     GRAPH --> TOOLS["缓存的 MCP Tools"]
     TOOLS --> MCP["/mcp/"]
@@ -72,7 +74,7 @@ flowchart LR
 - **文档偏差**：非 8000 端口启动时，默认 `MCP_LAW_SERVER_URL` 不会自动跟随 `--port` 调整。
 - **已验证**：`tools/` 是参考/遗留工具集合，正式 Agent、MCP 和 API 代码没有导入它。
 - **已验证**：启动器提供 LangSmith `config/all/off` 进程级开关；全量模式把 SSE 编排、三 Agent、MCP 和 RAG 内部阶段关联为一个咨询根 Trace，并以 Session 上限保护线上资源。
-- **已验证**：运行时 Skill 采用“模型建议 + 服务端裁决”，只在选中后加载完整指令；4 个领域 Skill 受角色、工具和最多 2 个组合约束，关闭或普通执行失败时基础三 Agent 链路仍可运行。
+- **已验证**：产品运行时 Skill 已从热路径移除，Case Analyst 恢复为单次结构化模型调用；`.agents/skills/` 仅用于 SDD 变更与评测审核，不进入用户对话。
 - **已验证**：`.agents/skills/` 将 SDD 变更闭环和评测真实性审核固化为仓库开发 Skill；它们不进入线上 Agent Prompt。
 
 ## 建议 Review 顺序
@@ -81,8 +83,8 @@ flowchart LR
 
 ## 本次验证结果
 
-- 后端：Conda `LawStation` 环境、临时 SQLite，`153 passed`；两条第三方依赖 warning，不影响结果。
-- 前端：Vitest `4` 个测试文件、`14 passed`。
+- 后端：Conda `LawStation` 环境、临时 SQLite，`161 passed`；两条第三方依赖 warning，不影响结果。
+- 前端：Vitest `6` 个测试文件、`25 passed`。
 - 文档：导航目标、关键 symbol、Markdown 围栏和敏感信息扫描通过。
-- 已执行：前端 Vitest `4` 个测试文件、`14 passed`，Vite 生产构建成功；两个仓库开发 Skill 通过 `quick_validate.py`。
+- 已执行：Ruff、Python编译检查、前端Vitest `6`个测试文件/`25 passed`、TypeScript与Vite生产构建。
 - 未执行：服务启动、Ollama、真实 Embedding、DeepSeek 和 LangSmith 上传。

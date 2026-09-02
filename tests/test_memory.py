@@ -25,7 +25,7 @@ from backend.app.services.memory_schemas import (
     MemoryExtractionResult,
     StructuredConversationSummary,
 )
-from backend.app.services.memory_tasks import MemoryTaskManager
+from backend.app.services.memory_tasks import MemoryTaskManager, _failure_details
 from backend.app.services.repositories import OwnedRepository
 
 
@@ -691,3 +691,23 @@ async def test_tool_choice_compatibility_error_is_not_retried(monkeypatch):
     assert failed.status == "failed"
     assert failed.attempts == 1
     assert failed.last_error == "记忆模型调用方式与模型不兼容"
+
+
+def test_memory_failure_details_classifies_known_parameter_and_transport_errors():
+    parameter_error = RuntimeError("Unsupported parameter: max_completion_tokens")
+    details = _failure_details(parameter_error)
+    assert details.category == "compatibility_error"
+    assert details.retryable is False
+    assert details.safe_error == "记忆模型请求参数与 DeepSeek Chat Completions 不兼容"
+    assert details.upstream_parameter == "max_completion_tokens"
+
+    class UpstreamUnavailable(RuntimeError):
+        status_code = 503
+        code = "service_unavailable"
+        param = None
+
+    details = _failure_details(UpstreamUnavailable("upstream unavailable"))
+    assert details.category == "transport_error"
+    assert details.retryable is True
+    assert details.upstream_status == 503
+    assert details.upstream_error_code == "service_unavailable"

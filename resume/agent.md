@@ -1,5 +1,8 @@
 # LawStation 三 Agent 行为与 LangGraph 流程
 
+> LangChain、LangGraph API、State/Context、Middleware、Streaming 与 Checkpoint 的逐项说明见 [LangChain 与 LangGraph 实现详解](langchain-langgraph.md)。
+> 三个业务 Agent 各自的输入、决策、输出、失败语义和典型路径见 [三 Agent 行为详解](three-agent-behavior.md)。
+
 ## 1. 角色划分
 
 LawStation 的“三 Agent”是同一进程、同一 LangGraph 内的角色分工：
@@ -43,7 +46,6 @@ case_analysis
 evidence_packet
 counsel_draft
 review_result
-active_skills, skill_outputs
 retry_count, revision_count
 final_answer, citations, errors
 ```
@@ -208,34 +210,27 @@ LLM Reviewer 检查覆盖度、证据越界、事实忠实和矛盾；代码随�
 ## 15. LangGraph 持久化与准确性状态
 
 - `LegalConsultationGraph._compile` 注入 `AsyncSqliteSaver`，节点成功后的 super-step 可恢复；Run 级 thread 为 `agent-run:<run_id>`，不会跨轮继承旧 Graph State。
+- 根 Graph 只设置唯一 `thread_id`，不把 `checkpoint_ns` 当作版本标签；该字段由 LangGraph 保留给嵌套子图路径。
 - `LegalConsultationState` 持久化模型/工具计数、trajectory、EvidencePacket、fact overrides、草稿、复核和最终引用；恢复时 `AgentRuntime.stream` 用 checkpoint 重新初始化调用计数，防止上限归零。
 - Research 将 `candidate_status` 与 `evidence_status` 分开，并保存 `accepted_chunk_ids/rejected_candidates`；候选未被明确处理时最多执行一次无工具 `evidence_selector`。
 - `CaseAnalysis.current_fact_overrides` 经 `_validate_fact_overrides` 所有权校验后写入 State；`_fact_boundary_errors` 阻止最终回答继续采用明确被替换的旧值。
 - 执行语义是“Graph 节点至少一次、节点间 Checkpoint 恢复、最终消息严格幂等”。只读 RAG 工具可安全重放，未来副作用工具需单独设计幂等键。
+- Graph 完成后的 checkpoint ID 查询是非关键 bookkeeping，读取失败会安全降级并继续保存回答；恢复前 State 读取仍保持严格失败。
 
-## 16. 运行时 Skill 路由与执行
+## 16. 精简运行链路
 
-Case Analyst 的结构化输出新增 `requested_skill_ids`。`SkillRegistry.catalog_prompt()` 只把名称和描述提供给模型，避免将所有领域指令常驻上下文；模型建议后由 `resolve()` 校验未知 ID、Agent 角色、工具权限及最多 2 个组合，再由 `prompt_for()` 向对应节点注入完整内容。
-
-首期能力分工：
-
-| Skill | 主要节点 | 结果 |
-|---|---|---|
-| `case-intake` | Case Analyst | 主体、关系、事实、时间线、金额、冲突和缺口 |
-| `evidence-audit` | Legal Counsel / Reviewer | 待证事实、已有/缺失证据、强度、保全和真实性风险 |
-| `procedure-roadmap` | Legal Research / Counsel / Reviewer | 条件化程序入口、步骤、期限、材料和风险 |
-| `document-readiness` | Legal Counsel / Reviewer | 文书类型、信息缺口、一致性、证据缺口和就绪度 |
-
-`case-intake` 使用独立结构化调用；Counsel 返回的 `skill_outputs` 必须通过注册表绑定的 Pydantic Schema，未选中或伪造 Skill 输出会被丢弃。`procedure-roadmap` 即使需要法条，也只能由 Legal Research 通过既有 MCP 工具获得证据。一般 Skill 执行失败会发送安全 `skill_status` 后回到基础链路；安全策略违规不会降级为自由模型输出。
+运行时 Skill 已移除。Case Analyst 不再选择能力 ID，也不再追加 `case-intake` 模型调用；Research、Counsel 和 Reviewer 只使用各自固定职责 Prompt。该调整减少了首阶段的串行模型调用，同时保持 EvidencePacket、引用边界、Reviewer Fast Path 与 LangGraph Checkpoint 不变。
 
 ## 多轮流程样例
 
-`backend/app/evaluation/conversation_scenarios.py::blueprint_definitions` 将Agent流程拆成18类合成场景，覆盖直接回答、澄清、matched/no-match/tool-error、Skill选择、最新事实覆盖、跨会话记忆、多用户后台任务、取消、SSE重放和409互斥。DeepSeek只生成每轮用户话术，动作和预期事件来自确定性模板，避免模型自行定义测试结论。
+`backend/app/evaluation/conversation_scenarios.py::blueprint_definitions` 将Agent流程拆成12类合成场景，覆盖直接回答、澄清、matched/no-match/tool-error、最新事实覆盖、跨会话记忆、多用户后台任务、取消、SSE重放和409互斥。DeepSeek只生成每轮用户话术，动作和预期事件来自确定性模板，避免模型自行定义测试结论。
 
-当前`lawstation-dialogue-scenarios-v1`含36条冻结样例，并已提供默认关闭的前端场景观察模式。用户可逐步触发真实AgentRun，观察Agent/Skill/工具事件、SSE重放、取消及记忆结果；系统不会自动连续跑完数据集，也尚未实跑36条，因此不构成Agent质量或流程通过率数据。
+当前默认 `lawstation-dialogue-scenarios-v2` 含24条冻结样例，并已提供默认关闭的前端场景观察模式。用户可逐步触发真实 AgentRun，观察 Agent/工具事件、SSE重放、取消及记忆结果；系统不会自动连续跑完数据集，也尚未实跑24条，因此不构成Agent质量或流程通过率数据。含运行时 Skill 的 v1 仅作为历史生成产物保留。
 
-关键 symbol：`SkillRegistry`、`LegalConsultationGraph._activate_skills`、`CaseAnalysis.requested_skill_ids`、`CounselDraft.skill_outputs`。
+## Agent 三维质量评测
 
-## 17. Skill 测试与当前边界
+`backend/app/evaluation/agent_quality.py` 将最终Agent质量拆为事实忠实度、Reviewer有效性和回答质量。评测Target直接复用生产Counsel、Review Gate、Reviewer与Finalize，固定EvidencePacket以避免把RAG召回波动误归因给回答Agent；Reviewer集通过8条错误草稿和4条安全草稿衡量检出率、误拒率、Unsafe Draft Escape与一次修订成功率。三类Judge一次请求返回整组结构化指标，不进入生产Graph或业务数据库。
 
-`tests/test_skills.py` 验证 Progressive Disclosure、角色/工具白名单、组合上限、伪造 ID、输出 Schema、SSE 状态与并发安全数据边界。`lawstation-skills-v1` 提供 24 条合成路由 fixture，确定性 evaluator 计算 selection precision/recall 与 policy compliance。该数据集尚未执行真实模型路由实验，不能将结构测试写成实际选择准确率。
+2026-09-02 的正式实测完整执行 30 个 Target Run 和 30 次专项 Judge。回答质量套件的引用归属、`no_match` 安全、最新事实边界和无依据主张控制均通过；Judge 相关性为 4.50/5、清晰度为 4.75/5。Reviewer 检出率为 87.5%，未达到 90% 门禁，事实套件的字符串旧值检查还存在否定语境假阳性。完整数字和结论边界见 `resume/eval-results.md`。
+
+关键 symbol：`LegalConsultationGraph.case_analyst`、`legal_researcher`、`legal_counsel`、`review_gate`、`reviewer`、`finalize`。

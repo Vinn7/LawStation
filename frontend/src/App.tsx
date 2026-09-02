@@ -32,7 +32,6 @@ import type {
   ScenarioSession,
   ScenarioStepResult,
   SseEvent,
-  SkillActivity,
   ToolActivity,
   User,
 } from './types';
@@ -445,20 +444,6 @@ export default function App() {
         toolActivity: undefined,
         updatedAt: Date.now(),
       }), snapshot);
-    } else if (item.event === 'skill_status') {
-      const data = item.data as { skill_id?: string; status?: SkillActivity['status']; message?: string };
-      const status = data.status ?? 'running';
-      updateRuntime(snapshot.key, (runtime) => ({
-        ...runtime,
-        skillActivity: status === 'completed'
-          ? undefined
-          : {
-              skillId: data.skill_id ?? 'unknown',
-              status,
-              message: data.message ?? '正在执行领域能力',
-            },
-        updatedAt: Date.now(),
-      }), snapshot);
     } else if (item.event === 'tool_call_start') {
       const data = item.data as { name?: string };
       updateRuntime(snapshot.key, (runtime) => ({ ...runtime, toolActivity: { name: data.name ?? 'unknown', status: 'running' }, updatedAt: Date.now() }), snapshot);
@@ -490,7 +475,6 @@ export default function App() {
         activeAgent: undefined,
         statusMessage: undefined,
         toolActivity: undefined,
-        skillActivity: undefined,
         unread: !visible,
         updatedAt: Date.now(),
       }), snapshot);
@@ -599,7 +583,6 @@ export default function App() {
             activeAgent: undefined,
             statusMessage: undefined,
             toolActivity: undefined,
-            skillActivity: undefined,
             reconnecting: false,
             unread: serverRun.status === 'completed' && !visible,
             error: serverRun.status === 'failed' ? (serverRun.error_summary || '回答生成失败') : '',
@@ -658,7 +641,6 @@ export default function App() {
       lastEventSequence: 0,
       requestToken: token,
       toolActivity: undefined,
-      skillActivity: undefined,
       memoryMessage: '',
       error: '',
       failedQuestion: '',
@@ -701,7 +683,6 @@ export default function App() {
         error: errorMessage(error),
         failedQuestion: question,
         toolActivity: undefined,
-        skillActivity: undefined,
         updatedAt: Date.now(),
       }), { userId: ownerId, conversationId: targetConversationId });
     }
@@ -1295,7 +1276,6 @@ export default function App() {
             index={index}
             agent={agentActivity}
             tool={selectedRuntime?.toolActivity ?? null}
-            skill={selectedRuntime?.skillActivity ?? null}
             memoryMessage={selectedRuntime?.memoryMessage ?? ''}
             error={selectedRuntime?.error ?? ''}
             failedQuestion={selectedRuntime?.failedQuestion ?? ''}

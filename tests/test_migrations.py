@@ -32,6 +32,10 @@ def test_existing_sqlite_memory_schema_is_backed_up_and_upgraded(tmp_path):
             );
             INSERT INTO memory_jobs VALUES (
                 'j2','t','u','c','source-2','failed',3,0,0,
+                '记忆模型调用方式与模型不兼容',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+            );
+            INSERT INTO memory_jobs VALUES (
+                'j3','t','u','c','source-3','failed',3,0,0,
                 'unrelated transport error',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
             );
         """)
@@ -49,11 +53,15 @@ def test_existing_sqlite_memory_schema_is_backed_up_and_upgraded(tmp_path):
         repaired_job = connection.execute(
             "SELECT status, attempts, last_error FROM memory_jobs WHERE id='j1'"
         ).fetchone()
-        unrelated_job = connection.execute(
+        sanitized_job = connection.execute(
             "SELECT status, attempts, last_error FROM memory_jobs WHERE id='j2'"
+        ).fetchone()
+        unrelated_job = connection.execute(
+            "SELECT status, attempts, last_error FROM memory_jobs WHERE id='j3'"
         ).fetchone()
     assert {"scope", "status", "canonical_key", "confidence", "version"} <= columns
     assert (status, active) == ("pending", 0)
     assert revision == TARGET_REVISION
     assert repaired_job == ("pending", 0, "")
+    assert sanitized_job == ("pending", 0, "")
     assert unrelated_job == ("failed", 3, "unrelated transport error")

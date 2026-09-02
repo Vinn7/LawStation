@@ -97,11 +97,6 @@ export function compareScenarioOutcome(
       ? 'unknown'
       : outcome.retrieval_status === expected.retrieval_status;
   }
-  if (Array.isArray(expected.skill_ids)) {
-    handled.add('skill_ids');
-    checks.skills = [...expected.skill_ids].map(String).sort().join('|')
-      === [...outcome.selected_skill_ids].sort().join('|');
-  }
   for (const [key, value] of Object.entries(observedChecks)) {
     if (key in expected) {
       handled.add(key);

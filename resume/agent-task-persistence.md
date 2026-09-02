@@ -162,7 +162,6 @@ created_at
 ```text
 message_start
 agent_status
-skill_status
 tool_call_start
 tool_call_result
 token
@@ -269,10 +268,13 @@ graph.compile(
 
 ```text
 thread_id = agent-run:<run_id>
-checkpoint_ns = lawstation-consultation-v1
 ```
 
 不使用 `conversation_id` 作为 thread ID，是为了避免同一会话多轮 Run 继承旧 Graph 的 `messages/evidence_packet/counsel_draft`，形成与业务消息和 `MemoryService` 冲突的第二套跨轮记忆。
+
+业务层不为根 Graph 设置 `checkpoint_ns`。该字段在 LangGraph 中表示嵌套子图路径；传入类似 `lawstation-consultation-v2` 的业务版本字符串后，`aget_state()` 会尝试查找同名子图并抛出 `Subgraph ... not found`。根图 Saver 实际使用空 namespace，Graph/Prompt 版本由 LangSmith metadata 和项目版本记录管理。
+
+Graph 完成后，`checkpoint_info()` 只读取 checkpoint ID 并写入 AgentRun bookkeeping。该辅助读取失败时记录 `langgraph.checkpoint.read.failed` 并返回空元数据，已经生成的回答仍会幂等持久化；服务重启恢复前的 `aget_state()` 属于执行正确性边界，失败时不会静默从头运行。
 
 ## 11. Checkpoint 保存的 State
 
@@ -288,11 +290,10 @@ review_result
 retry_count / revision_count
 final_answer / citations / errors
 current_fact_overrides
-active_skills / skill_outputs
 model_call_count / tool_call_count / tool_trajectory
 ```
 
-它覆盖恢复所需的案情、法规证据、草稿、复核、最新事实覆盖、Skill 输出和调用计数。
+它覆盖恢复所需的案情、法规证据、草稿、复核、最新事实覆盖和调用计数。
 
 不保存：
 
@@ -461,7 +462,7 @@ POST /api/agent-runs/{run_id}/cancel
 恢复任务再次 claim 后 `attempt > 1`，`AgentService` 传入 `resume=true`。`AgentRuntime.stream()` 使用同一 thread ID 调用 `graph.aget_state()`：
 
 - 有 Checkpoint 时恢复 State；
-- 把 `model_call_count/tool_call_count/tool_trajectory/active_skills` 装回请求级 Context；
+- 把 `model_call_count/tool_call_count/tool_trajectory` 装回请求级 Context；
 - 以 `graph_input=None` 从最近 super-step 继续；
 - 无有效 Checkpoint 时使用重新构造的初始 State 从头执行。
 

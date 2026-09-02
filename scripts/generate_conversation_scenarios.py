@@ -30,12 +30,12 @@ from mcp_servers.law_rag.engine import load_chunks
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "evals" / "conversations"
-BLUEPRINTS = OUTPUT / "blueprints-v1.json"
-CANDIDATES = OUTPUT / "generated-candidates-v1.jsonl"
+BLUEPRINTS = OUTPUT / "blueprints-v2.json"
+CANDIDATES = OUTPUT / "generated-candidates-v2.jsonl"
 FROZEN = OUTPUT / f"{DATASET_VERSION}.jsonl"
 MANIFEST = OUTPUT / f"{DATASET_VERSION}.manifest.json"
 VALIDATION = OUTPUT / "generation-validation.json"
-CHECKPOINTS = OUTPUT / ".checkpoints"
+CHECKPOINTS = OUTPUT / ".checkpoints-v2"
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -77,12 +77,12 @@ def prepare(_args) -> None:
     blueprints = attach_sources(
         blueprint_definitions(), chunks, seed=settings.test_scenario_generator_seed
     )
-    if len(blueprints) != 18:
-        raise SystemExit(f"场景蓝图数量错误：{len(blueprints)}/18")
+    if len(blueprints) != 12:
+        raise SystemExit(f"场景蓝图数量错误：{len(blueprints)}/12")
     if BLUEPRINTS.is_file():
         existing = json.loads(BLUEPRINTS.read_text("utf-8"))
         if existing != blueprints:
-            raise SystemExit("既有blueprints-v1.json与当前模板不一致，拒绝静默覆盖")
+            raise SystemExit("既有blueprints-v2.json与当前模板不一致，拒绝静默覆盖")
     else:
         _atomic_text(BLUEPRINTS, json.dumps(blueprints, ensure_ascii=False, indent=2) + "\n")
     CHECKPOINTS.mkdir(parents=True, exist_ok=True)
@@ -241,7 +241,7 @@ async def generate(args) -> None:
 
 def validate(_args) -> None:
     if not BLUEPRINTS.is_file():
-        raise SystemExit("缺少blueprints-v1.json")
+        raise SystemExit("缺少blueprints-v2.json")
     blueprints = json.loads(BLUEPRINTS.read_text("utf-8"))
     settings = get_settings()
     model_name = settings.test_scenario_generator_model or settings.deepseek_model

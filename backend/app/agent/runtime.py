@@ -1,10 +1,11 @@
 """应用级 LangGraph Runtime：缓存编译图，并适配请求级输入、恢复与事件输出。
 
 Runtime 本身不保存任何用户消息或案件状态；这些内容只存在于本次 State、Invocation
-Context 和指定 thread 的 Checkpoint 中。工具目录或 Skill 内容版本变化时才重编译图。
+Context 和指定 thread 的 Checkpoint 中。MCP 工具目录变化时才重编译图。
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -13,9 +14,9 @@ from langchain_core.messages import BaseMessage
 from backend.app.agent.graph import LegalConsultationGraph
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
-from backend.app.agent.skills import SkillRegistry
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.logging import audit
 from backend.app.observability import LangSmithObservability
 
 
@@ -29,20 +30,18 @@ class AgentRuntime:
         settings: Settings | None = None,
         observability: LangSmithObservability | None = None,
         checkpointer: Any = None,
-        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.registry = registry
         self.provider = provider
         self.settings = settings or get_settings()
-        self.skill_registry = skill_registry or SkillRegistry(self.settings)
         self.observability = observability or LangSmithObservability(self.settings)
         self.checkpointer = checkpointer
         self._compile_lock = asyncio.Lock()
         self._graph: LegalConsultationGraph | None = None
-        self._graph_key: tuple[int, tuple[str, ...], str] | None = None
+        self._graph_key: tuple[int, tuple[str, ...]] | None = None
 
     async def ensure_ready(self, context: AgentInvocationContext) -> LegalConsultationGraph:
-        """懒加载 MCP 工具，并按工具/Skill 版本 single-flight 编译 Graph。"""
+        """懒加载 MCP 工具，并按工具版本 single-flight 编译 Graph。"""
 
         model = self.provider.get_chat_model()
         # get_tools 是 MCP“工具发现”而不是法律查询。Registry 缓存 BaseTool 包装，
@@ -52,7 +51,6 @@ class AgentRuntime:
         key = (
             registry_status.version,
             tuple(tool.name for tool in tools),
-            self.skill_registry.status().catalog_digest,
         )
         if self._graph is not None and self._graph_key == key:
             return self._graph
@@ -63,7 +61,6 @@ class AgentRuntime:
                     model=model,
                     tools=tools,
                     registry=self.registry,
-                    skill_registry=self.skill_registry,
                     settings=self.settings,
                     checkpointer=self.checkpointer,
                 )
@@ -97,8 +94,6 @@ class AgentRuntime:
             "citations": [],
             "errors": [],
             "current_fact_overrides": [],
-            "active_skills": [],
-            "skill_outputs": {},
             "model_call_count": 0,
             "tool_call_count": 0,
             "tool_trajectory": [],
@@ -107,11 +102,12 @@ class AgentRuntime:
         config = dict(trace_config or context.trace_config or {})
         configurable = dict(config.get("configurable") or {})
         # 每个 AgentRun 使用独立 thread_id，避免把 Checkpoint 误用为跨轮记忆。
-        # checkpoint_ns 用于隔离未来其他 Graph/版本写入的状态。
-        configurable.update({
-            "thread_id": thread_id or configurable.get("thread_id") or context.identity.request_id,
-            "checkpoint_ns": "lawstation-consultation-v1",
-        })
+        # 根 Graph 不设置 checkpoint_ns：LangGraph 将非空 namespace 解释为嵌套
+        # 子图路径，而不是业务版本标签；Graph/Prompt 版本由观测 metadata 管理。
+        configurable["thread_id"] = (
+            thread_id or configurable.get("thread_id") or context.identity.request_id
+        )
+        configurable.pop("checkpoint_ns", None)
         config["configurable"] = configurable
         graph_input: LegalConsultationState | None = state
         if resume and self.checkpointer is not None:
@@ -125,7 +121,6 @@ class AgentRuntime:
                 context.metrics.tool_trajectory = list(
                     snapshot.values.get("tool_trajectory", [])
                 )
-                context.active_skills = list(snapshot.values.get("active_skills", []))
                 # 对已有 thread 传 None 表示从最近 Checkpoint 继续，而非重新提交初始
                 # State；LangGraph 会从下一个未完成 super-step 恢复。
                 graph_input = None
@@ -174,6 +169,17 @@ class AgentRuntime:
                 final_state["review_result"].model_dump()
                 if final_state.get("review_result") else None
             ),
+            # Counsel 的逐项 claim/evidence 映射只进入安全评测摘要，不进入 SSE、
+            # 业务消息或下一轮记忆。Agent 质量评测据此区分“引用 ID 存在”和
+            # “每个法律主张是否实际声明了证据”两个层次。
+            "counsel_claims": (
+                [item.model_dump() for item in final_state["counsel_draft"].claims]
+                if final_state.get("counsel_draft") else []
+            ),
+            "counsel_confidence": (
+                final_state["counsel_draft"].confidence
+                if final_state.get("counsel_draft") else None
+            ),
             "citations": [
                 item.model_dump() if hasattr(item, "model_dump") else item for item in citations
             ],
@@ -187,8 +193,6 @@ class AgentRuntime:
                 item.model_dump() if hasattr(item, "model_dump") else item
                 for item in final_state.get("errors", [])
             ],
-            "active_skills": list(final_state.get("active_skills", [])),
-            "skill_outputs": dict(final_state.get("skill_outputs", {})),
         }
         analysis = context.evaluation_output.get("case_analysis") or {}
         evidence = context.evaluation_output.get("evidence_packet") or {}
@@ -236,14 +240,15 @@ class AgentRuntime:
         graph = self._graph
         if graph is None:
             return {}
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "lawstation-consultation-v1",
-            }
-        }
+        config = {"configurable": {"thread_id": thread_id}}
         # aget_state 返回 StateSnapshot；这里仅抽取持久化 bookkeeping 信息。
-        snapshot = await graph.compiled.aget_state(config)
+        # 该读取发生在 Graph 已产出最终回答之后，仅用于补充 checkpoint_id；失败时
+        # 必须降级为空元数据，不能把有效回答反向标记为失败。
+        try:
+            snapshot = await graph.compiled.aget_state(config)
+        except Exception as exc:  # noqa: BLE001 - non-critical metadata boundary
+            self._audit_checkpoint_read_failure(thread_id, "final_metadata", exc)
+            return {}
         configurable = (snapshot.config or {}).get("configurable", {}) if snapshot else {}
         return {
             "checkpoint_id": str(configurable.get("checkpoint_id") or ""),
@@ -254,27 +259,20 @@ class AgentRuntime:
         """Return a deliberately small, non-reasoning summary for the test observer."""
         if self.checkpointer is None or self._graph is None:
             return {"checkpoint_available": False}
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "lawstation-consultation-v1",
-            }
-        }
+        config = {"configurable": {"thread_id": thread_id}}
         # 场景观察接口只读取允许公开的状态摘要，不能返回 Prompt、memory_context、
         # 法条正文或模型内部推理。
-        snapshot = await self._graph.compiled.aget_state(config)
+        try:
+            snapshot = await self._graph.compiled.aget_state(config)
+        except Exception as exc:  # noqa: BLE001 - observer must not affect the run
+            self._audit_checkpoint_read_failure(thread_id, "scenario_outcome", exc)
+            return {"checkpoint_available": False}
         if snapshot is None or not snapshot.values:
             return {"checkpoint_available": False}
         values = snapshot.values
         evidence = values.get("evidence_packet")
         if hasattr(evidence, "model_dump"):
             evidence = evidence.model_dump()
-        active_skills = values.get("active_skills") or []
-        skill_ids = sorted({
-            str(item.get("skill_id"))
-            for item in active_skills
-            if isinstance(item, dict) and item.get("skill_id")
-        })
         citations = values.get("citations") or []
         return {
             "checkpoint_available": True,
@@ -282,9 +280,24 @@ class AgentRuntime:
                 evidence.get("retrieval_status")
                 if isinstance(evidence, dict) else "unknown"
             ) or "unknown",
-            "selected_skill_ids": skill_ids,
             "citation_count": len(citations),
         }
+
+    @staticmethod
+    def _audit_checkpoint_read_failure(
+        thread_id: str, operation: str, exc: Exception
+    ) -> None:
+        """记录安全诊断字段，不上传 Graph State、用户正文或异常堆栈。"""
+        run_id = thread_id.removeprefix("agent-run:")
+        audit(
+            "langgraph.checkpoint.read.failed",
+            level=logging.ERROR,
+            status="degraded",
+            operation=operation,
+            thread_id=thread_id,
+            run_id=run_id if run_id != thread_id else None,
+            error_type=type(exc).__name__,
+        )
 
     async def delete_checkpoint_thread(self, thread_id: str) -> None:
         """清理测试会话等已授权 Run 的整个 LangGraph thread。"""

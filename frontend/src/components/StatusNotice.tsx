@@ -1,10 +1,9 @@
-import { AlertCircle, BookOpenCheck, BrainCircuit, LoaderCircle, Search, Sparkles } from 'lucide-react';
-import type { AgentActivity, IndexStatus, SkillActivity, ToolActivity } from '../types';
+import { AlertCircle, BookOpenCheck, BrainCircuit, LoaderCircle, Search } from 'lucide-react';
+import type { AgentActivity, IndexStatus, ToolActivity } from '../types';
 
 interface StatusNoticeProps {
   index: IndexStatus;
   tool: ToolActivity | null;
-  skill?: SkillActivity | null;
   agent?: AgentActivity | null;
   memoryMessage: string;
   error: string;
@@ -28,7 +27,6 @@ function toolLabel(tool: ToolActivity): string {
 export function StatusNotice({
   index,
   tool,
-  skill = null,
   agent = null,
   memoryMessage,
   error,
@@ -38,7 +36,7 @@ export function StatusNotice({
 }: StatusNoticeProps) {
   const rerankerDegraded = ['degraded', 'cooldown'].includes(index.reranker_status ?? '');
   const showIndex = index.status !== 'ready' || rerankerDegraded;
-  if (!showIndex && !agent && !tool && !skill && !memoryMessage && !error) return null;
+  if (!showIndex && !agent && !tool && !memoryMessage && !error) return null;
 
   return (
     <div className="status-stack" aria-live="polite">
@@ -58,14 +56,7 @@ export function StatusNotice({
           <span>{toolLabel(tool)}</span>
         </div>
       )}
-      {skill && !tool && (
-        <div className={`status-notice agent-notice is-${skill.status}`}>
-          {['selected', 'running'].includes(skill.status)
-            ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
-          <span>{skill.message}</span>
-        </div>
-      )}
-      {agent && !tool && !skill && (
+      {agent && !tool && (
         <div className={`status-notice agent-notice is-${agent.status}`}>
           {['queued', 'analyzing', 'researching', 'drafting', 'reviewing'].includes(agent.status)
             ? <LoaderCircle className="spin" size={17} /> : <BrainCircuit size={17} />}

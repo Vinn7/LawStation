@@ -1,7 +1,7 @@
 # LawStation 项目 Spec
 
-> 版本：4.0
-> 基线日期：2026-09-01
+> 版本：4.3
+> 基线日期：2026-09-02
 > 适用仓库：`/Users/Admin1/Files/LawStation`  
 > 文档性质：后续开发、代码审查、回归测试和验收的共同基线
 
@@ -224,7 +224,9 @@ get_law_article(law_name: string, article_number: string)
 
 `MemoryTaskManager.enqueue()` 是唯一允许的记忆整理入口。旧 `MemoryService.consolidate()` 已封存并必须抛出弃用错误，不得重新启用截断拼接或把用户长消息原文直接写成 active 记忆。
 
-记忆抽取和摘要使用 `LLMProvider.get_memory_model` 提供的独立非流式、非 Thinking 模型配置，通过 DeepSeek JSON Output 返回 JSON 并由 Pydantic 校验。该链路不得绑定、发现或调用 MCP/业务工具，也不得发送 `tools` 或 `tool_choice`。没有可沉淀内容时 `memories=[]` 是成功结果；确定性配置或兼容错误不得反复重试，主回答保存不受后台记忆失败影响。
+记忆抽取和摘要使用 `LLMProvider.get_memory_model` 提供的独立非流式、非 Thinking 模型配置，通过 DeepSeek JSON Output 返回 JSON 并由 Pydantic 校验。该链路不得绑定、发现或调用 MCP/业务工具，也不得发送 `tools` 或 `tool_choice`。`MEMORY_LLM_MAX_TOKENS` 必须经 OpenAI SDK 的 `extra_body` 以 DeepSeek 原生 `max_tokens` 字段发送，禁止使用会被 `langchain-openai` 转换成 `max_completion_tokens` 的构造器参数。没有可沉淀内容时 `memories=[]` 是成功结果；确定性配置或兼容错误不得反复重试，主回答保存不受后台记忆失败影响。
+
+记忆失败审计只允许记录 `upstream_status/upstream_error_code/upstream_parameter/memory_model/memory_phase` 等安全诊断字段，不得记录请求正文、用户消息、密钥或上游完整响应。`max_completion_tokens`、`tool_choice` 和 `response_format` 等确定性兼容错误禁止重试；超时、429 和 5xx 才允许按任务上限恢复。Pytest 必须将 `LOG_DIR` 隔离到临时目录，故意制造的失败不得污染正式 `data/logs/lawstation.log`。
 
 记忆状态为 `pending | active | superseded | rejected | expired`；作用域为 `user | conversation`。`pending/superseded` 只用于兼容历史记录，新抽取记录和新冲突不再进入这些状态。会话级冲突只能原位替换同一案件内的旧事实，用户级冲突可以在该用户范围内替换。模型返回的无效、越权或跨会话替换 ID 必须丢弃，不得降级为新增记录。当前轮消息与历史记忆冲突时，Case Analyst、Legal Counsel 和 Reviewer 均必须以当前消息为准。
 
@@ -352,10 +354,6 @@ AGENT_GLOBAL_CONCURRENCY
 AGENT_PER_USER_CONCURRENCY
 AGENT_PER_CONVERSATION_CONCURRENCY
 AGENT_QUEUE_TIMEOUT_SECONDS
-AGENT_SKILLS_ENABLED
-AGENT_SKILL_ROOT
-AGENT_MAX_ACTIVE_SKILLS
-AGENT_SKILL_STRICT_VALIDATION
 LLM_REQUEST_TIMEOUT_SECONDS
 LLM_MAX_RETRIES
 LLM_TEMPERATURE
@@ -617,7 +615,6 @@ SSE_HEARTBEAT_SECONDS
 11. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。
 12. `backend/app/observability/langsmith.py::LangSmithObservability`：采样、隐私过滤、trace 与反馈。
 13. `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`：发布质量门禁。
-14. `backend/app/agent/skills.py::SkillRegistry`：运行时 Skill 加载、白名单解析、渐进式指令注入与输出校验。
 
 ## 18. Spec 维护规则
 
@@ -660,12 +657,17 @@ SSE_HEARTBEAT_SECONDS
 - **3.8 / 2026-08-31**：引入 4 个版本化运行时 Agent Skill 与 2 个仓库开发 Skill；实现模型建议、服务端白名单/角色/工具/数量校验、Progressive Disclosure、请求级 Skill State、安全 SSE 状态、LangSmith 版本 metadata 和 24 条 Skill 路由 fixture。Skill 关闭或一般执行失败时保持三 Agent 主链路可用，越权工具和伪造输出由服务端拒绝。
 - **3.9 / 2026-08-31**：增加18类多轮对话场景蓝图和独立DeepSeek JSON生成器；模型只生成合成用户话术，测试动作、预期事件和Skill权限由服务端模板控制。一次性生成并冻结36条场景，记录数据集/蓝图SHA、19次实际模型调用和1次定向泄漏修复；场景尚未执行，不能作为Agent通过率。
 - **4.0 / 2026-09-01**：增加默认关闭的前端“场景观察模式”；后端仅加载`evals/conversations/`白名单冻结JSONL，前端为Actor/会话创建专用数据，逐步执行真实AgentRun，支持取消、SSE断开/按sequence重连、消息/记忆检查和预期/实际对照。Fixture不注入真实服务，相关断言标记`inconclusive`；观察结果不等于自动化通过率。
+- **4.1 / 2026-09-01**：移除产品运行时 Skill、`SkillRegistry`、Skill State/SSE/Trace 字段和额外 `case-intake` 模型调用，恢复精简三 Agent 热路径。保留 `.agents/skills/` 的 SDD 与评测审核开发 Skill；多轮场景 v1 作为历史数据保留，默认切换到确定性移除 Skill 场景后的24条 v2 数据集。
+- **4.2 / 2026-09-01**：修复 `langchain-openai` 将记忆模型 `max_tokens` 转换为 DeepSeek 不兼容的 `max_completion_tokens`；改由 `extra_body` 发送 DeepSeek 原生参数，补充安全上游诊断、精确失败任务重排迁移和 Pytest 审计日志隔离。主 Agent Thinking 与 MCP 调用保持不变。
+- **4.3 / 2026-09-02**：修复将 LangGraph 根图 `checkpoint_ns` 误作业务版本标签导致的 `Subgraph ... not found`；根图 invocation 只传唯一 AgentRun `thread_id`，最终 checkpoint 元数据和场景摘要读取失败时安全降级，不再覆盖已生成回答。恢复前的 State 读取仍保持严格失败。
+- **4.4 / 2026-09-02**：增加事实忠实度、Reviewer有效性和回答质量三套冻结Agent评测；评测专用Target复用生产Counsel/Review Gate/Reviewer/Finalize节点，一次结构化Judge返回专项指标，30条合成分层样本分别上传三个LangSmith实验并生成时间戳报告与简历摘要。该能力不写业务消息、记忆、AgentRun或Checkpoint。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 
 - **[已实现]** `backend/app/services/agent_runs.py::AgentRunManager` 是咨询任务事实源，负责 queued/running/terminal 状态、所有权、租约、恢复、取消、最终消息幂等与事件序列。
 - **[已实现]** `backend/app/agent/checkpoint.py::checkpoint_saver` 使用独立 `data/runtime/langgraph-checkpoints.db`，业务 SQLite 与 Checkpoint SQLite 不共用文件。
-- **[已实现]** 每次 Run 使用 `thread_id=agent-run:<run_id>` 和 `checkpoint_ns=lawstation-consultation-v1`；不得使用 conversation ID 继承 Graph 状态，跨轮上下文仍只来自消息与 MemoryService。
+- **[已实现]** 每次 Run 只由业务层设置 `thread_id=agent-run:<run_id>`；根图不自定义 `checkpoint_ns`，该字段由 LangGraph 保留给嵌套子图路径。不得使用 conversation ID 继承 Graph 状态，跨轮上下文仍只来自消息与 MemoryService。
+- **[已实现]** Graph 完成后的 `checkpoint_info` 只补充 checkpoint ID，读取失败必须审计后返回空元数据并继续保存回答；恢复任务执行前的 `aget_state` 失败仍终止本次 attempt，不能从初始 State 静默重跑。
 - **[已实现]** 前端使用 `create run → GET events`；SSE `id` 为持久化 sequence，断线通过 `after_sequence/Last-Event-ID` 重放。浏览器断线不取消 Graph，明确 cancel API 才会停止任务。
 - **[已实现]** 节点至少一次执行；只读 MCP 工具允许节点恢复时重放，消息、最终回答和事件正文必须幂等。未来有副作用工具必须增加业务幂等键。
 - **[禁止]** Checkpoint 保存 SQLAlchemy Session、网络 Client、密钥或跨请求可变对象；不得把 Checkpoint 当作第二套长期记忆。
@@ -679,17 +681,14 @@ SSE_HEARTBEAT_SECONDS
 - `FactBoundaryValidator` 发现回答继续使用旧金额、日期、名称等明确被替换值时，只回到 Counsel 修改一次，不重新检索。
 - 冻结校准门禁：status accuracy ≥95%、no-match precision/recall ≥90%、matched Recall@5 回退≤1pp；未实际运行并通过校准脚本前不得把 provisional 阈值写成实测达标。
 
-## 20. 运行时 Skill 与开发 Skill
+## 20. 运行时能力边界与开发 Skill
 
 ### 20.1 运行时能力
 
-- **[已实现]** `backend/app/agent/skills.py::SkillRegistry` 在应用启动时扫描 `skills/runtime/*/SKILL.md`，校验名称、SemVer、Agent 角色、工具白名单、输出 Schema、路径边界和内容摘要，并以应用级只读对象复用。
-- **[已实现]** Case Analyst 首轮只接收 Skill 名称、描述与触发语义；模型通过 `CaseAnalysis.requested_skill_ids` 提出建议，服务端按注册顺序、白名单和 `AGENT_MAX_ACTIVE_SKILLS` 最终裁决。只有选中后，完整 Skill 指令才通过 `prompt_for()` 注入获授权的 Graph 节点。
-- **[已实现]** 首期 Skill 为 `case-intake`、`evidence-audit`、`procedure-roadmap`、`document-readiness`。`procedure-roadmap` 只允许 Legal Research 继续使用现有 `search_laws/get_law_article`；其他 Skill 不获得工具权限。
-- **[已实现]** `LegalConsultationState.active_skills/skill_outputs` 与 `AgentInvocationContext.active_skills` 均为请求级数据，不写入共享 Graph、Registry 或其他用户上下文。Checkpoint 只保存本 Run 的结果。
-- **[已实现]** 普通解析/生成失败记录 `skill.execution.failed` 并 fail-open；未知 ID、未授权工具、越权角色和未选中输出被服务端拒绝。Skill 不得绕过 MCP，不得成为用户记忆或数据库 Session 的持有者。
-- **[已实现]** SSE `skill_status` 只包含 `skill_id/status/message`；前端只展示安全中文状态，不发送完整 Skill 指令、Schema 或工具参数。LangSmith 根 Trace metadata/outputs 保存 `skill_ids/skill_versions`，不保存完整 Skill Prompt。
-- **[部分实现]** 已生成 `lawstation-skills-v1` 24 条合成路由 fixture，并提供 selection precision/recall 与 policy compliance evaluator；尚未运行真实模型路由基准，因此不得宣称实际 Skill 选择准确率。
+- **[已实现]** 线上回答只保留 Case Analyst、Legal Research、Legal Counsel 与 Reviewer/Fast Path，不加载产品运行时 Skill。
+- **[已实现]** Case Analyst 每次节点执行只进行一次结构化模型调用，不再选择 `requested_skill_ids` 或追加 `case-intake` 调用。
+- **[已实现]** Graph State、Checkpoint、SSE、LangSmith metadata 和前端运行状态均不保存或发送 `active_skills`、`skill_outputs`、`skill_status`。
+- **[历史兼容]** 数据库中既有 `skill_status` 事件和历史终态 Checkpoint 不物理删除；新任务使用唯一 AgentRun thread，前端不再解释历史 Skill 事件。
 
 ### 20.2 仓库开发能力
 
@@ -701,14 +700,22 @@ SSE_HEARTBEAT_SECONDS
 
 - **[已实现]** 运行时开关为`TEST_SCENARIOS_ENABLED=false`；`TEST_SCENARIO_DATA_PATHS`是优先白名单，旧`TEST_SCENARIO_DATA_PATH`仅作兼容回退，`TEST_SCENARIO_STEP_TIMEOUT_SECONDS`只控制前端单步等待上限。
 - **[已实现]** `run.py --test-scenarios/--no-test-scenarios`互斥且只覆盖当前进程；开启时在Ollama、TEI和Uvicorn之前校验冻结数据集并打印Dataset ID、样本数和入口位置，不修改`.env`。
-- **[已实现]** `backend/app/evaluation/conversation_scenarios.py` 定义18类确定性场景蓝图，覆盖路由、matched/no-match/tool-error、4个运行时Skill、记忆替换/隔离、多用户切换、取消、SSE重连和同会话互斥。
+- **[已实现]** `backend/app/evaluation/conversation_scenarios.py` 定义12类确定性场景蓝图，覆盖路由、matched/no-match/tool-error、记忆替换/隔离、多用户切换、取消、SSE重连和同会话互斥。
 - **[已实现]** `scripts/generate_conversation_scenarios.py` 提供 `prepare/generate/validate/freeze` 四阶段命令。DeepSeek 使用非流式、关闭Thinking的JSON Output；只允许填写标题和用户消息，不能生成Actor、会话、API动作、事件断言、Skill ID或工具权限。
 - **[已实现]** 生成结果必须通过Pydantic结构、动作/Skill白名单、重复、长度、手机号/身份证/银行卡/邮箱/密钥、Prompt Injection及法规法名/条号/连续原文泄漏校验。单个变体失败时只定向修复该变体，已通过同级变体保持不变。
-- **[已实现]** `evals/conversations/lawstation-dialogue-scenarios-v1.jsonl` 当前冻结36条合成场景，manifest记录`synthetic=true`、`human_verified=false`、Prompt版本、模型、类别和内容哈希。
+- **[已实现]** 默认 `evals/conversations/lawstation-dialogue-scenarios-v2.jsonl` 冻结24条合成场景，manifest记录其由v1确定性移除Skill类别产生；v1的36条数据作为历史生成产物保留。
 - **[已实现]** `ScenarioCatalog` 启用时校验白名单路径、符号链接边界、JSONL Schema、ID唯一性、manifest样本数和SHA256；任一数据集无效都阻止测试模式启动。关闭时不读取文件，场景API统一返回404。
 - **[已实现]** 前端使用`checking/ready/disabled/error`显式可用状态；仅后端404时隐藏入口，其他加载失败在顶部栏和侧栏显示可重试诊断。`ScenarioPanel/ScenarioExecutor`固定primary/secondary用户，为每个Actor/逻辑会话创建`[场景]`前缀专用会话，每次点击只执行一个步骤。普通聊天与场景共用`startRun/followRun`、SSE parser和`ConversationRuntime`，不复制第二套状态机。
 - **[已实现]** 场景断言遵循“有证据才通过”：未知字段或缺少Checkpoint/来源消息时为`inconclusive`；后台运行和跨会话并发保存实际Run重叠证据；SSE重连要求服务端已形成事件缺口并核对订阅epoch、游标和重复sequence；记忆断言使用持久化消息ID与`source_message_id`，不使用空集合恒真判断。
 - **[已实现]** 安全outcome API只返回终态、事件名、retrieval status、Skill ID、引用与调用计数；不返回完整Checkpoint、Prompt或推理内容。场景清理API只允许删除当前所有者的`[场景]`会话，活动Run返回409。
-- **[部分实现]** AgentRun可跨刷新继续，但场景步骤游标和对照结果仅在当前页面生命周期保留。仍未提供自动连续Runner，不得把36条样例写成端到端通过数。
+- **[部分实现]** AgentRun可跨刷新继续，但场景步骤游标和对照结果仅在当前页面生命周期保留。仍未提供自动连续Runner，不得把24条样例写成端到端通过数。
 - **[已实现]** `resume/conversation-scenario-generation-guide.md` 同时记录生成/冻结和手工场景观察流程。
 - **[禁止]** 应用启动时自动生成场景、让模型自由生成测试动作、上传真实用户事实作为样例，或用合成场景冒充真实用户/律师标注数据。
+
+## 22. Agent 三维质量评测
+
+- **[已实现]** `lawstation-factual-fidelity-v1`、`lawstation-reviewer-effectiveness-v1`、`lawstation-answer-quality-v1` 分别冻结10、12、8条合成样本，统一标记 `human_verified=false` 与 `annotation_method=llm_judge`。
+- **[已实现]** 事实与回答质量Target从固定CaseAnalysis/EvidencePacket开始；Reviewer Target从固定CounselDraft开始，直接复用生产Review Gate、Reviewer、最多一次Counsel修订及Finalize，不运行真实RAG。
+- **[已实现]** 确定性指标优先检查最新事实、旧事实泄漏、引用归属、no-match安全、Reviewer检出/误拒/逃逸和修订成功；三类专项Judge每条样本只调用一次，关闭Thinking/Tools/Streaming并使用JSON Output。
+- **[已实现]** `scripts/run_agent_quality_eval.py` 要求同时显式提供 `--upload-results --confirm-upload`，顺序上传三个LangSmith实验，并在单一时间戳目录保存JSON、CSV、逐例明细、报告和简历摘要。
+- **[限制]** 只有30个Run、30个Judge结果、全部必需指标及LangSmith见证完整时才能写入量化简历；即使完整，也必须披露 `n=30`、合成分层样本、LLM Judge和未经律师人工标注，不得称为法律准确率。

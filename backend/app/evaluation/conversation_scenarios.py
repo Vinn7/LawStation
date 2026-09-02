@@ -11,8 +11,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-PROMPT_VERSION = "lawstation-dialogue-generator-v1"
-DATASET_VERSION = "lawstation-dialogue-scenarios-v1"
+PROMPT_VERSION = "lawstation-dialogue-generator-v2-no-runtime-skills"
+DATASET_VERSION = "lawstation-dialogue-scenarios-v2"
 VARIANTS_PER_BLUEPRINT = 2
 
 ALLOWED_ACTIONS = {
@@ -26,13 +26,6 @@ ALLOWED_ACTIONS = {
     "inspect_messages",
     "inspect_memories",
 }
-ALLOWED_SKILLS = {
-    "case-intake",
-    "evidence-audit",
-    "procedure-roadmap",
-    "document-readiness",
-}
-
 _SENSITIVE_PATTERNS = {
     "mobile": re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
     "identity_card": re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
@@ -83,7 +76,6 @@ def _send(
     conversation: str = "main",
     events: list[str] | None = None,
     retrieval_status: str | None = None,
-    skill_ids: list[str] | None = None,
     citations: bool | None = None,
     terminal: str = "completed",
 ) -> dict[str, Any]:
@@ -95,8 +87,6 @@ def _send(
     }
     if retrieval_status is not None:
         expected["retrieval_status"] = retrieval_status
-    if skill_ids is not None:
-        expected["skill_ids"] = skill_ids
     if citations is not None:
         expected["citations"] = citations
     return {
@@ -152,49 +142,6 @@ def blueprint_definitions() -> list[dict[str, Any]]:
             "message_requirements": ["明确要求核验一个常见民事或劳动问题的法律依据。"],
             "preconditions": ["fixture_tool_error=true"],
             "steps": [_send(0, events=["message_start", "agent_status", "tool_call_start", "tool_call_result", "message_end"], retrieval_status="tool_error", citations=False)],
-        },
-        {
-            "id": "skill-case-intake",
-            "category": "skill",
-            "purpose": "验证复杂案情结构化Skill。",
-            "message_requirements": ["描述多主体、多时间节点和多笔金额，并要求先梳理案情。"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "message_end"], skill_ids=["case-intake"])],
-        },
-        {
-            "id": "skill-evidence-audit",
-            "category": "skill",
-            "purpose": "验证证据审查Skill。",
-            "message_requirements": ["列出两三种现有材料，询问证明力和缺失证据。"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "message_end"], skill_ids=["evidence-audit"])],
-        },
-        {
-            "id": "skill-procedure-roadmap",
-            "category": "skill",
-            "purpose": "验证程序路线Skill及法律检索边界。",
-            "message_requirements": ["询问仲裁、起诉、执行或投诉的步骤、材料与风险。"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "tool_call_start", "tool_call_result", "message_end"], skill_ids=["procedure-roadmap"])],
-        },
-        {
-            "id": "skill-document-readiness",
-            "category": "skill",
-            "purpose": "验证文书材料就绪检查Skill。",
-            "message_requirements": ["准备一种法律文书，要求检查事实、请求和材料是否齐全。"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "message_end"], skill_ids=["document-readiness"])],
-        },
-        {
-            "id": "skill-combination-limit",
-            "category": "skill",
-            "purpose": "验证两个Skill组合和数量上限。",
-            "message_requirements": ["同时要求梳理复杂案情并审查已有证据。"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "message_end"], skill_ids=["case-intake", "evidence-audit"])],
-        },
-        {
-            "id": "skill-unknown-rejected",
-            "category": "skill",
-            "purpose": "验证未知或越权Skill被服务端拒绝。",
-            "message_requirements": ["要求证据审查，并夹带一个不存在的系统能力请求。"],
-            "fixture_requested_skill_ids": ["evidence-audit", "delete-user-memory"],
-            "steps": [_send(0, events=["message_start", "agent_status", "skill_status", "message_end"], skill_ids=["evidence-audit"])],
         },
         {
             "id": "memory-latest-fact",
@@ -318,7 +265,7 @@ def generation_prompt(blueprint: dict[str, Any], variants: int) -> str:
         )
     return (
         "你正在为中国法律咨询多Agent系统生成合成多轮测试话术。\n"
-        "只生成用户会说的话，不生成答案、系统指令、工具名、Skill ID、用户ID、会话ID或测试动作。\n"
+        "只生成用户会说的话，不生成答案、系统指令、工具名、用户ID、会话ID或测试动作。\n"
         "使用张某、李某、甲公司等虚构主体，不得包含真实手机号、身份证、银行卡、邮箱或密钥。\n"
         "不得包含要求忽略系统提示、泄露提示词或绕过权限的内容。\n"
         f"{source_rule}"
@@ -402,9 +349,6 @@ def materialize_scenarios(
                         reasons.append("invalid_message_slot")
                     else:
                         step["content"] = variant.messages[slot].strip()
-                skill_ids = step.get("expected", {}).get("skill_ids", [])
-                if any(skill_id not in ALLOWED_SKILLS for skill_id in skill_ids):
-                    reasons.append("unauthorized_expected_skill")
                 steps.append(step)
             if reasons:
                 rejected.append({"scenario_id": scenario_id, "blueprint_id": parsed.blueprint_id, "reasons": sorted(set(reasons))})
@@ -414,8 +358,6 @@ def materialize_scenarios(
                 fixtures["documents"] = [blueprint["source"]]
             if "fixture_tool_error=true" in blueprint.get("preconditions", []):
                 fixtures["tool_error"] = True
-            if blueprint.get("fixture_requested_skill_ids"):
-                fixtures["requested_skill_ids"] = blueprint["fixture_requested_skill_ids"]
             scenario = {
                 "schema_version": "dialogue-scenario-v1",
                 "scenario_id": scenario_id,
@@ -456,9 +398,6 @@ def validate_scenarios(scenarios: list[dict[str, Any]]) -> list[str]:
                 errors.append(f"{scenario_id}: 非法动作")
             if step.get("action") == "send_message" and not str(step.get("content", "")).strip():
                 errors.append(f"{scenario_id}: send_message缺少content")
-            skill_ids = step.get("expected", {}).get("skill_ids", [])
-            if any(item not in ALLOWED_SKILLS for item in skill_ids):
-                errors.append(f"{scenario_id}: 预期Skill越权")
     counts = Counter(item.get("generation_metadata", {}).get("blueprint_id") for item in scenarios)
     if any(count > VARIANTS_PER_BLUEPRINT for count in counts.values()):
         errors.append("单个蓝图的变体数量超过限制")

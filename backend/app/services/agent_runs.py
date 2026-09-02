@@ -225,7 +225,6 @@ class AgentRunManager:
             checkpoint = {"checkpoint_available": False}
         observed_events = [event.event_type for event in events]
         citation_count = 0
-        event_skill_ids: set[str] = set()
         for event in events:
             try:
                 payload = json.loads(event.payload_json)
@@ -233,16 +232,10 @@ class AgentRunManager:
                 continue
             if event.event_type == "citations" and isinstance(payload, list):
                 citation_count = max(citation_count, len(payload))
-            if event.event_type == "skill_status" and isinstance(payload, dict):
-                skill_id = payload.get("skill_id")
-                if skill_id:
-                    event_skill_ids.add(str(skill_id))
-        selected_skill_ids = checkpoint.get("selected_skill_ids") or sorted(event_skill_ids)
         return {
             "terminal_status": run.status,
             "observed_events": observed_events,
             "retrieval_status": checkpoint.get("retrieval_status", "unknown"),
-            "selected_skill_ids": selected_skill_ids,
             "citation_count": max(citation_count, int(checkpoint.get("citation_count") or 0)),
             "model_call_count": run.model_call_count,
             "tool_call_count": run.tool_call_count,
@@ -455,11 +448,6 @@ class AgentRunManager:
             await asyncio.to_thread(
                 self._finish_completed, run.id, assistant_id, trace.trace_id, memory_payload
             )
-            skill_ids = [item.get("skill_id") for item in agent.active_skills]
-            skill_versions = {
-                item.get("skill_id"): item.get("version")
-                for item in agent.active_skills
-            }
             await trace.finish(
                 outputs={
                     "status": "success",
@@ -467,12 +455,6 @@ class AgentRunManager:
                     "citations": citations,
                     "model_call_count": agent.model_call_count,
                     "tool_call_count": agent.tool_call_count,
-                    "skill_ids": skill_ids,
-                    "skill_versions": skill_versions,
-                },
-                metadata={
-                    "skill_ids": skill_ids,
-                    "skill_versions": skill_versions,
                 },
             )
             audit("agent.run.completed", status="completed", run_id=run.id, assistant_message_id=assistant_id, **ctx.__dict__, conversation_id=run.conversation_id)

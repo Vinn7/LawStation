@@ -63,22 +63,6 @@ describe('status presentation', () => {
     expect(screen.queryByText(/query|top_k|正文/)).not.toBeInTheDocument();
   });
 
-  it('shows only the safe runtime skill status message', () => {
-    render(
-      <StatusNotice
-        index={{ status: 'ready', message: '就绪' }}
-        tool={null}
-        skill={{ skillId: 'evidence-audit', status: 'running', message: '正在审查证据准备情况' }}
-        memoryMessage=""
-        error=""
-        failedQuestion=""
-        onRetry={vi.fn()}
-        onDismissError={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('正在审查证据准备情况')).toBeInTheDocument();
-    expect(screen.queryByText(/SKILL\.md|output_schema|allowed_tools/)).not.toBeInTheDocument();
-  });
 });
 
 describe('message feedback', () => {

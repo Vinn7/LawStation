@@ -2,7 +2,7 @@
 
 单进程、单端口的法律咨询 Agent：FastAPI 同时托管 React 页面、业务 API、SSE 对话与法律 RAG MCP Server。
 
-运行时内置 4 个可插拔领域 Skill：案情结构化、证据审查、程序路线和文书就绪检查。Case Analyst 只建议 Skill ID，服务端 `SkillRegistry` 校验白名单、角色、工具权限和最多 2 个组合，选中后才按需加载完整指令；Skill 关闭或一般执行失败时，原三 Agent 链路仍可运行。
+线上回答保持精简的三 Agent 主链路。此前实验性的运行时 Skill 已移除，Case Analyst 不再执行额外的 `case-intake` 模型调用；仓库级开发 Skill 仍用于约束 SDD 和评测审核流程。
 
 项目架构、开发准则、技术选型、验收基线与已知缺口见 [`ai-context/SPEC.md`](ai-context/SPEC.md)。后续涉及架构边界、API、数据模型、配置或安全规则的变更，应同步更新该 Spec。
 
@@ -33,10 +33,10 @@ brew install text-embeddings-inference
 python scripts/create_law_sample.py --size 100 --seed 42
 ```
 
-项目还提供版本化的多轮 Agent 流程样例。18 类确定性蓝图约束用户切换、消息发送、取消、SSE 重连、记忆检查和 Skill 断言，DeepSeek 只负责生成合成案件话术，不能生成测试动作或权限。当前已冻结 36 条样例：
+项目还提供版本化的多轮 Agent 流程样例。当前默认 v2 使用 12 类确定性蓝图约束用户切换、消息发送、取消、SSE 重连和记忆检查，DeepSeek 只负责生成合成案件话术，不能生成测试动作或权限。默认冻结集包含 24 条不含运行时 Skill 的样例：
 
 ```text
-evals/conversations/lawstation-dialogue-scenarios-v1.jsonl
+evals/conversations/lawstation-dialogue-scenarios-v2.jsonl
 ```
 
 重新准备或生成时需显式执行，不会随应用启动自动调用模型：
@@ -48,7 +48,7 @@ python scripts/generate_conversation_scenarios.py validate
 python scripts/generate_conversation_scenarios.py freeze
 ```
 
-该数据集由 DeepSeek 生成并经过 Schema、敏感信息、Prompt Injection、动作白名单、Skill 权限和法规来源泄漏校验；它不是真实用户数据，也未经过律师人工标注。默认不加载、不执行。
+该数据集由既有 DeepSeek 合成结果确定性派生，并经过 Schema、敏感信息、Prompt Injection、动作白名单和法规来源泄漏校验；它不是真实用户数据，也未经过律师人工标注。包含运行时 Skill 的 36 条 v1 数据仅作为历史产物保留，默认不加载、不执行。
 
 如需逐步观察真实 Agent 链路，推荐使用本次进程启动参数：
 
@@ -60,11 +60,11 @@ python run.py --test-scenarios
 
 ```dotenv
 TEST_SCENARIOS_ENABLED=true
-TEST_SCENARIO_DATA_PATHS=["./evals/conversations/lawstation-dialogue-scenarios-v1.jsonl"]
+TEST_SCENARIO_DATA_PATHS=["./evals/conversations/lawstation-dialogue-scenarios-v2.jsonl"]
 TEST_SCENARIO_STEP_TIMEOUT_SECONDS=60
 ```
 
-启动器会在 Ollama、TEI 和 Uvicorn 之前校验白名单数据集，并打印数据集与样本数。启动后可从顶部栏或左侧栏进入“场景观察”。如需强制覆盖 `.env` 关闭本次进程，可使用 `python run.py --no-test-scenarios`。每次点击只执行一个步骤，会为 Actor 创建独立的 `[场景]` 会话，并可手工清理。该模式使用真实 Agent/MCP/RAG/Skill/记忆链路，不注入离线 Fixture；依赖 Fixture 或缺少可验证证据的预期会标为“不可判定”。它是人工观察器，不是自动连续 Runner，不能把场景数量当作通过率。
+启动器会在 Ollama、TEI 和 Uvicorn 之前校验白名单数据集，并打印数据集与样本数。启动后可从顶部栏或左侧栏进入“场景观察”。如需强制覆盖 `.env` 关闭本次进程，可使用 `python run.py --no-test-scenarios`。每次点击只执行一个步骤，会为 Actor 创建独立的 `[场景]` 会话，并可手工清理。该模式使用真实 Agent/MCP/RAG/记忆链路，不注入离线 Fixture；依赖 Fixture 或缺少可验证证据的预期会标为“不可判定”。它是人工观察器，不是自动连续 Runner，不能把场景数量当作通过率。
 
 完整的前置配置、四阶段命令、checkpoint 续跑、限额控制、产物说明和失败排查见 [`resume/conversation-scenario-generation-guide.md`](resume/conversation-scenario-generation-guide.md)。
 
@@ -202,6 +202,15 @@ Baseline/Candidate 结果；资格检查每25条原子保存 checkpoint，并输
 关闭；冒烟会少量调用 DeepSeek，但不会上传 LangSmith或运行 Judge。所有样本标记
 `human_verified=false`，简历必须称为“Codex 生成、真实法规 ID 约束的源数据派生合成挑战集”。
 
+Agent 最终输出提供事实忠实度10条、Reviewer错误草稿注入12条和回答质量8条三套专项评测。固定CaseAnalysis/EvidencePacket的Component Target不需要启动Ollama、TEI或Web服务；正式上传必须显式确认：
+
+```bash
+conda run --no-capture-output -n LawStation python scripts/run_agent_quality_eval.py \
+  --suite all --upload-results --confirm-upload
+```
+
+结果写入`evals/reports/runs/<timestamp>-agent-quality/`。样本均为合成分层数据并由LLM Judge评分，未经律师人工标注，不能描述为法律准确率。
+
 默认 `learn` 使用固定输出讲解确定性指标，不访问 LangSmith、DeepSeek 或 Ollama；`smoke`
 只运行 6 条分层样本且 `upload_results=false`。云端 Compare 默认仅上传 30 条根 Trace、调用
 10 次 Judge，执行前必须先查看 `--plan-only`，再显式增加 `--confirm-upload`。所有评测受月度
@@ -230,24 +239,14 @@ evals/reports/runs/YYYYMMDD-HHMMSS-ffffff-<profile>/
 - 页面左侧“管理我的记忆”可修正或删除已生效记忆；升级前已有的待确认记录仍可确认或拒绝。
 - 回答完成后由 SQLite 持久后台任务整理记忆和增量摘要，不阻塞主回答；服务重启会恢复未完成任务。
 - 记忆整理使用独立的非 Thinking JSON Output 调用，不绑定或调用 MCP 工具；简单问候等没有可沉淀内容的消息会正常完成且不创建记忆。
+- 记忆模型的输出上限通过 `extra_body.max_tokens` 发送为 DeepSeek 原生参数，避免 `langchain-openai` 自动改写为不兼容的 `max_completion_tokens`；确定性参数错误不重试，超时、429 和 5xx 才有限重试。
 - `MemoryTaskManager.enqueue()` 是唯一记忆整理入口；旧 `MemoryService.consolidate()` 已禁用，不能再将用户长消息原文直接沉淀为事实。
 
 咨询 SSE 每 15 秒发送一次不可见 heartbeat，避免长模型调用期间连接被代理关闭。低风险且没有可引用法条的回答通过确定性证据边界校验后可跳过 LLM Reviewer；中高风险、存在法规依据或检索异常时仍执行完整模型复核。
 
 咨询默认使用持久化 AgentRun：创建任务后，前端通过带 sequence 的 SSE 订阅事件；切换用户、临时断网或刷新页面不会取消服务端 Graph，重新打开会话可恢复进度。LangGraph 使用独立 SQLite Checkpoint 数据库保存 super-step，业务消息和记忆仍由主 SQLite 管理。停止生成必须调用 cancel API，而不是仅关闭浏览器连接。
 
-## 运行时与开发 Skill
-
-运行时 Skill 位于 `skills/runtime/*/SKILL.md`，可通过以下环境变量整体关闭或调整加载策略：
-
-```dotenv
-AGENT_SKILLS_ENABLED=true
-AGENT_SKILL_ROOT=./skills/runtime
-AGENT_MAX_ACTIVE_SKILLS=2
-AGENT_SKILL_STRICT_VALIDATION=true
-```
-
-Skill 是领域工作流与结构化输出约束，不是 MCP Tool。只有 Legal Research 能通过现有 MCP 调用 `search_laws/get_law_article`，Skill 不能绕过该协议边界。前端只接收安全的 `skill_status`，LangSmith 只记录 Skill ID 和版本，不上传完整 Skill Prompt。
+## 开发 Skill
 
 仓库开发 Skill 位于 `.agents/skills/`：`lawstation-spec-change` 固化 SDD 与文档同步闭环，`lawstation-eval-review` 固化公平消融、报告归档和简历数字真实性规则。开发 Skill 不进入线上 Agent Prompt。
 

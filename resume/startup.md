@@ -101,14 +101,14 @@ macOS 原生 TEI 通过 Homebrew 安装并使用 Metal；Docker 中关闭自动�
 3. `initialize_database()`：运行 Alembic、补建表、创建默认租户与张三/李四。
 4. 若`TEST_SCENARIOS_ENABLED=true`，`ScenarioCatalog`加载并校验项目内白名单JSONL/manifest；任一路径越界、Schema或SHA错误都阻止测试模式启动。关闭时不读文件。
 5. `initialize_engine()`：在线程中构造全量 BM25，引导 Dense 检查或后台建库。
-6. 创建应用级`MCPToolRegistry`、`SkillRegistry`和`LLMProvider`；Registry注入Trace Interceptor。
+6. 创建应用级 `MCPToolRegistry` 和 `LLMProvider`；Registry 注入 Trace Interceptor。
 7. 打开独立`AsyncSqliteSaver`，创建`AgentRuntime`、`AgentConcurrencyManager`和`AgentRunManager`。
 8. 创建并启动`MemoryTaskManager/AgentRunManager`。
 9. 进入`mcp.session_manager.run()`后才`yield`。
 
 MCP 工具发现没有在 lifespan 中通过 HTTP 自调用；它在首个需要 Agent 的请求中由 `MCPToolRegistry.get_tools` 懒加载，避免服务尚未开始监听时自调用死锁。
 
-场景观察推荐通过`python run.py --test-scenarios`按进程启用，`--no-test-scenarios`可强制覆盖`.env`关闭。启动器在任何本地模型进程之前构造一次`ScenarioCatalog`做严格预检，成功后打印Dataset ID、36条样本和顶部栏/侧栏入口；CLI不会写回配置文件。
+场景观察推荐通过`python run.py --test-scenarios`按进程启用，`--no-test-scenarios`可强制覆盖`.env`关闭。启动器在任何本地模型进程之前构造一次`ScenarioCatalog`做严格预检，成功后打印Dataset ID、24条样本和顶部栏/侧栏入口；CLI不会写回配置文件。
 
 ## 7. 路由挂载顺序
 

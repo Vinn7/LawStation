@@ -9,7 +9,7 @@ from backend.app.evaluation.conversation_scenarios import file_sha256
 from backend.app.evaluation.scenario_catalog import ScenarioCatalog, ScenarioCatalogError
 
 ROOT = Path(__file__).resolve().parents[1]
-FROZEN = ROOT / "evals" / "conversations" / "lawstation-dialogue-scenarios-v1.jsonl"
+FROZEN = ROOT / "evals" / "conversations" / "lawstation-dialogue-scenarios-v2.jsonl"
 
 
 def _catalog(tmp_path, monkeypatch, *, mutate_manifest=None):

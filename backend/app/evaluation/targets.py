@@ -6,10 +6,13 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
+from langgraph.runtime import Runtime
 
+from backend.app.agent.graph import LegalConsultationGraph
 from backend.app.agent.provider import LLMProvider
 from backend.app.agent.registry import MCPToolRegistry
 from backend.app.agent.runtime import AgentRuntime
+from backend.app.agent.schemas import CaseAnalysis, CounselDraft, EvidencePacket
 from backend.app.agent.state import AgentInvocationContext, AgentInvocationIdentity
 from backend.app.core.config import Settings, get_settings
 from backend.app.observability import LangSmithObservability
@@ -144,6 +147,168 @@ def agent_target(mode: str, review_mode: str, settings: Settings | None = None):
             review_mode,
             use_fixture_analysis=(mode == "component"),
         )
+
+    return target
+
+
+def reviewer_target(settings: Settings | None = None):
+    """Evaluate the production review/gate/finalize path from a frozen draft."""
+
+    base_settings = (settings or get_settings()).model_copy(
+        update={"agent_review_mode": "auto"}
+    )
+
+    async def target(inputs: dict[str, Any]) -> dict[str, Any]:
+        registry = FixtureToolRegistry([])
+        graph = LegalConsultationGraph(
+            LLMProvider(base_settings).get_chat_model(), [], registry, base_settings
+        )
+        context = AgentInvocationContext(
+            identity=AgentInvocationIdentity(
+                request_id=str(uuid4()),
+                tenant_id="eval-tenant",
+                user_id="eval-user",
+                conversation_id=str(uuid4()),
+            ),
+            persist_tool_audit=False,
+        )
+        runtime = Runtime(context=context, stream_writer=lambda _event: None)
+        analysis = CaseAnalysis.model_validate(inputs["fixture_case_analysis"])
+        packet = EvidencePacket.model_validate(inputs["fixture_evidence_packet"])
+        original_draft = CounselDraft.model_validate(inputs["fixture_counsel_draft"])
+        state: dict[str, Any] = {
+            "messages": _history(inputs),
+            "memory_context": str(inputs.get("memory_context", "")),
+            "case_analysis": analysis,
+            "evidence_packet": packet,
+            "counsel_draft": original_draft,
+            "review_result": None,
+            "retry_count": 0,
+            "revision_count": 0,
+            "final_answer": "",
+            "citations": [],
+            "errors": [],
+            "current_fact_overrides": list(inputs.get("current_fact_overrides", [])),
+            "model_call_count": 0,
+            "tool_call_count": 0,
+            "tool_trajectory": [],
+        }
+        try:
+            state.update(await graph.review_gate(state, runtime))
+            if graph.after_review_gate(state) == "review":
+                state.update(await graph.reviewer(state, runtime))
+            initial_review = state.get("review_result")
+            revision_performed = graph.after_review(state) == "revise"
+            revised_draft = None
+            if revision_performed:
+                state.update(await graph.legal_counsel(state, runtime))
+                revised_draft = state.get("counsel_draft")
+                state.update(await graph.reviewer(state, runtime))
+            state.update(await graph.finalize(state, runtime))
+            return {
+                "initial_review_result": (
+                    initial_review.model_dump() if initial_review else None
+                ),
+                "final_review_result": (
+                    state["review_result"].model_dump()
+                    if state.get("review_result") else None
+                ),
+                "original_draft": original_draft.model_dump(),
+                "revised_draft": revised_draft.model_dump() if revised_draft else None,
+                "revision_performed": revision_performed,
+                "final_answer": state["final_answer"],
+                "citations": [
+                    item.model_dump() if hasattr(item, "model_dump") else item
+                    for item in state["citations"]
+                ],
+                "evidence_packet": packet.model_dump(),
+                "review_mode": context.metrics.review_mode,
+                "model_call_count": context.metrics.model_call_count,
+                "tool_call_count": context.metrics.tool_call_count,
+                "errors": [
+                    item.model_dump() if hasattr(item, "model_dump") else item
+                    for item in state["errors"]
+                ],
+            }
+        finally:
+            await registry.close()
+
+    return target
+
+
+def counsel_quality_target(settings: Settings | None = None):
+    """Start at Counsel with a frozen analysis/evidence packet, then review/finalize."""
+
+    base_settings = settings or get_settings()
+
+    async def target(inputs: dict[str, Any]) -> dict[str, Any]:
+        registry = FixtureToolRegistry([])
+        graph = LegalConsultationGraph(
+            LLMProvider(base_settings).get_chat_model(), [], registry, base_settings
+        )
+        context = AgentInvocationContext(
+            identity=AgentInvocationIdentity(
+                request_id=str(uuid4()), tenant_id="eval-tenant", user_id="eval-user",
+                conversation_id=str(uuid4()),
+            ),
+            persist_tool_audit=False,
+        )
+        runtime = Runtime(context=context, stream_writer=lambda _event: None)
+        analysis = CaseAnalysis.model_validate(inputs["fixture_case_analysis"])
+        packet = EvidencePacket.model_validate(inputs["fixture_evidence_packet"])
+        state: dict[str, Any] = {
+            "messages": _history(inputs),
+            "memory_context": str(inputs.get("memory_context", "")),
+            "case_analysis": analysis,
+            "evidence_packet": packet,
+            "counsel_draft": None,
+            "review_result": None,
+            "retry_count": 0,
+            "revision_count": 0,
+            "final_answer": "",
+            "citations": [],
+            "errors": [],
+            "current_fact_overrides": list(inputs.get("current_fact_overrides", [])),
+            "model_call_count": 0,
+            "tool_call_count": 0,
+            "tool_trajectory": [],
+        }
+        try:
+            state.update(await graph.legal_counsel(state, runtime))
+            state.update(await graph.review_gate(state, runtime))
+            if graph.after_review_gate(state) == "review":
+                state.update(await graph.reviewer(state, runtime))
+            if graph.after_review(state) == "revise":
+                state.update(await graph.legal_counsel(state, runtime))
+                state.update(await graph.reviewer(state, runtime))
+            state.update(await graph.finalize(state, runtime))
+            draft = state.get("counsel_draft")
+            return {
+                "final_answer": state["final_answer"],
+                "case_analysis": analysis.model_dump(),
+                "evidence_packet": packet.model_dump(),
+                "review_result": (
+                    state["review_result"].model_dump()
+                    if state.get("review_result") else None
+                ),
+                "counsel_claims": (
+                    [item.model_dump() for item in draft.claims] if draft else []
+                ),
+                "counsel_confidence": draft.confidence if draft else None,
+                "citations": [
+                    item.model_dump() if hasattr(item, "model_dump") else item
+                    for item in state["citations"]
+                ],
+                "review_mode": context.metrics.review_mode,
+                "model_call_count": context.metrics.model_call_count,
+                "tool_call_count": context.metrics.tool_call_count,
+                "errors": [
+                    item.model_dump() if hasattr(item, "model_dump") else item
+                    for item in state["errors"]
+                ],
+            }
+        finally:
+            await registry.close()
 
     return target
 

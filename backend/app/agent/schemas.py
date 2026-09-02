@@ -43,7 +43,6 @@ class CaseAnalysis(BaseModel):
     direct_answer: str = ""
     clarification_questions: list[str] = Field(default_factory=list)
     current_fact_overrides: list[CurrentFactOverride] = Field(default_factory=list)
-    requested_skill_ids: list[str] = Field(default_factory=list)
 
     @field_validator("case_summary", "direct_answer", mode="before")
     @classmethod
@@ -62,7 +61,7 @@ class CaseAnalysis(BaseModel):
 
     @field_validator(
         "key_facts", "missing_facts", "legal_issues", "research_tasks",
-        "clarification_questions", "current_fact_overrides", "requested_skill_ids", mode="before",
+        "clarification_questions", "current_fact_overrides", mode="before",
     )
     @classmethod
     def normalize_optional_lists(cls, value):
@@ -162,7 +161,6 @@ class CounselDraft(BaseModel):
     confidence: Literal["low", "medium", "high"] = "medium"
     limitations: list[str] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
-    skill_outputs: dict[str, dict] = Field(default_factory=dict)
 
 
 class ReviewResult(BaseModel):

@@ -43,6 +43,11 @@ class LLMProvider:
         if self._memory_model is None:
             # 记忆模型绝不 bind_tools，显式关闭 Thinking，避免 JSON Output 与
             # tool_choice 冲突；它与法律咨询 Graph 是独立调用链。
+            #
+            # langchain-openai 1.6 会把构造器参数 max_tokens 重命名为
+            # max_completion_tokens，但 DeepSeek Chat Completions 接口接受的是
+            # max_tokens。通过 extra_body 传递可保留 DeepSeek 原生字段名，同时
+            # 避免影响主 Agent 的 Thinking 和工具调用配置。
             self._memory_model = ChatOpenAI(
                 model=self.settings.memory_llm_model or self.settings.deepseek_model,
                 api_key=self.settings.deepseek_api_key,
@@ -51,7 +56,9 @@ class LLMProvider:
                 temperature=self.settings.memory_llm_temperature,
                 timeout=self.settings.llm_request_timeout_seconds,
                 max_retries=self.settings.llm_max_retries,
-                max_tokens=self.settings.memory_llm_max_tokens,
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body={
+                    "thinking": {"type": "disabled"},
+                    "max_tokens": self.settings.memory_llm_max_tokens,
+                },
             )
         return self._memory_model

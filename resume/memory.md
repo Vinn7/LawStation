@@ -250,6 +250,23 @@ Worker 主流程：
 - 不产生 `tools` 或 `tool_choice`；
 - 只负责摘要和结构化记忆提取。
 
+`langchain-openai 1.6` 会把 `ChatOpenAI(max_tokens=...)` 序列化为
+`max_completion_tokens`，而 DeepSeek Chat Completions 使用 `max_tokens`。项目因此不再把
+输出上限传给 `ChatOpenAI` 构造器，而是与 Thinking 配置一起通过 SDK 的
+`extra_body` 发送：
+
+```python
+extra_body={
+    "thinking": {"type": "disabled"},
+    "max_tokens": settings.memory_llm_max_tokens,
+}
+```
+
+在后续 `model.bind(response_format={"type": "json_object"})` 调用中，OpenAI SDK
+会把这些扩展字段合并到最终 HTTP JSON。测试使用 Mock HTTP Transport 验证最终请求中
+包含 `thinking/max_tokens/response_format`，且不存在
+`max_completion_tokens/tools/tool_choice`，不会消耗真实 DeepSeek 额度。
+
 结构化输出使用 DeepSeek JSON Output：
 
 ```python
@@ -272,6 +289,17 @@ AIMessage.content
 ```
 
 空数组是正常成功结果，不会创建记忆，也不会提示整理失败。
+
+错误处理区分确定性兼容错误和暂时性传输错误：
+
+- `max_completion_tokens`、`tool_choice`、`response_format`：`compatibility_error`，不重试；
+- 超时、HTTP 408/429/5xx、连接失败：`transport_error`，按任务上限有限重试；
+- 审计只记录状态码、错误码、参数名、模型名和处理阶段，不记录用户正文或上游完整响应；
+- 主回答先于后台记忆任务完成，记忆失败不会回滚或覆盖已保存回答。
+
+Alembic `20260901_06` 只把历史上精确保存为“记忆模型调用方式与模型不兼容”的
+失败任务重置为 `pending`；其他失败原因保持不变。Pytest 通过全局 fixture 将
+`LOG_DIR` 指向临时目录，测试中故意抛出的兼容错误不再写入正式审计日志。
 
 ## 7. 最新事实覆盖旧事实
 

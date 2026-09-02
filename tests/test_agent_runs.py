@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+from typing import TypedDict
 
 import pytest
+from langgraph.graph import END, START, StateGraph
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -44,7 +46,6 @@ class _ScenarioRuntime:
         return {
             "checkpoint_available": True,
             "retrieval_status": "matched",
-            "selected_skill_ids": ["evidence-audit"],
             "citation_count": 1,
         }
 
@@ -99,7 +100,6 @@ async def test_scenario_outcome_is_owner_scoped_and_checkpoint_safe(monkeypatch)
         "terminal_status": "queued",
         "observed_events": ["message_start", "agent_status"],
         "retrieval_status": "matched",
-        "selected_skill_ids": ["evidence-audit"],
         "citation_count": 1,
         "model_call_count": 0,
         "tool_call_count": 0,
@@ -120,7 +120,9 @@ async def test_async_sqlite_saver_persists_state_without_pickle(tmp_path):
         config = {
             "configurable": {
                 "thread_id": "agent-run:test",
-                "checkpoint_ns": "lawstation-consultation-v1",
+                # 低层 Saver API 要求显式 namespace；根图对应空字符串。
+                # 业务层调用 compiled Graph 时只传 thread_id，由 LangGraph 补入该值。
+                "checkpoint_ns": "",
             }
         }
         checkpoint = {
@@ -137,3 +139,36 @@ async def test_async_sqlite_saver_persists_state_without_pickle(tmp_path):
 
     assert loaded is not None
     assert loaded.checkpoint["channel_values"]["final_answer"] == "已恢复"
+
+
+@pytest.mark.asyncio
+async def test_compiled_root_graph_reads_checkpoint_without_subgraph_namespace(tmp_path):
+    class RootState(TypedDict):
+        value: int
+
+    settings = SimpleNamespace(
+        langgraph_checkpoint_enabled=True,
+        langgraph_checkpoint_path=str(tmp_path / "compiled-checkpoints.db"),
+        langgraph_strict_msgpack=True,
+    )
+    async with checkpoint_saver(settings) as saver:
+        builder = StateGraph(RootState)
+        builder.add_node("increment", lambda state: {"value": state["value"] + 1})
+        builder.add_edge(START, "increment")
+        builder.add_edge("increment", END)
+        graph = builder.compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": "agent-run:compiled-root"}}
+
+        updates = [
+            update
+            async for update in graph.astream(
+                {"value": 0}, config=config, stream_mode="updates"
+            )
+        ]
+        snapshot = await graph.aget_state(config)
+
+    assert updates == [{"increment": {"value": 1}}]
+    assert snapshot.values["value"] == 1
+    assert snapshot.next == ()
+    assert snapshot.config["configurable"]["checkpoint_ns"] == ""
+    assert snapshot.config["configurable"]["checkpoint_id"]

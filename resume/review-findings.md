@@ -52,7 +52,7 @@ JSONL 是本地审计，LangSmith 是可选观测；初始化、导出、反馈�
 
 ### 2.8 Skill 是受控编排能力，不是 Prompt 插件
 
-`SkillRegistry` 对模型建议的 ID 做白名单、角色、工具和数量校验，并只向选中节点渐进加载完整指令。Skill 结果进入请求级 Graph State，未知 ID、越权工具和伪造输出不能绕过服务端策略。关键 symbol：`backend/app/agent/skills.py::SkillRegistry`、`LegalConsultationGraph._activate_skills`。
+此前运行时 Skill 会让 `case-intake` 在 Analyst 之后追加一次串行模型调用，并扩大后续节点 Prompt。该实验能力已从产品热路径移除；当前 Case Analyst 只做一次结构化调用，开发 Skill 继续保留在 `.agents/skills/`，但不进入线上 Agent。
 
 ### 2.9 场景观察具有显式能力探测和证据化断言
 
@@ -111,7 +111,7 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 4. **Memory Worker 关闭与吞吐**：单 Worker、领取非多进程原子，关闭等待无硬超时。
 5. **任务恢复仍是单机能力**：刷新后可通过 `active-run + Last-Event-ID` 重放，服务重启可从 LangGraph checkpoint 续跑；但 AgentRun Worker、租约和事件通知仍基于单机 SQLite，不支持多实例竞争领取和跨节点实时推送。
 6. **反馈错误体验**：前端反馈失败没有独立可见提示。
-7. **Skill 路由尚缺真实效果基线**：已有 24 条合成 fixture 和确定性 evaluator，但尚未运行真实模型选择实验；应先冻结路由集再报告 precision/recall、Prompt token 增量和延迟变化。
+7. **运行时 Skill 实验已经结束**：旧路由 fixture 与历史说明不再代表当前能力；后续评测应聚焦三 Agent 路由、检索证据边界、持久化恢复和端到端延迟。
 
 ### P2：性能与扩展
 
@@ -131,7 +131,7 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 - 实现多用户逻辑隔离、分层记忆、最新事实覆盖和并发会话。
 - 使用 `AsyncSqliteSaver` 持久化 LangGraph super-step，并以 AgentRun 租约、事件日志和幂等消息写入实现刷新/断线/单机服务重启恢复。
 - 建立 JSONL 审计、LangSmith 可选追踪和低资源评测。
-- 实现版本化运行时 Skill、Progressive Disclosure 和服务端 Tool Policy，并以仓库 Skill 固化 SDD/评测流程。
+- 使用仓库级开发 Skill 固化 SDD 变更闭环与评测真实性审核；产品运行时 Skill 经延迟分析后已从 Agent 热路径移除。
 - 实现可恢复全量索引、单入口和单端口部署。
 
 ### 不能说
@@ -159,7 +159,7 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 | 9 | `backend/app/observability/langsmith.py` | Trace、隐私、采样和 fail-open |
 | 10 | `tests/test_agent_runtime.py` | 从测试理解关键行为与设计意图 |
 
-补充阅读：`backend/app/agent/skills.py` 用于理解 Skill 与 Tool、共享 Registry 与请求级 State 的边界。
+运行时 Skill 实现文件已经删除；如需理解项目开发约束，应阅读 `.agents/skills/lawstation-spec-change/SKILL.md` 和 `.agents/skills/lawstation-eval-review/SKILL.md`，二者不进入产品运行时。
 
 ## 8. 建议面试讲解顺序
 
@@ -173,8 +173,8 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 8. 主动说明认证、数据质量和跨刷新恢复尚未生产化。
 # 新增：多轮对话场景生成与观察
 
-**已验证**：项目已实现18类确定性蓝图和DeepSeek离线话术生成器，冻结36条合成多轮场景；动作、事件断言和Skill权限不由模型生成，并通过敏感信息、Prompt Injection及法规来源泄漏校验。
+**已验证**：历史v1使用18类确定性蓝图冻结36条合成多轮场景；移除运行时Skill后，默认v2确定性保留12类、24条场景。动作和事件断言不由模型生成，并通过敏感信息、Prompt Injection及法规来源泄漏校验。
 
 **已验证**：前端已增加配置开关控制的场景观察面板，可为Actor创建隔离会话并逐步执行真实AgentRun，覆盖取消、SSE sequence重放、消息/记忆检查与安全清理。后端仅加载项目内冻结白名单，outcome不暴露Graph State和Prompt。
 
-**当前不足**：它仍是每次点击一步的人工观察器，不会自动连续跑完36条场景；步骤游标也不跨刷新恢复。简历可描述“可交互场景观察与预期/实际对照”，不能写“36条端到端测试全部通过”。
+**当前不足**：它仍是每次点击一步的人工观察器，不会自动连续跑完24条场景；步骤游标也不跨刷新恢复。简历可描述“可交互场景观察与预期/实际对照”，不能写“24条端到端测试全部通过”。

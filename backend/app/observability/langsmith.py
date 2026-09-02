@@ -186,8 +186,8 @@ class LangSmithObservability:
     调用链观察。导出异常会降级本组件，但不得中断回答、MCP 或记忆任务。
     """
 
-    graph_version = "three-agent-v3-runtime-skills"
-    prompt_version = "legal-consultation-v3-progressive-skills"
+    graph_version = "three-agent-v4"
+    prompt_version = "legal-consultation-v4-no-runtime-skills"
     app_version = "0.2.0"
 
     def __init__(self, settings: Settings | None = None) -> None:

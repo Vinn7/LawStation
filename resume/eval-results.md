@@ -1,10 +1,40 @@
 # LawStation 量化评测实测结果
 
+> 2026-09-02 已完成 Agent 三维质量评测：事实忠实度 10 条、Reviewer 有效性 12 条、回答质量 8 条，共 30 个 LangSmith Target Run 和 30 次专项 LLM Judge。样本为合成分层数据，未经律师人工标注，不得称为法律准确率或真实用户总体表现。
+
+## 0. Agent 三维质量评测（n=30）
+
+运行目录：`evals/reports/runs/20260902-005441-563504-agent-quality/`。
+
+完整性校验：三个数据集分别完成 `10/12/8` 个 Target Run 和 Judge 结果，`missing_required_metrics=[]`，LangSmith 见证完整；Agent 实际模型调用 54 次，工具调用 0 次。三个 Target 使用固定 `CaseAnalysis/EvidencePacket`，未启动真实 RAG、Ollama 或 TEI。
+
+| 维度 | 主要实测结果 | 结论 |
+|---|---|---|
+| 事实忠实度 | 专项 Judge：事实忠实度、虚构控制、不确定性保持、上下文一致性均为 `5.00/5` | Judge 结果良好，但朴素关键词检查会把“旧事实已更正”误判为泄漏；暂不把确定性旧事实泄漏数字写进简历 |
+| Reviewer 有效性 | 错误草稿检出率 `87.5%`；动作准确率 `83.33%`；Judge 决策质量 `4.58/5`、指令具体性 `4.33/5` | 检出率低于 90% 门禁，说明 Reviewer 仍有漏检和误拒，不能宣称质量门禁通过 |
+| 回答质量 | 引用归属、no-match 安全、最新事实边界、无依据主张控制均 `100%`；相关性 `4.50/5`、清晰度 `4.75/5`、行动性与风险校准均 `4.25/5` | 安全前置项通过；争议点覆盖 `3.38/5`、完整性 `3.75/5`，是下一轮优化重点 |
+
+Target Run 的 LangSmith 统计共记录 142,786 tokens；各套件 p50 延迟分别约为 `13.87s / 29.82s / 24.78s`。LangSmith 未返回 p95，只返回 p99，因此不使用 p95 数字；`total_cost=0` 表示当前 Provider 没有价格映射，不代表模型调用免费。Judge 自身 Token 未包含在上述 Target Run Token 合计中。
+
+### 本轮可直接用于简历
+
+> 建立覆盖事实忠实度、Reviewer 错误拦截和回答质量的 Agent 分层评测体系，在 30 条合成分层样本上完成 30 个 LangSmith Target Run 与 30 次结构化 LLM Judge；通过固定 `CaseAnalysis/EvidencePacket` 的 Component Target、错误草稿注入和安全前置门禁，分别评估事实状态、Reviewer 检出/误拒/修订能力及回答覆盖与风险校准。
+
+> 在 8 条回答质量样本中，chunk 引用归属、no-match 安全、最新事实边界和无依据主张控制均通过；专项 Judge 的回答相关性为 `4.50/5`、清晰度为 `4.75/5`、行动性与风险校准均为 `4.25/5`。结果来自合成样本和 LLM Judge，未经律师人工标注。
+
+### 暂不建议写成成果的数字
+
+- Reviewer 检出率 `87.5%` 未达到 90% 门禁，一次修订成功率也未达到预设门禁；应作为发现并驱动下一轮错误分类和 Prompt 优化。
+- 事实套件的 Claim 级 Judge 与字符串匹配指标存在冲突。字符串检查把“而非旧值”“旧记录不再使用”等正确更正披露计为命中，必须先升级为 Claim/Negation-aware evaluator，再对既有实验追加评分。
+- 争议点覆盖度和完整性低于目标，不应只展示相关性、清晰度而隐去该弱项。
+
+证据：`AGENT_QUALITY_REPORT.md`、`case-details.jsonl` 与三个套件 JSON/CSV 均位于上述时间戳目录；对应 LangSmith 实验名为 `lawstation-factual-fidelity-v1-83836c5f`、`lawstation-reviewer-effectiveness-v1-8f0d2ad9` 和 `lawstation-answer-quality-v1-74bf10d5`。
+
 > 最新实验时间：2026-08-26（Asia/Singapore）。本页只记录实际运行结果，不使用门禁目标值替代成绩。
 
 > 最新运行目录：`evals/reports/runs/20260826-095648-160455-compare/`。六组正式RAG消融与六类Agent Fixture均已完成。旧预算拦截产生的失败manifest保持原样，恢复结果记录在`POST_RECOVERY_SUMMARY.json`。
 
-## 0. 最新套件状态
+## 1. RAG 最新套件状态
 
 `scripts/run_resume_rag_challenge_eval.py` 完成了模块测试、数据校验和 100/300/200 三组 Baseline/Candidate，共 1,200 次本地检索。六份 RAG 报告均为 `missing_required_metrics=[]`、`local_reproducible=true`、`resume_eligible=true`。测试不上传 LangSmith、不调用 Judge；Ollama 与 TEI 为本地推理。
 
@@ -25,7 +55,7 @@
 - 索引规模：55,374 chunks；Embedding 为 Ollama `qwen3-embedding:0.6b`、1024 维。
 - 固定随机种子：`42`。
 - 正式实验前指定模块回归：60 passed；预算改造与实验补跑后的全量离线回归：139 passed、2 条第三方 warning（Pydantic Settings 与 LangSmith），无项目测试失败。
-- 持久化 AgentRun、准确性闭环与运行时 Skill 改造后的离线回归：后端 153 passed、前端 14 passed，生产构建通过。新增200条检索校准集、30条事实冲突集和24条 Skill 路由 fixture 只完成冻结/结构与确定性边界校验，尚未运行真实模型校准或 Skill 路由基准，因此不得将目标门禁写成实测成绩。
+- 持久化 AgentRun与准确性闭环改造后的历史离线回归：后端153 passed、前端14 passed，生产构建通过。同期曾冻结运行时 Skill 路由 fixture，但该实验能力现已从产品热路径移除，相关样本和结果不得描述为当前线上能力。
 
 ## 2. Dense 挑战：BM25 vs Hybrid（n=300）
 

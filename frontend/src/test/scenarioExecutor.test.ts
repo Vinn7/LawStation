@@ -12,7 +12,6 @@ const outcome: ScenarioRunOutcome = {
   terminal_status: 'completed',
   observed_events: ['message_start', 'agent_status', 'agent_status', 'citations', 'message_end'],
   retrieval_status: 'matched',
-  selected_skill_ids: ['evidence-audit'],
   citation_count: 1,
   model_call_count: 3,
   tool_call_count: 1,
@@ -31,7 +30,6 @@ const step: ScenarioStep = {
     max_tool_calls: 2,
     citations: true,
     retrieval_status: 'matched',
-    skill_ids: ['evidence-audit'],
   },
 };
 

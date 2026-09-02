@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
@@ -11,7 +12,9 @@ from langchain_core.language_models.fake_chat_models import (
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
+from langchain_openai import ChatOpenAI
 
+from backend.app.agent.checkpoint import checkpoint_saver
 from backend.app.agent.concurrency import (
     AgentConcurrencyManager,
     ConcurrencyIdentity,
@@ -70,8 +73,137 @@ def test_memory_model_is_non_streaming_non_thinking_and_separate(monkeypatch):
     assert created[0]["streaming"] is True
     assert "extra_body" not in created[0]
     assert created[1]["streaming"] is False
-    assert created[1]["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert created[1]["max_tokens"] == 4096
+    assert created[1]["extra_body"] == {
+        "thinking": {"type": "disabled"},
+        "max_tokens": 4096,
+    }
+    assert "max_tokens" not in created[1]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_reads_use_root_thread_config_and_return_safe_state():
+    snapshot = SimpleNamespace(
+        config={
+            "configurable": {
+                "thread_id": "agent-run:run-a",
+                "checkpoint_ns": "",
+                "checkpoint_id": "checkpoint-a",
+            }
+        },
+        next=(),
+        values={
+            "evidence_packet": {"retrieval_status": "no_match"},
+            "citations": [],
+        },
+    )
+    compiled = SimpleNamespace(aget_state=AsyncMock(return_value=snapshot))
+    runtime = AgentRuntime(
+        SimpleNamespace(close=AsyncMock()),
+        None,
+        settings(),
+        checkpointer=object(),
+    )
+    runtime._graph = SimpleNamespace(compiled=compiled)
+
+    checkpoint = await runtime.checkpoint_info("agent-run:run-a")
+    outcome = await runtime.scenario_outcome("agent-run:run-a")
+
+    assert checkpoint == {"checkpoint_id": "checkpoint-a", "next": []}
+    assert outcome == {
+        "checkpoint_available": True,
+        "retrieval_status": "no_match",
+        "citation_count": 0,
+    }
+    assert all(
+        call.args[0] == {"configurable": {"thread_id": "agent-run:run-a"}}
+        for call in compiled.aget_state.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_noncritical_checkpoint_reads_fail_open_without_sensitive_error(monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        "backend.app.agent.runtime.audit",
+        lambda event, **fields: audits.append((event, fields)),
+    )
+    compiled = SimpleNamespace(
+        aget_state=AsyncMock(
+            side_effect=ValueError("sensitive Graph State must not enter audit")
+        )
+    )
+    runtime = AgentRuntime(
+        SimpleNamespace(close=AsyncMock()),
+        None,
+        settings(),
+        checkpointer=object(),
+    )
+    runtime._graph = SimpleNamespace(compiled=compiled)
+
+    assert await runtime.checkpoint_info("agent-run:run-a") == {}
+    assert await runtime.scenario_outcome("agent-run:run-a") == {
+        "checkpoint_available": False
+    }
+    assert [fields["operation"] for _, fields in audits] == [
+        "final_metadata",
+        "scenario_outcome",
+    ]
+    assert all(event == "langgraph.checkpoint.read.failed" for event, _ in audits)
+    assert all(fields["run_id"] == "run-a" for _, fields in audits)
+    assert all(fields["error_type"] == "ValueError" for _, fields in audits)
+    assert all("sensitive" not in str(fields) for _, fields in audits)
+
+
+@pytest.mark.asyncio
+async def test_memory_model_sends_deepseek_native_request_body(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-memory-test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": '{"memories": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    def chat_openai_factory(**kwargs):
+        return ChatOpenAI(**kwargs, http_async_client=async_client)
+
+    monkeypatch.setattr(
+        "backend.app.agent.provider.ChatOpenAI", chat_openai_factory
+    )
+    provider = LLMProvider(settings(deepseek_model="deepseek-v4-flash"))
+    runner = provider.get_memory_model().bind(
+        response_format={"type": "json_object"}
+    )
+
+    await runner.ainvoke([HumanMessage(content="只返回 JSON")])
+    await async_client.aclose()
+
+    assert captured["model"] == "deepseek-v4-flash"
+    assert captured["stream"] is False
+    assert captured["thinking"] == {"type": "disabled"}
+    assert captured["max_tokens"] == 4096
+    assert captured["response_format"] == {"type": "json_object"}
+    assert "max_completion_tokens" not in captured
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
 
 
 def fake_tool():
@@ -196,6 +328,52 @@ async def test_three_agent_graph_routes_casual_chat_without_research():
     assert not any(event["event"] == "tool_call_start" for event in events)
     assert events[-1] == {"event": "agent_final", "data": "您好，请问有什么法律问题？"}
     assert context.metrics.model_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_casual_greeting_completes_and_exposes_root_checkpoint(tmp_path):
+    registry = SimpleNamespace(
+        get_tools=AsyncMock(return_value=[]),
+        status=lambda: SimpleNamespace(version=0),
+        close=AsyncMock(),
+    )
+    analysis = {
+        "request_type": "casual_chat",
+        "case_summary": "问候",
+        "next_action": "direct_answer",
+        "direct_answer": "您好，请问有什么法律问题？",
+    }
+    provider = SimpleNamespace(
+        get_chat_model=lambda: GenericFakeChatModel(
+            messages=iter([json.dumps(analysis, ensure_ascii=False)])
+        )
+    )
+    test_settings = settings(
+        langgraph_checkpoint_enabled=True,
+        langgraph_checkpoint_path=str(tmp_path / "greeting-checkpoints.db"),
+    )
+
+    async with checkpoint_saver(test_settings) as saver:
+        runtime = AgentRuntime(
+            registry, provider, test_settings, checkpointer=saver
+        )
+        events = [
+            event
+            async for event in runtime.stream(
+                invocation(),
+                [HumanMessage(content="你好")],
+                "",
+                thread_id="agent-run:greeting",
+            )
+        ]
+        checkpoint = await runtime.checkpoint_info("agent-run:greeting")
+
+    assert events[-1] == {
+        "event": "agent_final",
+        "data": "您好，请问有什么法律问题？",
+    }
+    assert checkpoint["checkpoint_id"]
+    assert checkpoint["next"] == []
 
 
 @pytest.mark.asyncio

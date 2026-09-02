@@ -37,10 +37,8 @@ class LegalConsultationState(TypedDict):
     final_answer: str
     citations: list[Citation]
     errors: list[AgentError]
-    # Analyst 建议经服务端验证后的最新事实覆盖和 Skill 请求级状态。
+    # Analyst 建议经服务端验证后的最新事实覆盖。
     current_fact_overrides: list[dict[str, Any]]
-    active_skills: list[dict[str, str]]
-    skill_outputs: dict[str, dict[str, Any]]
     # 同步进 Checkpoint 的实际调用计数，保证故障恢复后上限不重置。
     model_call_count: int
     tool_call_count: int
@@ -79,7 +77,6 @@ class AgentInvocationContext:
     evaluation_output: dict[str, Any] = field(default_factory=dict)
     persist_tool_audit: bool = True
     evaluation_case_analysis: dict[str, Any] | None = None
-    active_skills: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def audit_fields(self) -> dict[str, Any]:

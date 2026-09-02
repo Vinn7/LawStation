@@ -151,6 +151,17 @@ evals/reports/runs/latest-success.json
 2. Recall/MRR 失败：检查分词、阈值、过滤条件和 RRF，不先改回答 Prompt。
 3. `citation_grounding` 失败：检查 `chunk_id` 在 Research、Counsel、Finalize 间的传递。
 4. `no_match_safety` 失败：检查无证据提示和确定性 Finalize 校验。
+
+## Agent 三维质量评测
+
+`scripts/run_agent_quality_eval.py`使用三个相互隔离的合成Dataset：事实忠实度检查最新事实、旧值泄漏与虚构；Reviewer有效性从固定错误/安全草稿开始，测检出、误拒、逃逸和一次修订；回答质量在安全门禁通过后测争议点覆盖、可执行性与风险校准。每条样本只执行一次对应的结构化Judge。
+
+```bash
+python scripts/run_agent_quality_eval.py \
+  --suite all --upload-results --confirm-upload
+```
+
+结果必须同时披露`n=30`、`human_verified=false`和`annotation_method=llm_judge`。Judge分数适合做固定版本回归和Baseline/Candidate比较，不等于律师标注的法律结论准确率。
 5. `tool_trajectory` 或 `loop_limit` 失败：检查 Graph 路由和调用上限。
 6. 硬指标全通过但 Judge 低分：再检查回答结构、风险表达和行动建议。
 

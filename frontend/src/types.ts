@@ -56,12 +56,6 @@ export interface ToolActivity {
   status: 'running' | 'success' | 'failed' | 'timeout';
 }
 
-export interface SkillActivity {
-  skillId: string;
-  status: 'selected' | 'running' | 'completed' | 'failed';
-  message: string;
-}
-
 export type MemoryScope = 'user' | 'conversation';
 export type MemoryStatus = 'pending' | 'active' | 'superseded' | 'rejected' | 'expired';
 
@@ -122,7 +116,6 @@ export interface ConversationRuntime {
   serverStatus?: AgentRunStatus;
   reconnecting?: boolean;
   toolActivity?: ToolActivity;
-  skillActivity?: SkillActivity;
   memoryMessage?: string;
   error?: string;
   failedQuestion?: string;
@@ -134,7 +127,6 @@ export interface ConversationRuntime {
 export type SseEventName =
   | 'message_start'
   | 'agent_status'
-  | 'skill_status'
   | 'tool_call_start'
   | 'tool_call_result'
   | 'token'
@@ -228,7 +220,6 @@ export interface ScenarioRunOutcome {
   terminal_status: AgentRunStatus;
   observed_events: string[];
   retrieval_status: string;
-  selected_skill_ids: string[];
   citation_count: number;
   model_call_count: number;
   tool_call_count: number;

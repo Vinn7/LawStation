@@ -91,7 +91,13 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 两个原子索引区分；跨运行复用 Baseline 时校验数据集、样本哈希、种子、Graph/Prompt 和索引
 版本，并在新报告中保留来源。这使面试中展示的指标可以追溯到一次确定的代码、数据和实验运行。
 
-Skill 启用后，咨询根 Trace 的 outputs 与最终 metadata 增加 `skill_ids/skill_versions`，便于按领域能力比较延迟、模型调用数和结果质量；完整 Skill Prompt、输出 Schema 和内部执行指令不上传。离线确定性 evaluator 新增 Skill selection precision/recall 与 policy compliance，24 条合成 fixture 只用于路由与安全边界验证，尚不能代表生产选择准确率。
+产品运行时 Skill 已移除，咨询 Trace 不再写入 Skill 选择结果或版本信息，离线评测也不再运行 Skill 路由指标。仓库级开发 Skill 只约束 Codex 的 SDD 与评测审核流程，不进入 LangSmith 咨询 Trace。
+
+### Agent 专项质量实验
+
+新增事实忠实度10条、Reviewer有效性12条和回答质量8条三个版本化Dataset。`run_agent_quality_eval.py`将每条Target作为一个LangSmith根Trace，使用相同Git/Graph/Prompt/Judge版本和种子42；确定性Evaluator负责事实值、引用/no-match边界和Reviewer混淆矩阵，专项LLM Judge负责语义事实一致性、决策质量、争议点覆盖与风险校准。所有结果均明确标记为合成样本、LLM Judge及未经律师人工标注。
+
+2026-09-02 的首次完整运行上传了 30 个 Target Run，并取得 30 个 Judge 结果。三个实验的 Target Run p50 分别约为 13.87 秒、29.82 秒和 24.78 秒；LangSmith 项目统计未提供 p95，报告不推算缺失值。Provider 未配置价格映射时 `total_cost=0` 仅表示成本元数据不可用，不能解释为免费。实测结果和未通过门禁见 `resume/eval-results.md`。
 
 ## 用户反馈闭环
 

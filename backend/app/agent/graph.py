@@ -58,7 +58,6 @@ from backend.app.agent.schemas import (
     ReviewResult,
     UnresolvedIssue,
 )
-from backend.app.agent.skills import CaseIntakeResult, SkillRegistry
 from backend.app.agent.state import AgentInvocationContext, LegalConsultationState
 from backend.app.core.config import Settings
 from backend.app.core.logging import audit, summary
@@ -69,7 +68,6 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 # case_analyst 使用；不绑定工具。输出由 CaseAnalysis 校验并写入
 # state.case_analysis，after_analysis 再根据 next_action 决定结束还是研究。
-# Analyst 只能建议 requested_skill_ids，SkillRegistry 才拥有最终启用权。
 ANALYST_PROMPT = """你是法律咨询的案情分析与调度 Agent。只做问题分类、事实整理、争议点拆分和研究规划。
 当前用户最新消息与历史对话、摘要或 memory_context 冲突时，必须采用当前用户最新明确陈述的事实，
 不得让历史记忆覆盖本轮修正。
@@ -79,8 +77,7 @@ legal_domain, key_facts[], missing_facts[], legal_issues[], research_tasks[{issu
 risk_level(low|medium|high), next_action(direct_answer|ask_clarification|research), direct_answer,
 clarification_questions[], current_fact_overrides[{canonical_key,new_value,old_value,
 replaced_memory_id,confidence}]。只有当前消息明确修正历史记忆时才填写override。普通闲聊填写
-direct_answer；关键事实不足时给出简洁澄清问题。根据服务端提供的Skill目录填写
-requested_skill_ids[]；只选择与本轮任务直接相关的ID，不得生成目录外ID。"""
+direct_answer；关键事实不足时给出简洁澄清问题。"""
 
 # legal_researcher 内部的 LangChain Agent 使用；这是唯一绑定 MCP BaseTool 的角色。
 # 最终 JSON 由 EvidencePacket 校验，随后代码再用真实 ToolMessage 回填权威元数据。
@@ -103,8 +100,7 @@ retrieval_status=no_match 时仍要提供有帮助的一般性、条件化分析
 未检索到可引用法条。tool_unavailable/tool_error 时应明确说明检索服务状态，不得冒充 no_match。
 区分已知事实、条件性推论、法律依据和行动建议。
     返回严格 JSON：answer, claims[{claim,evidence_chunk_ids}], confidence(low|medium|high),
-limitations[], follow_up_questions[], skill_outputs{}。只为服务端提供的 active_skills 输出对应
-skill_outputs；answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
+limitations[], follow_up_questions[]。answer 使用清晰 Markdown，包含结论、依据、分析、风险和建议。"""
 
 # reviewer 使用；不调用工具。ReviewResult 决定 finalize、补充研究或修改草稿。
 # 正常 no_match 只能修改越界表达，不能仅因证据为空重新检索。
@@ -122,14 +118,6 @@ next_action(finalize|research_again|revise_draft)。只有明确证据缺口才 
 EVIDENCE_SELECTOR_PROMPT = """你是受限证据选择器，不允许调用任何工具。输入只包含本轮已检索到的
 候选法条和争议点。逐个候选决定接受或拒绝：只有直接支持争议点的候选才能进入 accepted_chunk_ids；
 其余必须进入 rejected_candidates 并给出简短原因。不得生成输入中不存在的 chunk_id。仅输出 JSON。"""
-
-SKILL_STATUS_MESSAGES = {
-    "case-intake": "正在结构化案情",
-    "evidence-audit": "正在审查证据准备情况",
-    "procedure-roadmap": "正在整理程序路线",
-    "document-readiness": "正在检查文书材料完整性",
-}
-
 
 def _message_text(message: BaseMessage) -> str:
     """把 LangChain 的字符串或 Content Block 消息统一为可解析文本。
@@ -368,8 +356,6 @@ def _payload(state: LegalConsultationState) -> dict[str, Any]:
         "counsel_draft": state["counsel_draft"].model_dump() if state["counsel_draft"] else None,
         "review_result": state["review_result"].model_dump() if state["review_result"] else None,
         "current_fact_overrides": state.get("current_fact_overrides", []),
-        "active_skills": state.get("active_skills", []),
-        "skill_outputs": state.get("skill_outputs", {}),
     }
 
 
@@ -386,14 +372,12 @@ class LegalConsultationGraph:
         model: Any,
         tools: list[BaseTool],
         registry: MCPToolRegistry,
-        skill_registry: SkillRegistry,
         settings: Settings,
         checkpointer: Any = None,
     ) -> None:
         self.model = model
         self.tools = tools
         self.registry = registry
-        self.skill_registry = skill_registry
         self.settings = settings
         self.checkpointer = checkpointer
         # LangChain create_agent 返回一个可 astream 的模型—工具循环：model 是共享
@@ -420,7 +404,7 @@ class LegalConsultationGraph:
         # LegalConsultationState 会在节点返回 dict 时被 LangGraph 合并并写入
         # Checkpoint；context_schema 只提供运行期依赖，不成为可持久化 Graph State。
         graph = StateGraph(LegalConsultationState, context_schema=AgentInvocationContext)
-        # Analyst：模型结构化分析，写 case_analysis/事实覆盖/Skill 选择。
+        # Analyst：模型结构化分析，写 case_analysis 和事实覆盖。
         graph.add_node("case_analyst", self.case_analyst)
         # Research：内部 LangChain Agent 可调用 MCP，写 evidence_packet。
         graph.add_node("legal_researcher", self.legal_researcher)
@@ -481,172 +465,12 @@ class LegalConsultationGraph:
             audit("agent.node.failed", level=logging.ERROR, status="failed", agent=agent_name, error_type=type(exc).__name__, error=summary(str(exc)), duration_ms=int((time.perf_counter() - started) * 1000), **context.audit_fields)
             raise
 
-    @staticmethod
-    def _active_skill_ids(state: LegalConsultationState) -> list[str]:
-        return [str(item.get("skill_id")) for item in state.get("active_skills", [])]
-
-    def _skill_event(
-        self,
-        runtime: Runtime[AgentInvocationContext],
-        skill_id: str,
-        status: str,
-        message: str | None = None,
-    ) -> None:
-        """通过 LangGraph custom stream 写入可公开状态，不暴露 Skill Prompt。"""
-
-        # stream_writer 的字典随后由 AgentRuntime 转换为持久化 AgentRunEvent/SSE。
-        runtime.stream_writer({
-            "event": "skill_status",
-            "data": {
-                "skill_id": skill_id,
-                "status": status,
-                "message": message or SKILL_STATUS_MESSAGES.get(skill_id, "正在执行领域能力"),
-            },
-        })
-
-    async def _activate_skills(
-        self,
-        state: LegalConsultationState,
-        runtime: Runtime[AgentInvocationContext],
-        analysis: CaseAnalysis,
-    ) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
-        """将 Analyst 建议的 Skill ID 解析为受信任、请求级的可选能力。
-
-        这里不是向量或关键词查询：Analyst 已基于摘要目录给出 ID，Registry 再执行
-        白名单、角色和数量校验。完整 SKILL.md 仅在选中后由 prompt_for 注入。
-        """
-
-        # 步骤 1：读取 Analyst 的 Skill 选择建议。
-        # requested_skill_ids 来自 CaseAnalysis 的结构化模型输出，因此只能视为“不可信
-        # 建议”；模型不能凭一个字符串直接取得本地 Skill 指令或额外工具权限。
-        # 步骤 2：交给应用级 SkillRegistry 做确定性裁决。
-        # resolve() 不调用模型，也不进行向量/关键词搜索；它只接受启动时已经扫描并校验
-        # 的 Skill ID，按注册表固定顺序去重，并执行未知 ID、角色和最大数量限制。这里
-        # 没有指定 agent_role，是因为本阶段先确定“本轮全局激活集合”；具体节点稍后在
-        # prompt_for()/validate_outputs() 中还会再次按照 case_analyst/legal_counsel 等角色过滤。
-        resolved = self.skill_registry.resolve(
-            analysis.requested_skill_ids,
-            audit_fields=runtime.context.audit_fields,
-        )
-
-        # 步骤 3：把内部 ResolvedSkill 转换成可以进入运行状态的公开元数据。
-        # public_skills() 只保留 ID、版本、描述和内容摘要，不包含 SKILL.md 完整指令。
-        # 这样 LangGraph Checkpoint、LangSmith metadata 和后续节点可以识别 Skill 版本，
-        # 又不会让内部 Prompt 因状态持久化或事件输出而泄露。
-        active = self.skill_registry.public_skills(resolved)
-
-        # 步骤 4：将本轮激活结果写入请求级 Invocation Context。
-        # runtime.context 属于当前 AgentRun，不是共享 Graph 的实例字段；AgentRuntime 会用
-        # 这里的数据补充 Trace 和最终运行元数据。不同用户并发调用时各自持有独立 context。
-        runtime.context.active_skills = active
-
-        # 步骤 5：继承当前 Graph State 中已经存在的 Skill 输出。
-        # 使用 dict() 创建浅拷贝，避免直接原地修改传入 State；节点返回 outputs 后，
-        # LangGraph 才会把它合并进 state.skill_outputs 并在节点边界写入 Checkpoint。
-        outputs = dict(state.get("skill_outputs", {}))
-
-        # 步骤 6：逐个记录服务端最终接受的 Skill。
-        # 这里只发送选择状态，不执行 Skill，也不把完整 Prompt 写入审计或 SSE。
-        for item in resolved:
-            # ResolvedSkill.summary 是启动时经过 Frontmatter、版本、权限和路径校验的摘要。
-            skill_id = item.summary.skill_id
-
-            # 本地 JSONL 审计记录 ID、版本和 digest，便于重现本轮使用了哪个 Skill 版本；
-            # audit_fields 携带 request/tenant/user/conversation 关联信息，但不记录 Skill 正文。
-            audit(
-                "skill.selection.accepted",
-                status="selected",
-                skill_id=skill_id,
-                skill_version=item.summary.version,
-                content_digest=item.summary.content_digest,
-                **runtime.context.audit_fields,
-            )
-
-            # custom stream 事件随后由 AgentRuntime/AgentRunManager 转换为可重放事件和 SSE。
-            # 前端只能看到安全的 skill_id、status 和中文提示，不能读取 Skill 内部指令。
-            self._skill_event(runtime, skill_id, "selected")
-
-        # 步骤 7：判断是否需要立即执行 Analyst 专属的 case-intake Skill。
-        # 其他 Skill（如 evidence-audit、procedure-roadmap、document-readiness）主要作为
-        # 后续节点的约束或结构化输出协议，不在这里统一执行，以免绕过角色边界。
-        if any(item.summary.skill_id == "case-intake" for item in resolved):
-            # 步骤 7.1：先向事件流声明 case-intake 已进入运行状态。
-            self._skill_event(runtime, "case-intake", "running")
-
-            # 审计开始事件与完成/失败事件配对，用于统计 Skill 调用次数和定位失败阶段。
-            audit(
-                "skill.execution.started",
-                status="started",
-                skill_id="case-intake",
-                **runtime.context.audit_fields,
-            )
-            try:
-                # 步骤 7.2：按 case_analyst 角色加载 case-intake 的完整可信指令。
-                # prompt_for() 会再次调用 Registry.resolve(..., agent_role="case_analyst")，
-                # 未授权角色无法获得 Skill 正文。这一步体现 Progressive Disclosure：Analyst
-                # 首次选择时只看到目录摘要，真正选中并通过权限校验后才加载完整 SKILL.md。
-                # 步骤 7.3：组装本次 Skill 模型调用的结构化输入。
-                # _payload(state) 包含当前问题、记忆快照和已有 Graph 结果；新的
-                # case_analysis 由当前节点显式覆盖进去，保证 Skill 读取的是本轮最新分析。
-                # 步骤 7.4：通过统一的无工具模型边界执行 Skill。
-                # _invoke_json() 会检查模型调用额度、调用共享 ChatOpenAI.ainvoke()、提取
-                # AIMessage JSON，并用 CaseIntakeResult 做 Pydantic 校验。它没有 bind_tools，
-                # 所以 case-intake 不能调用 MCP，也不会进入 Research Agent 的工具循环。
-                result = await self._invoke_json(
-                    runtime,
-                    "skill_case_intake",
-                    self.skill_registry.prompt_for(["case-intake"], "case_analyst"),
-                    _payload(state) | {"case_analysis": analysis.model_dump()},
-                    CaseIntakeResult,
-                )
-
-                # 步骤 7.5：只有模型响应通过 JSON 与 Schema 校验后才写入输出集合。
-                # model_dump() 将 Pydantic 对象转换为可由 LangGraph Checkpoint 序列化的字典；
-                # 原始 AIMessage、模型内部字段和未经校验的文本都不会进入 Graph State。
-                outputs["case-intake"] = result.model_dump()
-
-                # 步骤 7.6：分别发送用户可见的安全完成状态和本地审计完成事件。
-                self._skill_event(runtime, "case-intake", "completed", "案情结构化完成")
-                audit(
-                    "skill.execution.completed",
-                    status="success",
-                    skill_id="case-intake",
-                    **runtime.context.audit_fields,
-                )
-            except Exception as exc:  # noqa: BLE001 - optional skill is fail-open
-                # 步骤 7.7：可选 Skill 失败采用 fail-open。
-                # 无论失败发生在模型请求、JSON 解析还是 Schema 校验，都先删除可能遗留的
-                # case-intake 输出，避免半成品被后续 Counsel 或 Checkpoint 当成可信结果。
-                outputs.pop("case-intake", None)
-
-                # 告知前端该增强能力未完成，但基础三 Agent 链路会继续执行；这里不会把
-                # Skill 异常升级成整轮咨询失败，也不会触发 MCP 工具重试。
-                self._skill_event(runtime, "case-intake", "failed", "案情结构化未完成，继续基础分析")
-
-                # 审计只记录异常类型和经过 summary() 截断/清洗的摘要，不上传完整模型响应、
-                # Skill Prompt 或用户敏感正文。若属于越权 Skill/工具，Registry 会更早拒绝，
-                # 不会进入这个普通执行失败分支。
-                audit(
-                    "skill.execution.failed",
-                    level=logging.WARNING,
-                    status="failed",
-                    skill_id="case-intake",
-                    error_type=type(exc).__name__,
-                    error=summary(str(exc)),
-                    **runtime.context.audit_fields,
-                )
-
-        # 步骤 8：把“激活的安全元数据”和“已验证的 Skill 输出”返回给 case_analyst。
-        # 调用方会将二者写入 LegalConsultationState；启用了但无需立即执行的 Skill 可以只有
-        # active 元数据而没有 outputs，这是正常状态，后续节点会按各自角色加载和使用它们。
-        return active, outputs
-
     async def case_analyst(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
-        """分类请求、整理事实、提出研究任务，并建议运行时 Skill。
+        """分类请求、整理事实并提出研究任务。
 
         输入：本轮 messages、memory_context 以及尚为空的中间状态。
-        输出：case_analysis、有效事实覆盖、active_skills/skill_outputs；闲聊或需要
-        澄清时还会直接写 final_answer。返回字典由 LangGraph 合并回 State。
+        输出：case_analysis 和有效事实覆盖；闲聊或需要澄清时还会直接写
+        final_answer。返回字典由 LangGraph 合并回 State。
         """
 
         # 步骤 1：先发布节点状态。stream_writer 产生 LangGraph custom event，随后
@@ -656,7 +480,7 @@ class LegalConsultationGraph:
 
         # 步骤 2A（仅离线评测）：evaluation_case_analysis 是测试提供的固定分析结果，
         # 用于把“路由/后续节点测试”与真实 Analyst 模型波动分离。生产请求默认为
-        # None；即使走固定输入，仍必须执行事实所有权和 Skill 白名单校验。
+        # None；即使走固定输入，仍必须执行事实所有权校验。
         if runtime.context.evaluation_case_analysis is not None:
             # 步骤 2A-1：先用 CaseAnalysis 校验测试对象，保证字段与真实模型输出一致。
             analysis = CaseAnalysis.model_validate(runtime.context.evaluation_case_analysis)
@@ -667,22 +491,16 @@ class LegalConsultationGraph:
             )
             # 步骤 2A-3：只保留通过 tenant/user/conversation 所有权校验的修正事实。
             analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
-            # 步骤 2A-4：解析 Analyst 建议的 Skill，并按需执行 case-intake。
-            active_skills, skill_outputs = await self._activate_skills(
-                state, runtime, analysis
-            )
-            # 步骤 2A-5：构造节点增量。LangGraph 会把这些键合并进现有 State；
+            # 步骤 2A-4：构造节点增量。LangGraph 会把这些键合并进现有 State；
             # model_call_count 同步写回是为了 Checkpoint 恢复时不重置调用额度。
             update: dict[str, Any] = {
                 "case_analysis": analysis,
                 "current_fact_overrides": [
                     item.model_dump() for item in analysis.current_fact_overrides
                 ],
-                "active_skills": active_skills,
-                "skill_outputs": skill_outputs,
                 "model_call_count": runtime.context.metrics.model_call_count,
             }
-            # 步骤 2A-6：无需研究的两种请求直接准备最终正文。after_analysis 会把
+            # 步骤 2A-5：无需研究的两种请求直接准备最终正文。after_analysis 会把
             # Graph 路由到 finalize，而不是进入 MCP Research。
             if analysis.next_action == "direct_answer":
                 update["final_answer"] = analysis.direct_answer
@@ -695,13 +513,10 @@ class LegalConsultationGraph:
 
         # 步骤 2B（生产路径）：调用 Analyst 模型并得到结构化 CaseAnalysis。
         try:
-            # 步骤 2B-1：Progressive Disclosure 只给 Analyst Skill 名称和描述目录，
-            # 尚未把所有完整 Skill 指令塞入 Prompt，减少上下文并避免无关能力干扰。
-            analyst_prompt = f"{ANALYST_PROMPT}\n\n{self.skill_registry.catalog_prompt()}"
-            # 步骤 2B-2：_invoke_json 使用 ChatOpenAI.ainvoke，返回完整 AIMessage，
+            # 步骤 2B-1：_invoke_json 使用 ChatOpenAI.ainvoke，返回完整 AIMessage，
             # 再经 JSON 提取和 CaseAnalysis Pydantic 校验；该调用不绑定任何工具。
             analysis = await self._invoke_json(
-                runtime, "case_analyst", analyst_prompt, _payload(state), CaseAnalysis
+                runtime, "case_analyst", ANALYST_PROMPT, _payload(state), CaseAnalysis
             )
         except (ValueError, ValidationError, RuntimeError) as exc:
             # 步骤 2B-失败：模型输出无法解析、Schema 不合法或调用额度耗尽时，采用
@@ -721,29 +536,23 @@ class LegalConsultationGraph:
         )
         analysis = analysis.model_copy(update={"current_fact_overrides": validated_overrides})
 
-        # 步骤 4：服务端裁决 requested_skill_ids。未知、越权或超限 Skill 会被拒绝；
-        # 合法 Skill 的安全元数据和结构化输出才进入本轮 State。
-        active_skills, skill_outputs = await self._activate_skills(state, runtime, analysis)
-
-        # 步骤 5：构造统一的 State 增量，供下一节点及 Checkpoint 使用。
+        # 步骤 4：构造统一的 State 增量，供下一节点及 Checkpoint 使用。
         update: dict[str, Any] = {
             "case_analysis": analysis,
             "current_fact_overrides": [
                 item.model_dump() for item in analysis.current_fact_overrides
             ],
-            "active_skills": active_skills,
-            "skill_outputs": skill_outputs,
             "model_call_count": runtime.context.metrics.model_call_count,
         }
 
-        # 步骤 6：闲聊/澄清提前写 final_answer；法律咨询不写正文，等待 Research。
+        # 步骤 5：闲聊/澄清提前写 final_answer；法律咨询不写正文，等待 Research。
         if analysis.next_action == "direct_answer":
             update["final_answer"] = analysis.direct_answer or "您好，请告诉我需要咨询的法律问题。"
         elif analysis.next_action == "ask_clarification":
             questions = analysis.clarification_questions or analysis.missing_facts
             update["final_answer"] = "为了更准确地分析，请补充以下信息：\n\n" + "\n".join(f"- {item}" for item in questions)
 
-        # 步骤 7：返回的 dict 不是 HTTP 响应；LangGraph 会先合并 State，然后调用
+        # 步骤 6：返回的 dict 不是 HTTP 响应；LangGraph 会先合并 State，然后调用
         # after_analysis 选择 legal_researcher 或 finalize。
         return update
 
@@ -794,18 +603,12 @@ class LegalConsultationGraph:
             seen_tool_messages: set[str] = set()
             successful_tool_result = False
             failed_tool_result = False
-            # 步骤 7：只加载允许 legal_researcher 使用的已激活 Skill 指令。没有合法
-            # Skill 时返回空字符串，不影响基础检索 Prompt。
-            skill_prompt = self.skill_registry.prompt_for(
-                self._active_skill_ids(state), "legal_researcher"
-            )
-
-            # 步骤 8：启动 LangChain Agent 内部模型—工具循环。传入 SystemMessage
+            # 步骤 7：启动 LangChain Agent 内部模型—工具循环。传入 SystemMessage
             # 约束研究角色，HumanMessage 携带结构化任务；context 供 Middleware 读取
             # 身份/计数。updates 携带模型/工具 Message，custom 携带 Middleware 写出
             # 的安全状态；完整工具参数、法规正文和推理不会直接转发给客户端。
             async for part in self.research_agent.astream(
-                {"messages": [SystemMessage(content="\n\n".join(item for item in (RESEARCH_PROMPT, skill_prompt) if item)), HumanMessage(content=json.dumps(research_payload, ensure_ascii=False, default=str))]},
+                {"messages": [SystemMessage(content=RESEARCH_PROMPT), HumanMessage(content=json.dumps(research_payload, ensure_ascii=False, default=str))]},
                 context=context,
                 stream_mode=["updates", "custom"],
                 version="v2",
@@ -994,9 +797,9 @@ class LegalConsultationGraph:
     async def legal_counsel(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         """基于案情、记忆快照和 EvidencePacket 生成待复核法律意见草稿。
 
-        输入：CaseAnalysis、EvidencePacket、当前有效 Skill 输出和 Reviewer 修改要求。
-        输出：CounselDraft、经 Schema 验证的 Skill 输出及 revision_count。该节点无
-        MCP Tool 权限，草稿也不会在此处直接持久化或输出给用户。
+        输入：CaseAnalysis、EvidencePacket 和 Reviewer 修改要求。输出：CounselDraft
+        及 revision_count。该节点无 MCP Tool 权限，草稿也不会在此处直接持久化或
+        输出给用户。
         """
 
         # 步骤 1：读取 Research 证据状态，并把 no_match 单独建模。no_match 表示工具
@@ -1018,109 +821,35 @@ class LegalConsultationGraph:
         if state["review_result"] and state["review_result"].revision_instruction:
             payload["revision_instruction"] = state["review_result"].revision_instruction
 
-        # 步骤 5：取得本轮已由服务端激活的 Skill ID。
-        active_ids = self._active_skill_ids(state)
-
-        # 步骤 6：选中的 Skill 还要按 legal_counsel 角色二次过滤；未授权 Skill 的完整
-        # 指令不会进入本节点 Prompt。
-        counsel_skills = self.skill_registry.resolve(active_ids, "legal_counsel")
-
-        # 步骤 7：对每个合法 Counsel Skill 发布开始事件和审计记录。这里还没有
-        # 单独调用模型；这些 Skill 将作为同一次 Counsel Prompt 的附加领域约束。
-        for item in counsel_skills:
-            self._skill_event(runtime, item.summary.skill_id, "running")
-            audit(
-                "skill.execution.started",
-                status="started",
-                skill_id=item.summary.skill_id,
-                **runtime.context.audit_fields,
-            )
         try:
-            # 步骤 8：此时才按需加载完整 Skill 正文，实现 Progressive Disclosure。
-            skill_prompt = self.skill_registry.prompt_for(active_ids, "legal_counsel")
-
-            # 步骤 9：_invoke_json 是无工具的完整消息调用。输入含分析、证据、有限记忆和
+            # 步骤 5：_invoke_json 是无工具的完整消息调用。输入含分析、证据、有限记忆和
             # Fact Override；输出 CounselDraft 此时尚未写入业务 messages 表。
             draft = await self._invoke_json(
                 runtime,
                 "legal_counsel",
-                "\n\n".join(item for item in (COUNSEL_PROMPT, skill_prompt) if item),
+                COUNSEL_PROMPT,
                 payload,
                 CounselDraft,
             )
-            try:
-                # 步骤 10：模型输出的 Skill 结果仍须满足“已激活 + 角色允许 + Schema 合法”，
-                # 否则不会进入 Graph State 或最终回答。
-                validated_outputs = self.skill_registry.validate_outputs(
-                    draft.skill_outputs, active_ids, "legal_counsel"
-                )
-            except ValidationError as exc:
-                # 步骤 10-失败：某个 Skill 输出结构错误时整批丢弃该组可选输出并记录
-                # 安全摘要，但保留基础 CounselDraft，体现 Skill fail-open。
-                validated_outputs = {}
-                audit(
-                    "skill.execution.failed",
-                    level=logging.WARNING,
-                    status="failed",
-                    skill_id="counsel_skill_outputs",
-                    error_type=type(exc).__name__,
-                    error=summary(str(exc)),
-                    **runtime.context.audit_fields,
-                )
-            # 步骤 11：用验证后的结果替换模型原始 skill_outputs，再与此前例如
-            # case-intake 的结果合并；未验证输出不会进入后续 Reviewer/Finalize。
-            draft = draft.model_copy(update={"skill_outputs": validated_outputs})
-            merged_outputs = {**state.get("skill_outputs", {}), **validated_outputs}
-
-            # 步骤 12：逐个 Skill 发布成功/失败状态。是否完成以对应 Schema 输出是否
-            # 存在为准，不以“模型调用没有抛异常”代替业务完成。
-            for item in counsel_skills:
-                skill_id = item.summary.skill_id
-                completed = skill_id in validated_outputs
-                self._skill_event(
-                    runtime,
-                    skill_id,
-                    "completed" if completed else "failed",
-                    "领域分析完成" if completed else "领域分析未完成，继续基础回答",
-                )
-                audit(
-                    "skill.execution.completed" if completed else "skill.execution.failed",
-                    level=logging.INFO if completed else logging.WARNING,
-                    status="success" if completed else "failed",
-                    skill_id=skill_id,
-                    **runtime.context.audit_fields,
-                )
-            # 步骤 13：no_match 模式强制补充披露并把 confidence 压到 low。即使模型
+            # 步骤 6：no_match 模式强制补充披露并把 confidence 压到 low。即使模型
             # 遗漏了说明，也由代码追加；具体法名/条号仍会在 Reviewer/Finalize 检查。
             if no_match:
                 disclosure = "本轮法规检索正常完成，但当前法规库中未检索到可引用法条。以上属于一般性分析，不构成已经过法规核验的确定性法律结论。"
                 answer = draft.answer if _no_match_disclosure_present(draft.answer) else f"{draft.answer.rstrip()}\n\n## 检索说明\n\n{disclosure}"
                 draft = draft.model_copy(update={"answer": answer, "confidence": "low"})
-            # 步骤 14：返回草稿 State 增量。只有由 Reviewer 回流才增加 revision_count，
+            # 步骤 7：返回草稿 State 增量。只有由 Reviewer 回流才增加 revision_count，
             # 该计数会随 Checkpoint 保存，确保服务重启后不能再次免费改稿。
             return {
                 "counsel_draft": draft,
-                "skill_outputs": merged_outputs,
                 "revision_count": state["revision_count"] + (1 if state["review_result"] else 0),
                 "model_call_count": runtime.context.metrics.model_call_count,
             }
         except Exception as exc:  # noqa: BLE001 - counsel failures use a safe user-facing fallback
-            # 失败步骤 1：Skill/Counsel 调用、解析或 Schema 校验异常时，先把本节点
-            # 所有可选 Skill 标为失败，避免 UI 长时间停留在 running。
-            # Skill/Counsel 失败采用安全草稿继续到复核；最终消息仍只能由 Finalize
-            # 和 AgentRunManager 的幂等持久化阶段产生。
-            for item in counsel_skills:
-                self._skill_event(
-                    runtime,
-                    item.summary.skill_id,
-                    "failed",
-                    "领域分析未完成，继续安全兜底回答",
-                )
-            # 失败步骤 2：no_match 使用确定性安全模板；其他状态仅输出研究摘要和
+            # 失败步骤 1：no_match 使用确定性安全模板；其他状态仅输出研究摘要和
             # 明确限制，不把异常内容或未经复核的半成品草稿返回用户。
             fallback_answer = _no_match_safe_answer(state) if no_match else (evidence.research_summary if evidence else "暂时无法形成完整法律意见。") + "\n\n当前回答生成失败，建议稍后重试或咨询专业律师。"
             fallback = CounselDraft(answer=fallback_answer, confidence="low", limitations=["回答生成或法规核验未完整完成"])
-            # 失败步骤 3：把安全草稿和 AgentError 写回 State，让 Graph 仍进入
+            # 失败步骤 2：把安全草稿和 AgentError 写回 State，让 Graph 仍进入
             # review_gate；错误用于审计，不直接作为最终正文。
             return {
                 "counsel_draft": fallback,
@@ -1139,22 +868,17 @@ class LegalConsultationGraph:
         # agent 名称沿用 case_analyst，而状态明确为 reviewing。
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "reviewing", "message": "正在核验回答"}})
         try:
-            # 步骤 2：按 reviewer 角色加载本轮合法 Skill 指令；没有授权 Skill 时
-            # prompt_for 返回空字符串，基础复核规则仍然执行。
-            skill_prompt = self.skill_registry.prompt_for(
-                self._active_skill_ids(state), "reviewer"
-            )
-            # 步骤 3：执行一次无工具结构化模型调用。输入包含草稿、证据包、分析和
+            # 步骤 2：执行一次无工具结构化模型调用。输入包含草稿、证据包、分析和
             # 修订计数，输出必须满足 ReviewResult Schema。
             review = await self._invoke_json(
                 runtime,
                 "case_analyst_reviewer",
-                "\n\n".join(item for item in (REVIEW_PROMPT, skill_prompt) if item),
+                REVIEW_PROMPT,
                 _payload(state),
                 ReviewResult,
             )
         except Exception as exc:  # noqa: BLE001 - review failures finalize with explicit limitations
-            # 步骤 3-失败：Reviewer 自身失败时不无限重试模型，而是生成“未批准但
+            # 步骤 2-失败：Reviewer 自身失败时不无限重试模型，而是生成“未批准但
             # 结束”的 ReviewResult。Finalize 会依据限制输出安全结果。
             review = ReviewResult(approved=False, revision_instruction="自动复核未完成，最终回答应保留风险提示。", next_action="finalize")
             return {
@@ -1162,7 +886,7 @@ class LegalConsultationGraph:
                 "errors": [*state["errors"], AgentError(agent="case_analyst_reviewer", message=str(exc))],
                 "model_call_count": runtime.context.metrics.model_call_count,
             }
-        # 步骤 4：LLM 复核之后仍执行代码级引用校验。Reviewer 的 approved 只是模型
+        # 步骤 3：LLM 复核之后仍执行代码级引用校验。Reviewer 的 approved 只是模型
         # 意见，不能覆盖“引用必须属于本轮 EvidencePacket”的硬约束。
         deterministic_errors = _citation_errors(state["counsel_draft"], state["evidence_packet"])
         packet = state["evidence_packet"]

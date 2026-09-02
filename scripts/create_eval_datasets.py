@@ -137,102 +137,6 @@ def fixture_analysis(item):
     }
 
 
-def build_skill_cases():
-    definitions = {
-        "case-intake": [
-            "我和两家公司先后签过协议，付款时间和交付时间多次变更，请帮我整理案情。",
-            "事情经过很长，涉及甲乙丙三方和多笔金额，请先梳理时间线。",
-        ],
-        "evidence-audit": [
-            "我只有聊天记录和转账截图，这些证据够不够，还缺什么？",
-            "准备起诉前，请帮我检查现有合同、发票和录音的证明作用。",
-        ],
-        "procedure-roadmap": [
-            "劳动仲裁应当怎么走，可能有哪些步骤和材料？",
-            "判决生效后对方仍不履行，我下一步如何申请执行？",
-        ],
-        "document-readiness": [
-            "我想写民事起诉状，请先检查目前的信息是否完整。",
-            "准备答辩状前还需要补充哪些事实和证据？",
-        ],
-    }
-    cases = []
-    for skill_id, positives in definitions.items():
-        for index, question in enumerate(positives, 1):
-            cases.append({
-                "inputs": {
-                    "question": question,
-                    "fixture_case_analysis": {
-                        "request_type": "legal_consultation",
-                        "case_summary": question,
-                        "next_action": "direct_answer",
-                        "direct_answer": "已完成任务分析。",
-                        "requested_skill_ids": [skill_id],
-                    },
-                },
-                "outputs": {"expected_route": "direct_answer", "expected_skill_ids": [skill_id]},
-                "metadata": {"category": "skill_positive", "skill_id": skill_id, "case": index, "synthetic": True},
-            })
-        cases.append({
-            "inputs": {
-                "question": "你好，请介绍一下你自己。",
-                "fixture_case_analysis": {
-                    "request_type": "casual_chat",
-                    "case_summary": "普通问候",
-                    "next_action": "direct_answer",
-                    "direct_answer": "您好。",
-                    "requested_skill_ids": [],
-                },
-            },
-            "outputs": {"expected_route": "direct_answer", "expected_skill_ids": []},
-            "metadata": {"category": "skill_negative", "skill_id": skill_id, "synthetic": True},
-        })
-        cases.append({
-            "inputs": {
-                "question": f"组合任务：{positives[0]}",
-                "fixture_case_analysis": {
-                    "request_type": "legal_consultation",
-                    "case_summary": positives[0],
-                    "next_action": "direct_answer",
-                    "direct_answer": "已完成组合任务分析。",
-                    "requested_skill_ids": [skill_id, "evidence-audit" if skill_id != "evidence-audit" else "procedure-roadmap"],
-                },
-            },
-            "outputs": {"expected_route": "direct_answer", "expected_skill_ids": [skill_id, "evidence-audit" if skill_id != "evidence-audit" else "procedure-roadmap"]},
-            "metadata": {"category": "skill_combination", "skill_id": skill_id, "synthetic": True},
-        })
-        cases.append({
-            "inputs": {
-                "question": positives[1],
-                "fixture_case_analysis": {
-                    "request_type": "legal_consultation",
-                    "case_summary": positives[1],
-                    "next_action": "direct_answer",
-                    "direct_answer": "已拒绝未知能力。",
-                    "requested_skill_ids": [skill_id, "delete-user-memory"],
-                },
-            },
-            "outputs": {"expected_route": "direct_answer", "expected_skill_ids": [skill_id]},
-            "metadata": {"category": "skill_unauthorized", "skill_id": skill_id, "synthetic": True},
-        })
-        cases.append({
-            "inputs": {
-                "question": positives[0],
-                "fixture_case_analysis": {
-                    "request_type": "legal_consultation",
-                    "case_summary": positives[0],
-                    "next_action": "direct_answer",
-                    "direct_answer": "Skill关闭时使用基础回答。",
-                    "requested_skill_ids": [],
-                },
-            },
-            "outputs": {"expected_route": "direct_answer", "expected_skill_ids": []},
-            "metadata": {"category": "skill_disabled_baseline", "skill_id": skill_id, "skills_enabled": False, "synthetic": True},
-        })
-    assert len(cases) == 24
-    return cases
-
-
 def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     cases = build()
@@ -251,7 +155,6 @@ def main():
     write("lawstation-retrieval-v1", [item for item in cases if item["metadata"]["category"] in {"matched", "no_match", "tool_error"}])
     write("lawstation-answer-v1", [item for item in cases if item["metadata"]["category"] in {"matched", "no_match"}])
     write("lawstation-memory-v1", [item for item in cases if item["metadata"]["category"] == "memory"])
-    write("lawstation-skills-v1", build_skill_cases())
     limits = {
         "casual": 5,
         "clarification": 5,

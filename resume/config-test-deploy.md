@@ -26,16 +26,7 @@ flowchart LR
 
 ## 1. 配置系统
 
-运行时 Skill 配置：
-
-```dotenv
-AGENT_SKILLS_ENABLED=true
-AGENT_SKILL_ROOT=./skills/runtime
-AGENT_MAX_ACTIVE_SKILLS=2
-AGENT_SKILL_STRICT_VALIDATION=true
-```
-
-`SkillRegistry` 在 FastAPI lifespan 创建。严格校验开启时，重复 ID、非法 SemVer、越界路径、未知输出 Schema 或未授权工具会阻止启动；关闭整个 Skill 功能后，原三 Agent 链路仍可独立运行。Skill 文件首期不热更新，修改后需重启重新加载。
+产品运行时 Skill 及其配置已经移除；FastAPI lifespan 不再扫描 `skills/runtime`。`.agents/skills/` 仅用于开发过程，不进入 Settings、服务生命周期或线上 Prompt。
 
 `backend/app/core/config.py::Settings` 基于 `pydantic-settings`，固定从仓库根 `.env` 读取，未知字段忽略；`get_settings` 使用 `lru_cache` 保证进程内配置稳定。
 
@@ -125,7 +116,8 @@ npm run build
 | `scripts/run_langsmith_eval.py` | 单次 learn/smoke/compare/release | Profile 决定 |
 | `scripts/run_staged_langsmith_eval.py` | 分阶段对比与实际用量记录 | 需要显式上传确认，不受月度累计值阻断 |
 | `scripts/run_resume_rag_challenge_eval.py` | 回归测试、数据校验、资格冻结、通用/Dense/BGE 消融、6类 Agent 冒烟、硬门禁与简历结论归档 | 本地 Ollama + TEI；冒烟少量 DeepSeek；不上传 LangSmith、不调用 Judge |
-| `scripts/generate_conversation_scenarios.py` | 18类蓝图准备、DeepSeek JSON话术生成、确定性校验、定向修复和36条多轮场景冻结 | prepare/validate/freeze无外部调用；generate显式调用DeepSeek |
+| `scripts/run_agent_quality_eval.py` | 事实忠实度、Reviewer有效性、回答质量三套Agent Component评测与简历摘要 | DeepSeek Agent + Judge + LangSmith；显式上传确认；不需要Ollama/TEI/Web服务 |
+| `scripts/generate_conversation_scenarios.py` | 12类当前蓝图准备、DeepSeek JSON话术生成、确定性校验和24条多轮场景冻结 | prepare/validate/freeze无外部调用；generate显式调用DeepSeek |
 
 多轮场景生成的逐步命令、checkpoint续跑、文件产物，以及前端观察模式的开关/清理步骤见`resume/conversation-scenario-generation-guide.md`。生成脚本不执行Agent；只有用户启用开关并在页面逐步点击时，才会使用真实Agent/MCP/RAG资源。
 
@@ -241,7 +233,9 @@ npm run build
 
 - Python 新增 `langgraph-checkpoint-sqlite>=3,<4` 与 `aiosqlite>=0.20,<1`。
 - Python 新增 `PyYAML>=6.0`，仅用于解析受信任仓库内 `SKILL.md` Frontmatter；运行时不解析用户提供的 YAML。
-- Alembic head 为 `20260826_05`，创建 `agent_runs/agent_run_events` 与同会话 active 唯一索引；升级前备份名后缀为 `.pre-agent-runs.bak`。
+- Alembic head 为 `20260901_06`。`20260826_05` 创建 `agent_runs/agent_run_events` 与同会话 active 唯一索引；最新数据修订只重排保存了目标兼容错误的记忆任务，其他失败任务不受影响。升级前备份名后缀为 `.pre-memory-compatibility.bak`。
 - Checkpoint 数据库与业务库分离为 `data/runtime/langgraph-checkpoints.db`，使用 `JsonPlusSerializer(pickle_fallback=False)`。
-- 已覆盖 `tests/test_agent_runs.py`、`tests/test_retrieval_confidence.py` 和 `tests/test_skills.py`；本次离线后端全量回归为 153 passed，前端为 14 passed，生产构建通过。
+- 根 Graph 调用只设置 `thread_id`；低层 Saver 中的空 `checkpoint_ns` 由 LangGraph 管理。测试使用真实编译 Graph 验证 `astream → aget_state`，避免只直接读写 Saver 而遗漏子图 namespace 语义。
+- 已覆盖`tests/test_agent_runs.py`、`tests/test_retrieval_confidence.py`、场景目录与三Agent回归；运行时Skill专用测试已经随功能删除。本次根图 Checkpoint 修复后的离线后端全量回归为168 passed；前端未受本次改动影响，最近一次基线为25 passed且生产构建通过。
+- `tests/conftest.py` 在测试会话开始前将 `LOG_DIR` 指向临时目录并重置日志 handler/settings cache；Mock 中故意制造的记忆失败不得写入正式 `data/logs/lawstation.log`。
 - 冻结数据由 `scripts/create_accuracy_datasets.py` 生成；真实阈值校准会调用本地检索服务，不在普通测试或开发完成后自动执行。

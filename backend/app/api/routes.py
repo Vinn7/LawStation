@@ -685,11 +685,6 @@ async def stream_message(
             total_duration_ms = int((time.perf_counter() - started) * 1000)
             audit("conversation.completed", request_id=ctx.request_id, tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id, status="success", duration_ms=total_duration_ms, total_duration_ms=total_duration_ms, queue_duration_ms=queue_duration_ms, first_status_duration_ms=first_status_duration_ms, first_text_token_duration_ms=first_text_token_duration_ms, answer_chars=len(assistant.content), answer_summary=summary(assistant.content), memory_job_id=job.id, tool_call_count=agent.tool_call_count, model_call_count=agent.model_call_count)
             yield sse("memory_status", {"status": "pending", "job_id": job.id})
-            skill_ids = [item.get("skill_id") for item in agent.active_skills]
-            skill_versions = {
-                item.get("skill_id"): item.get("version")
-                for item in agent.active_skills
-            }
             await consultation_trace.finish(
                 outputs={
                     "status": "success",
@@ -697,14 +692,8 @@ async def stream_message(
                     "citations": citations,
                     "model_call_count": agent.model_call_count,
                     "tool_call_count": agent.tool_call_count,
-                    "skill_ids": skill_ids,
-                    "skill_versions": skill_versions,
                     "queue_duration_ms": queue_duration_ms,
                     "total_duration_ms": total_duration_ms,
-                },
-                metadata={
-                    "skill_ids": skill_ids,
-                    "skill_versions": skill_versions,
                 },
             )
             yield sse("message_end", {"message_id": assistant.id, "trace_available": bool(agent.langsmith_trace_id)})

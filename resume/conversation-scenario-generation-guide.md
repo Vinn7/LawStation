@@ -5,16 +5,16 @@
 本手册对应 LawStation 的“多轮对话样例生成与一次性执行计划”，用于：
 
 ```text
-18 类确定性场景蓝图
+12 类确定性场景蓝图
 → DeepSeek 生成合成用户话术
 → 确定性安全与结构校验
 → 必要时定向修复单个变体
 → 冻结为版本化 JSONL 数据集
 ```
 
-当前仓库已经完成过一次真实生成并冻结 36 条场景。日常查看和验证不需要再次调用模型。
+当前默认v2已由既有合成结果确定性派生并冻结24条无运行时Skill场景。历史v1的36条场景保留用于审计，日常查看和验证不需要再次调用模型。
 
-> 重要边界：生成/冻结命令不会把36条场景发送给LawStation，也不会自动启动LawStation、Ollama或TEI。项目另提供默认关闭的前端“场景观察模式”，但它每次只在用户点击后执行一个步骤，不是自动Runner。“36条已生成”仍不等于“36条端到端测试已通过”。
+> 重要边界：当前默认v2包含24条不含运行时Skill的场景。生成/冻结命令不会把场景发送给LawStation，也不会自动启动LawStation、Ollama或TEI。前端“场景观察模式”每次只在用户点击后执行一个步骤，不是自动Runner。“24条已生成”仍不等于“24条端到端测试已通过”。
 
 ## 2. 当前已冻结结果
 
@@ -22,27 +22,24 @@
 
 ```text
 evals/conversations/
-├── blueprints-v1.json
-├── generated-candidates-v1.jsonl
+├── blueprints-v2.json                 # 下次显式生成v2时创建
+├── generated-candidates-v2.jsonl      # 下次显式生成v2时创建
 ├── generation-validation.json
-├── lawstation-dialogue-scenarios-v1.jsonl
-└── lawstation-dialogue-scenarios-v1.manifest.json
+├── lawstation-dialogue-scenarios-v2.jsonl
+└── lawstation-dialogue-scenarios-v2.manifest.json
 ```
 
 当前冻结版本：
 
 | 项目 | 值 |
 |---|---|
-| 蓝图数 | 18 |
+| 蓝图数 | 12 |
 | 每类变体数 | 2 |
-| 冻结场景数 | 36 |
-| 生成模型 | `deepseek-v4-flash` |
-| 初始模型调用 | 18 |
-| 定向修复调用 | 1 |
-| 总模型调用 | 19 |
-| Dataset SHA256 | `a13e18feef7ba90c153b17f0133fd47d9eb17a555c7e3a76e9b07e08a1b3f27f` |
+| 冻结场景数 | 24 |
+| 来源 | 从历史v1合成集按类别确定性过滤，无新增模型调用 |
+| Dataset SHA256 | `c0ea474d928fb789fc80fc5540d8562debb9d6682806781c90f15524b071a3b4` |
 
-类别覆盖为：`routing=4`、`rag=6`、`skill=12`、`memory=6`、`concurrency=4`、`durable_run=4`。
+类别覆盖为：`routing=4`、`rag=6`、`memory=6`、`concurrency=4`、`durable_run=4`。
 
 ## 3. 前置条件
 
@@ -89,7 +86,7 @@ TEST_SCENARIO_GENERATOR_SEED=42
 
 ### 4.1 只查看和核验当前冻结数据（推荐）
 
-当前 36 条样例已经冻结，通常只需要运行离线测试：
+当前24条v2样例已经冻结，通常只需要运行离线测试：
 
 ```bash
 conda run --no-capture-output -n LawStation \
@@ -100,7 +97,7 @@ conda run --no-capture-output -n LawStation \
 
 ```bash
 python -m json.tool \
-  evals/conversations/lawstation-dialogue-scenarios-v1.manifest.json
+  evals/conversations/lawstation-dialogue-scenarios-v2.manifest.json
 ```
 
 查看前 2 条冻结场景：
@@ -110,7 +107,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-path = Path("evals/conversations/lawstation-dialogue-scenarios-v1.jsonl")
+path = Path("evals/conversations/lawstation-dialogue-scenarios-v2.jsonl")
 for line in path.read_text("utf-8").splitlines()[:2]:
     print(json.dumps(json.loads(line), ensure_ascii=False, indent=2))
 PY
@@ -125,7 +122,7 @@ conda activate LawStation
 python run.py --test-scenarios
 ```
 
-启动器会先校验JSONL、manifest和SHA256，再启动本地模型与主服务。成功日志会显示Dataset ID、36条场景及“顶部栏 / 左侧栏”入口。若配置或数据无效，会在Ollama、TEI和Uvicorn启动前退出。
+启动器会先校验JSONL、manifest和SHA256，再启动本地模型与主服务。成功日志会显示Dataset ID、24条场景及“顶部栏 / 左侧栏”入口。若配置或数据无效，会在Ollama、TEI和Uvicorn启动前退出。
 
 进入页面后，每次点击“执行下一步”只消费一个动作。绿色结果必须具有实际终态、调用计数、Run重叠、SSE序号或记忆来源消息等证据；未知断言、Fixture依赖项、Checkpoint不可用和来源消息不足会显示`inconclusive`，而不是误判为通过。
 
@@ -142,10 +139,10 @@ conda run --no-capture-output -n LawStation \
 
 该阶段：
 
-- 从 `backend/app/evaluation/conversation_scenarios.py::blueprint_definitions()` 读取 18 类确定性模板；
+- 从 `backend/app/evaluation/conversation_scenarios.py::blueprint_definitions()` 读取12类确定性模板；
 - 从当前 `LAW_DATA_PATH` 加载法规 chunk，仅为需要来源约束的蓝图选择 source；
-- 将蓝图写入 `evals/conversations/blueprints-v1.json`；
-- 创建 `evals/conversations/.checkpoints/`。
+- 将蓝图写入 `evals/conversations/blueprints-v2.json`；
+- 创建 `evals/conversations/.checkpoints-v2/`。
 
 如果已有蓝图文件与当前代码生成结果不一致，命令会停止并拒绝静默覆盖。应先审查差异并创建新数据集版本，不应直接删除旧文件绕过保护。
 
@@ -163,12 +160,12 @@ title
 messages[]
 ```
 
-Actor、会话、用户切换、发送、取消、断线重连、预期 SSE 事件、Skill ID 和工具权限均由代码模板固定，不能由模型自由生成。
+Actor、会话、用户切换、发送、取消、断线重连和预期SSE事件均由代码模板固定，不能由模型自由生成。
 
 生成过程中每个蓝图成功后立即原子写入独立 checkpoint：
 
 ```text
-evals/conversations/.checkpoints/<blueprint-id>.json
+evals/conversations/.checkpoints-v2/<blueprint-id>.json
 ```
 
 如果一个候选因法规原文泄漏等规则被拒绝，脚本只定向修复该变体，不重新生成同蓝图中已经通过的变体。
@@ -183,13 +180,13 @@ conda run --no-capture-output -n LawStation \
 校验内容包括：
 
 - Pydantic Schema 和场景版本；
-- Actor、Conversation、Action 和 Skill 白名单；
+- Actor、Conversation 和 Action 白名单；
 - 动作顺序、消息槽位和预期终态；
 - 重复标题、重复问题和重复对话；
 - 手机号、身份证、银行卡、邮箱和密钥；
 - Prompt Injection 文本；
 - 法名、条号和连续法规原文泄漏；
-- 单轮最多两个运行时 Skill 及角色/权限边界。
+- 场景不得携带已经下线的产品运行时 Skill 字段。
 
 查看校验汇总：
 
@@ -197,7 +194,7 @@ conda run --no-capture-output -n LawStation \
 python -m json.tool evals/conversations/generation-validation.json
 ```
 
-只有 `candidate_count=36`、`rejected_count=0` 且结构错误为空时，才满足冻结条件。
+只有`candidate_count=24`、`rejected_count=0`且结构错误为空时，才满足冻结条件。
 
 #### 第四步：冻结数据集
 
@@ -209,8 +206,8 @@ conda run --no-capture-output -n LawStation \
 `freeze` 会再次执行校验，然后生成：
 
 ```text
-evals/conversations/lawstation-dialogue-scenarios-v1.jsonl
-evals/conversations/lawstation-dialogue-scenarios-v1.manifest.json
+evals/conversations/lawstation-dialogue-scenarios-v2.jsonl
+evals/conversations/lawstation-dialogue-scenarios-v2.manifest.json
 ```
 
 manifest 会记录模型、Prompt 版本、蓝图数、样本数、随机种子、模型调用数、修复历史、类别覆盖和 SHA256。有效样例不足时会保留诊断结果，但不会生成一个不完整的正式冻结集。
@@ -241,7 +238,7 @@ conda run --no-capture-output -n LawStation \
 
 ### 5.3 已完成状态下再次执行
 
-当 18 个 checkpoint 全部存在且有效时，再次运行 `generate` 通常不会产生新的初始模型调用；它会根据 checkpoint 重新物化候选并报告剩余数量。
+当12个v2 checkpoint全部存在且有效时，再次运行`generate`通常不会产生新的初始模型调用；它会根据checkpoint重新物化候选并报告剩余数量。
 
 不要为了“重新跑一次”随意删除 checkpoint。若确实要创建新实验，应升级 Prompt 或 Dataset 版本并保留旧 manifest，以便审计和对比。
 
@@ -306,9 +303,9 @@ python scripts/generate_conversation_scenarios.py --help
 
 ### `请先执行prepare`
 
-缺少 `blueprints-v1.json`，先运行 `prepare`。
+缺少`blueprints-v2.json`，先运行`prepare`。
 
-### `既有blueprints-v1.json与当前模板不一致`
+### `既有blueprints-v2.json与当前模板不一致`
 
 代码模板或法规 source 选择结果发生变化。不要覆盖旧版本；先检查 Git diff、`LAW_DATA_PATH`、chunk 参数和随机种子，再决定是否升级数据集版本。
 
@@ -344,8 +341,8 @@ conda run --no-capture-output -n LawStation \
 status=frozen
 synthetic=true
 human_verified=false
-blueprint_count=18
-sample_count=36
+blueprint_count=12
+sample_count=24
 rejected_count=0
 dataset_sha256 非空
 ```
@@ -354,16 +351,16 @@ dataset_sha256 非空
 
 可以描述：
 
-> 建立 18 类确定性多轮场景蓝图，使用 DeepSeek JSON Output 生成 36 条合成用户话术，并通过 checkpoint、定向修复、敏感信息、Prompt Injection、动作白名单、Skill 权限和法规来源泄漏校验进行版本化冻结。
+> 建立12类确定性多轮场景蓝图，支持使用DeepSeek JSON Output生成24条合成用户话术，并通过checkpoint、定向修复、敏感信息、Prompt Injection、动作白名单和法规来源泄漏校验进行版本化冻结；当前v2由历史合成集确定性派生，未新增模型调用。
 
 不能描述：
 
-- “36 条真实用户数据”；
+- “24条真实用户数据”；
 - “律师人工标注”；
-- “36 条 Agent 端到端测试全部通过”；
+- “24条 Agent 端到端测试全部通过”；
 - “法律回答准确率 100%”。
 
-当前可在前端人工逐步观察实际结果，但尚未实现无人值守的自动Scenario Runner，因此仍不能直接汇总36条的自动通过率。
+当前可在前端人工逐步观察实际结果，但尚未实现无人值守的自动Scenario Runner，因此仍不能直接汇总24条的自动通过率。
 
 ## 10. 前端场景观察操作
 
@@ -371,7 +368,7 @@ dataset_sha256 非空
 
 ```dotenv
 TEST_SCENARIOS_ENABLED=true
-TEST_SCENARIO_DATA_PATHS=["./evals/conversations/lawstation-dialogue-scenarios-v1.jsonl"]
+TEST_SCENARIO_DATA_PATHS=["./evals/conversations/lawstation-dialogue-scenarios-v2.jsonl"]
 TEST_SCENARIO_STEP_TIMEOUT_SECONDS=60
 ```
 

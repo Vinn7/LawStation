@@ -95,7 +95,7 @@ sequenceDiagram
 
 - token 只追加到本轮占位助手消息；
 - agent_status 清除旧 toolActivity；
-- skill_status 只更新当前 `ConversationKey` 的 `skillActivity`，展示服务端安全状态文本；
+- 历史 `skill_status` 事件按未知非正文事件忽略，不再创建运行时 Skill UI 状态；
 
 - 成功 tool result 清除检索中提示；
 - citations 绑定当前助手消息；

@@ -2,7 +2,6 @@ import json
 
 from backend.app.evaluation.conversation_scenarios import (
     ALLOWED_ACTIONS,
-    ALLOWED_SKILLS,
     attach_sources,
     blueprint_definitions,
     materialize_scenarios,
@@ -38,31 +37,25 @@ def generated_responses(blueprints):
     return responses
 
 
-def test_blueprints_materialize_exactly_36_scenarios():
+def test_blueprints_materialize_exactly_24_scenarios():
     blueprints = attach_sources(blueprint_definitions(), [chunk()])
     scenarios, rejected = materialize_scenarios(
         blueprints, generated_responses(blueprints), generator_model="fake-model"
     )
-    assert len(blueprints) == 18
-    assert len(scenarios) == 36
+    assert len(blueprints) == 12
+    assert len(scenarios) == 24
     assert rejected == []
     assert validate_scenarios(scenarios) == []
     assert {step["action"] for item in scenarios for step in item["steps"]} <= ALLOWED_ACTIONS
 
 
-def test_model_output_cannot_define_actions_or_unauthorized_skills():
+def test_model_output_cannot_define_actions():
     blueprints = attach_sources(blueprint_definitions(), [chunk()])
     responses = generated_responses(blueprints)
     responses[0]["variants"][0]["actions"] = [{"action": "delete_database"}]
     scenarios, rejected = materialize_scenarios(blueprints, responses, generator_model="fake-model")
     assert not rejected
     assert all(step["action"] in ALLOWED_ACTIONS for item in scenarios for step in item["steps"])
-    assert all(
-        skill in ALLOWED_SKILLS
-        for item in scenarios
-        for step in item["steps"]
-        for skill in step.get("expected", {}).get("skill_ids", [])
-    )
 
 
 def test_sensitive_and_injection_messages_are_rejected():

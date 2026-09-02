@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +65,26 @@ class MemoryPersistStats:
         return self.created_count + self.replaced_count
 
 
+@dataclass(frozen=True)
+class MemoryFailureDetails:
+    """可安全写入审计日志和任务表的记忆失败分类。"""
+
+    category: str
+    retryable: bool
+    safe_error: str
+    upstream_status: int | None = None
+    upstream_error_code: str | None = None
+    upstream_parameter: str | None = None
+
+    def audit_fields(self) -> dict[str, Any]:
+        """只返回诊断所需的上游元数据，不返回请求正文或原始响应。"""
+        return {
+            "upstream_status": self.upstream_status,
+            "upstream_error_code": self.upstream_error_code,
+            "upstream_parameter": self.upstream_parameter,
+        }
+
+
 def _response_text(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, str):
@@ -79,22 +100,90 @@ def _response_text(response: Any) -> str:
     return ""
 
 
-def _failure_details(exc: Exception) -> tuple[str, bool, str]:
+def _safe_upstream_value(value: Any) -> str | None:
+    """限制上游 code/param 的字符和长度，避免异常对象夹带敏感正文。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:80] if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", text) else None
+
+
+def _failure_details(exc: Exception) -> MemoryFailureDetails:
     if isinstance(exc, MemoryProcessingError):
-        return exc.category, exc.retryable, str(exc)
+        return MemoryFailureDetails(exc.category, exc.retryable, str(exc))
     if isinstance(exc, AgentConfigurationError):
-        return "configuration_error", False, "记忆模型配置不可用"
+        return MemoryFailureDetails(
+            "configuration_error", False, "记忆模型配置不可用"
+        )
+
     message = str(exc).lower()
-    if "thinking mode does not support this tool_choice" in message:
-        return "compatibility_error", False, "记忆模型调用方式与模型不兼容"
+    upstream_status = getattr(exc, "status_code", None)
+    upstream_status = upstream_status if isinstance(upstream_status, int) else None
+    upstream_error_code = _safe_upstream_value(getattr(exc, "code", None))
+    upstream_parameter = _safe_upstream_value(getattr(exc, "param", None))
+    for known_parameter in ("max_completion_tokens", "tool_choice", "response_format"):
+        if upstream_parameter is None and known_parameter in message:
+            upstream_parameter = known_parameter
+            break
+
+    if upstream_parameter in {"max_completion_tokens", "response_format"}:
+        return MemoryFailureDetails(
+            "compatibility_error",
+            False,
+            "记忆模型请求参数与 DeepSeek Chat Completions 不兼容",
+            upstream_status,
+            upstream_error_code,
+            upstream_parameter,
+        )
+    if upstream_parameter == "tool_choice" or (
+        "thinking mode does not support this tool_choice" in message
+    ):
+        return MemoryFailureDetails(
+            "compatibility_error",
+            False,
+            "记忆模型调用方式与模型不兼容",
+            upstream_status,
+            upstream_error_code,
+            "tool_choice",
+        )
     if isinstance(exc, SQLAlchemyError):
-        return "database_error", True, "记忆数据库操作失败"
+        return MemoryFailureDetails("database_error", True, "记忆数据库操作失败")
     error_name = type(exc).__name__.lower()
-    if any(token in error_name for token in ("timeout", "connection", "ratelimit")):
-        return "transport_error", True, "记忆模型服务暂时不可用"
-    if any(token in message for token in ("timed out", "connection", "rate limit", "429", "503")):
-        return "transport_error", True, "记忆模型服务暂时不可用"
-    return "compatibility_error", False, "记忆整理过程发生不可重试错误"
+    retryable_status = upstream_status in {408, 429} or (
+        upstream_status is not None and 500 <= upstream_status <= 599
+    )
+    if retryable_status or any(
+        token in error_name for token in ("timeout", "connection", "ratelimit")
+    ) or any(
+        token in message
+        for token in (
+            "timed out",
+            "connection",
+            "rate limit",
+            "http 408",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+    ):
+        return MemoryFailureDetails(
+            "transport_error",
+            True,
+            "记忆模型服务暂时不可用",
+            upstream_status,
+            upstream_error_code,
+            upstream_parameter,
+        )
+    return MemoryFailureDetails(
+        "compatibility_error",
+        False,
+        "记忆整理过程发生不可重试错误",
+        upstream_status,
+        upstream_error_code,
+        upstream_parameter,
+    )
 
 
 def _utcnow() -> datetime:
@@ -208,18 +297,22 @@ class MemoryTaskManager:
         try:
             job_data = self._load_job(job_id)
         except Exception as exc:  # noqa: BLE001 - durable worker boundary
-            category, retryable, safe_error = _failure_details(exc)
-            status, attempt = self._fail(job_id, safe_error, retryable=retryable)
+            details = _failure_details(exc)
+            status, attempt = self._fail(
+                job_id, details.safe_error, retryable=details.retryable
+            )
             audit(
                 "memory.extraction.failed",
                 level=logging.ERROR,
                 status=status,
                 request_id=f"memory-job:{job_id}",
                 error_type=type(exc).__name__,
-                error_category=category,
+                error_category=details.category,
                 memory_phase=phase,
+                memory_model=self._memory_model_name,
                 attempt=attempt,
-                error=safe_error,
+                error=details.safe_error,
+                **details.audit_fields(),
             )
             return
         if job_data is None:
@@ -234,7 +327,12 @@ class MemoryTaskManager:
             linked_consultation_trace_id=job_data["linked_consultation_trace_id"],
             attempt=job_data["attempt"],
         )
-        audit("memory.extraction.started", status="started", **job_data["audit"])
+        audit(
+            "memory.extraction.started",
+            status="started",
+            memory_model=self._memory_model_name,
+            **job_data["audit"],
+        )
         try:
             with root_trace.activate():
                 phase = "extraction"
@@ -274,16 +372,18 @@ class MemoryTaskManager:
                         trace_config=root_trace.config if root_trace.enabled else None,
                     )
                 except Exception as exc:
-                    category, _, safe_error = _failure_details(exc)
+                    details = _failure_details(exc)
                     audit(
                         "memory.summary.failed",
                         level=logging.ERROR,
                         status="failed",
                         error_type=type(exc).__name__,
-                        error_category=category,
+                        error_category=details.category,
                         memory_phase=phase,
+                        memory_model=self._memory_model_name,
                         attempt=job_data["attempt"],
-                        error=safe_error,
+                        error=details.safe_error,
+                        **details.audit_fields(),
                         **job_data["audit"],
                     )
                     raise
@@ -321,25 +421,34 @@ class MemoryTaskManager:
                 "attempt": job_data["attempt"],
             })
         except Exception as exc:  # noqa: BLE001 - durable worker boundary
-            category, retryable, safe_error = _failure_details(exc)
-            status, attempt = self._fail(job_id, safe_error, retryable=retryable)
+            details = _failure_details(exc)
+            status, attempt = self._fail(
+                job_id, details.safe_error, retryable=details.retryable
+            )
             audit(
                 "memory.extraction.failed",
                 level=logging.ERROR,
                 status=status,
                 error_type=type(exc).__name__,
-                error_category=category,
+                error_category=details.category,
                 memory_phase=phase,
+                memory_model=self._memory_model_name,
                 attempt=attempt,
-                error=safe_error,
+                error=details.safe_error,
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                **details.audit_fields(),
                 **job_data["audit"],
             )
             if root_trace is not None:
                 await root_trace.finish(
                     outputs={"status": status, "phase": phase, "attempt": attempt},
-                    error=f"{category}: {safe_error}",
+                    error=f"{details.category}: {details.safe_error}",
                 )
+
+    @property
+    def _memory_model_name(self) -> str:
+        """返回配置中的模型标识；审计只记录名称，不记录地址或凭证。"""
+        return self.settings.memory_llm_model or self.settings.deepseek_model
 
     async def _invoke_structured_json(
         self,
