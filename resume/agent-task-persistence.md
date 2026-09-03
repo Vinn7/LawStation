@@ -64,7 +64,7 @@ flowchart TD
 | `AgentRunManager` | FastAPI 应用级 | 持有 Worker task 映射，不把当前用户状态放入共享 Graph |
 | `AgentRuntime` / 编译 Graph | 应用级复用 | 不保存当前消息、证据或回答 |
 | `AsyncSqliteSaver` | 应用 lifespan | 通过独立 `thread_id` 隔离每个 Run |
-| `AgentService` / `AgentInvocationContext` | 单次 Run | 保存本轮身份、调用计数、Trace 和 Skill 结果 |
+| `AgentService` / `AgentInvocationContext` | 单次 Run | 保存本轮身份、调用计数、Trace 和安全评测摘要 |
 | SQLAlchemy Session | 单次短事务 | 不跨越 LLM、MCP 或整段 SSE |
 | 前端 `ConversationRuntime` | `userId:conversationId` | 每个用户与会话独立缓存和订阅 |
 
@@ -317,7 +317,7 @@ Worker 获得配额后执行：
 3. `_prepare()` 幂等保存用户消息；
 4. 获得执行配额后读取一次 `MemoryService.snapshot()`；
 5. 以请求级 `AgentService` 执行 LangGraph；
-6. 即时持久化 Agent、Skill 和 Tool 状态事件；
+6. 即时持久化 Agent 和 Tool 状态事件；
 7. Graph 完成后读取最终回答、Citation 和 Checkpoint ID；
 8. `_complete()` 幂等保存助手消息和正文事件；
 9. 提交 MemoryJob；
@@ -402,7 +402,7 @@ lastEventSequence
 serverStatus
 requestToken
 reconnecting
-messages/status/toolActivity/skillActivity
+messages/status/toolActivity
 ```
 
 网络瞬断时，`followRun()` 用本地 `lastEventSequence` 重新订阅，失败后等待 750ms 重试。服务端只返回大于该序号的事件。
@@ -493,7 +493,7 @@ LangGraph 在 super-step 边界持久化。如果节点内已经调用 MCP，但
 - 无权访问统一返回 404，不泄露 Run 是否存在；
 - 客户端不能指定 LangGraph thread ID，也不能直接读取 Checkpoint；
 - thread ID只由服务端依据已验证 Run ID生成；
-- 场景观察只返回 retrieval status、Skill ID、Citation 数和调用次数等安全摘要；
+- 场景观察只返回 retrieval status、Citation 数和调用次数等安全摘要；
 - Graph State、Prompt 和推理内容不经公开 API 返回。
 
 Checkpoint 使用 `JsonPlusSerializer(pickle_fallback=False)`，且不保存 Session、网络 Client 或密钥。

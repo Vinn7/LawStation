@@ -173,6 +173,8 @@ TEI 的模型版本采用显式 revision pin：服务返回 `model_sha` 时直�
 | 观测 | JSONL 审计 + 可选 LangSmith | `core/logging.py`、`observability/langsmith.py` |
 | 定向评测 | 600条候选的不可变前缀扩容 + task_id不匹配响应自动续跑 + Gold不变量保护 + Hybrid Top12双干扰资格冻结 + 本地消融/Agent安全门禁 | `evaluation/challenge_datasets.py`、`create_resume_challenge_datasets.py`、`run_resume_rag_challenge_eval.py` |
 
+SSE 的协议原理与工程选型见 [SSE 技术原理](sse-technology.md)；当前正式 `createRun + sequence Event Log + GET SSE` 链路及 legacy POST SSE 的源码差异见 [LawStation SSE 代码导读](sse-code-guide.md)。
+
 2026-08-26 的当前基线已完成六组、共1,200次本地RAG检索：300条语义挑战集验证 Hybrid 相对
 BM25 的 Recall@5 `86.67% → 96.33%`；200条排序挑战集验证 TEI BGE 相对RRF的 Hit@1
 `95% → 97%`，精排应用率100%、降级率0%。该结果只适用于源法条约束的合成挑战集。Agent

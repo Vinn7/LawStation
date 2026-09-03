@@ -29,21 +29,24 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 2. [架构总览](architecture.md)：边界、依赖、共享状态与技术栈。
 3. [启动与生命周期](startup.md)：`python run.py` 到应用关闭。
 4. [API 与聊天链路](api-chat.md)：所有权、SSE、心跳和持久化。
-5. [三 Agent 编排](agent.md)：分析、检索、生成、复核与引用。
-6. [三 Agent 行为详解](three-agent-behavior.md)：逐角色输入、决策、工具权限、输出、失败语义、复核与典型路径。
-7. [LangChain 与 LangGraph 实现详解](langchain-langgraph.md)：模型封装、Message、工具 Agent、StateGraph、Middleware、Streaming 与 Checkpoint。
-8. [Agent 任务持久化](agent-task-persistence.md)：AgentRun、LangGraph Checkpoint、租约、SSE 重放、取消与重启恢复。
-9. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
-10. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
-11. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
-12. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
-13. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
-14. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
-15. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
-16. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
-17. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
-18. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
-19. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+5. [SSE 技术原理](sse-technology.md)：协议格式、流式解析、心跳、重连、顺序、错误和方案选型。
+6. [LawStation SSE 代码导读](sse-code-guide.md)：从创建 AgentRun、事件持久化到前端重放和 UI 更新的源码链路。
+7. [三 Agent 编排](agent.md)：分析、检索、生成、复核与引用。
+8. [三 Agent 行为详解](three-agent-behavior.md)：逐角色输入、决策、工具权限、输出、失败语义、复核与典型路径。
+9. [LangChain 与 LangGraph 实现详解](langchain-langgraph.md)：模型封装、Message、工具 Agent、StateGraph、Middleware、Streaming 与 Checkpoint。
+10. [Agent 任务持久化](agent-task-persistence.md)：AgentRun、LangGraph Checkpoint、租约、SSE 重放、取消与重启恢复的架构分析。
+11. [Agent 持久化代码导读](agent-persistence-code-guide.md)：沿真实调用顺序阅读任务创建、Worker、Checkpoint、幂等写入和事件重放源码。
+12. [RAG 与 MCP](rag.md)：切分、建库、混合召回和证据追踪。
+13. [分层记忆](memory.md)：快照、提取、摘要和最新事实覆盖。
+14. [数据模型与隔离](data-isolation.md)：SQLite、Repository 和 Alembic。
+15. [并发与后台流](concurrency.md)：配额、会话互斥和页面切换。
+16. [前端实现](frontend.md)：组件、缓存、SSE parser 和记忆治理。
+17. [LangSmith 与评测](langsmith.md)：追踪、指标、预算和报告。
+18. [LangSmith 使用与简历数据指南](langsmith-usage-guide.md)：从零成本学习到小样本云端对比，以及简历指标采用规则。
+19. [量化评测实测结果](eval-results.md)：100条通用回归、300条Dense挑战、200条BGE排序挑战、Agent见证边界和可用简历表述。
+20. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
+21. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
+22. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
 
 ## 一句话主链路
 

@@ -1,5 +1,7 @@
 # LawStation API 与聊天主链路
 
+SSE 协议本身的字段、心跳、重连和交付语义见 [SSE 技术原理](sse-technology.md)；从 AgentRun 创建到 React 消费事件的逐文件说明见 [LawStation SSE 代码导读](sse-code-guide.md)。
+
 ## 1. API 边界
 
 所有业务接口位于 `backend/app/api/routes.py::router`，统一前缀 `/api`。
