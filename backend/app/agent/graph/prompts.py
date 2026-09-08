@@ -16,8 +16,8 @@ direct_answer；关键事实不足时给出简洁澄清问题。"""
 
 # legal_researcher 内部的 LangChain Agent 使用；这是唯一绑定 MCP BaseTool 的角色。
 # response_format=ToolStrategy(EvidencePacket) 强制它通过结构化工具汇报结果，而
-# 不是自由文本——因此这里不需要再用 Prompt 文字约束"只输出 JSON"或"不要解释检索
-# 限制"，模型在这个子 Agent 里每一轮都被 tool_choice="required" 约束，物理上无法
+# 不是自由文本——因此这里不需要再用 Prompt 文字约束“只输出 JSON”或“不要解释检索
+# 限制”，模型在这个子 Agent 里每一轮都被 tool_choice="required" 约束，物理上无法
 # 输出自由文本。EvidencePacket 结果由代码再用真实 ToolMessage 回填权威元数据。
 RESEARCH_PROMPT = """你是法律研究 Agent，也是唯一可以调用法律检索工具的角色。针对每个 research task，
 先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实
