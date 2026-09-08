@@ -71,7 +71,9 @@ def test_memory_model_is_non_streaming_non_thinking_and_separate(monkeypatch):
 
     assert agent_model is not memory_model
     assert created[0]["streaming"] is True
-    assert "extra_body" not in created[0]
+    # 主 Agent 模型只关闭 Thinking（三 Agent 只消费结构化 JSON/工具调用结果，不
+    # 展示推理过程），不像记忆模型那样携带 max_tokens。
+    assert created[0]["extra_body"] == {"thinking": {"type": "disabled"}}
     assert created[1]["streaming"] is False
     assert created[1]["extra_body"] == {
         "thinking": {"type": "disabled"},
@@ -378,6 +380,10 @@ async def test_casual_greeting_completes_and_exposes_root_checkpoint(tmp_path):
 
 @pytest.mark.asyncio
 async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch):
+    # legal_researcher 的 response_format=ToolStrategy(EvidencePacket) 让
+    # LangChain 对每一轮模型调用都设置 tool_choice="required"：research_agent
+    # 决定检索的这一步仍是模型自主发起的 tool_calls，但最终汇报证据时也必须走
+    # 一次 "EvidencePacket" 结构化工具调用，而不是自由文本 JSON。
     monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
     analysis = {
         "request_type": "legal_consultation",
@@ -419,7 +425,12 @@ async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch
             "id": "call-1",
             "type": "tool_call",
         }]),
-        AIMessage(content=json.dumps(evidence, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "EvidencePacket",
+            "args": evidence,
+            "id": "call-evidence-1",
+            "type": "tool_call",
+        }]),
         AIMessage(content=json.dumps(draft, ensure_ascii=False)),
         AIMessage(content=json.dumps(review, ensure_ascii=False)),
     ])
@@ -443,10 +454,13 @@ async def test_three_agent_graph_researches_drafts_reviews_and_cites(monkeypatch
     assert citations[0]["chunk_id"] == "chunk-1"
     assert events[-1]["data"] == draft["answer"]
     assert context.metrics.tool_call_count == 1
+    assert context.metrics.model_call_count == 5
 
 
 @pytest.mark.asyncio
 async def test_no_match_is_successful_and_does_not_return_to_research(monkeypatch):
+    # empty_tool 返回零候选；research_agent 仍先自主决定调用一次 search_laws，
+    # 再通过一次 "EvidencePacket" 结构化工具调用汇报空结果。
     monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
     analysis = {
         "request_type": "legal_consultation",
@@ -485,7 +499,12 @@ async def test_no_match_is_successful_and_does_not_return_to_research(monkeypatc
             "id": "call-empty",
             "type": "tool_call",
         }]),
-        AIMessage(content=json.dumps(research, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "EvidencePacket",
+            "args": research,
+            "id": "call-evidence-empty",
+            "type": "tool_call",
+        }]),
         AIMessage(content=json.dumps(draft, ensure_ascii=False)),
         AIMessage(content=json.dumps(review, ensure_ascii=False)),
     ])
@@ -536,6 +555,9 @@ def test_authoritative_evidence_uses_exact_chunk_and_rejects_ambiguous_document_
 
 @pytest.mark.asyncio
 async def test_low_risk_no_match_uses_deterministic_review_fast_path(monkeypatch):
+    # empty_tool 返回零候选；research_agent 仍先自主决定调用一次 search_laws，
+    # 再通过一次 "EvidencePacket" 结构化工具调用汇报空结果；低风险 no_match
+    # 还会跳过 LLM Reviewer。
     monkeypatch.setattr("backend.app.agent.middleware._persist_tool_audit", lambda *args: None)
     analysis = {
         "request_type": "legal_consultation",
@@ -563,7 +585,12 @@ async def test_low_risk_no_match_uses_deterministic_review_fast_path(monkeypatch
             "name": "search_laws", "args": {"query": "一般咨询"},
             "id": "call-empty-fast", "type": "tool_call",
         }]),
-        AIMessage(content=json.dumps(research, ensure_ascii=False)),
+        AIMessage(content="", tool_calls=[{
+            "name": "EvidencePacket",
+            "args": research,
+            "id": "call-evidence-fast",
+            "type": "tool_call",
+        }]),
         AIMessage(content=json.dumps(draft, ensure_ascii=False)),
     ])
     registry = SimpleNamespace(

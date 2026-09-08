@@ -6,7 +6,11 @@
    不是大模型，也不会在 ``compile()`` 时发起模型请求。
 2. ``legal_researcher`` 节点内部使用 LangChain ``create_agent``。该 Agent 才会
    让 DeepSeek 自主产生 tool_calls、经 MCP 执行工具、接收 ToolMessage，并继续
-   调用模型形成研究结论。
+   调用模型形成研究结论；模型自主决定检索次数和参数，不由代码替它决定。
+   ``response_format=ToolStrategy(EvidencePacket)`` 强制它在结束检索后必须通过
+   结构化工具（而不是自由文本）汇报结果：LangChain 在这种模式下对每一轮模型
+   调用都设置 ``tool_choice="required"``，模型在这个子 Agent 里物理上不能返回
+   纯文本，因此不会出现“撞到工具调用上限后转而输出大段自然语言解释”的情况。
 
 主路径为 ``START -> case_analyst -> [finalize | legal_researcher] ->
 legal_counsel -> review_gate -> [finalize | reviewer]``。Reviewer 最多把状态送回
@@ -25,7 +29,8 @@ import time
 from typing import Any, TypeVar
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.structured_output import ToolStrategy
 
 # LangChain 的 Message 是模型上下文协议：SystemMessage 放系统约束，HumanMessage
 # 放本轮结构化输入，ToolMessage 是工具执行后反馈给模型的结果；BaseMessage 用于
@@ -73,22 +78,23 @@ ANALYST_PROMPT = """你是法律咨询的案情分析与调度 Agent。只做问
 不得让历史记忆覆盖本轮修正。
 不要编造法条，也不要输出内部推理过程。返回严格 JSON，字段必须符合以下结构：
 request_type(casual_chat|legal_consultation|insufficient_information), case_summary, jurisdiction,
-legal_domain, key_facts[], missing_facts[], legal_issues[], research_tasks[{issue_id,query,purpose}],
+legal_domain, key_facts[], missing_facts[], legal_issues[]（每项必须是纯文本字符串，不得输出
+{issue_id,issue} 这类对象), research_tasks[{issue_id,query,purpose}],
 risk_level(low|medium|high), next_action(direct_answer|ask_clarification|research), direct_answer,
 clarification_questions[], current_fact_overrides[{canonical_key,new_value,old_value,
 replaced_memory_id,confidence}]。只有当前消息明确修正历史记忆时才填写override。普通闲聊填写
 direct_answer；关键事实不足时给出简洁澄清问题。"""
 
 # legal_researcher 内部的 LangChain Agent 使用；这是唯一绑定 MCP BaseTool 的角色。
-# 最终 JSON 由 EvidencePacket 校验，随后代码再用真实 ToolMessage 回填权威元数据。
+# response_format=ToolStrategy(EvidencePacket) 强制它通过结构化工具汇报结果，而
+# 不是自由文本——因此这里不需要再用 Prompt 文字约束“只输出 JSON”或“不要解释检索
+# 限制”，模型在这个子 Agent 里每一轮都被 tool_choice="required" 约束，物理上无法
+# 输出自由文本。EvidencePacket 结果由代码再用真实 ToolMessage 回填权威元数据。
 RESEARCH_PROMPT = """你是法律研究 Agent，也是唯一可以调用法律检索工具的角色。针对每个 research task，
-    先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实返回结果。
-    最终只返回严格 JSON：research_tasks[], evidence_items[{document_id,chunk_id,supports_issue_ids,
-    verification_status}], accepted_chunk_ids[], rejected_candidates[{chunk_id,reason}],
-    unresolved_issues[{issue_id,description}], conflicts[], research_summary。
-    evidence_items 必须使用工具结果中真实存在的 chunk_id；document_id 仅表示原始法条，不能代替 chunk_id。
-    找不到依据时返回空 evidence_items，
-并在 unresolved_issues 说明，这属于正常检索结果，不得凭常识补造法条。"""
+先使用 search_laws 获取候选；需要确认具体条号时使用 get_law_article。所有法规必须来自工具真实
+返回结果，不得凭常识补造法条或引用工具结果中不存在的 chunk_id；document_id 仅表示原始法条，不能
+代替 chunk_id。找不到依据时如实在 unresolved_issues 说明，这属于正常检索结果，不是异常。搜集到
+足够信息后，调用结构化输出工具一次性汇报 research_tasks、采纳/拒绝的证据和 research_summary。"""
 
 # legal_counsel 使用；不调用工具。CounselDraft 只能引用 state.evidence_packet 中的
 # chunk，生成的仍是待复核草稿，而不是已经写入 messages 表的最终回答。
@@ -375,27 +381,45 @@ class LegalConsultationGraph:
         settings: Settings,
         checkpointer: Any = None,
     ) -> None:
-        self.model = model
+        # response_format=json_object 是 DeepSeek 原生 JSON Output 模式：从接口层
+        # 强制模型只能返回一个 JSON 对象，取代“靠 Prompt 文字拜托模型别唠叨”的
+        # 弱约束（memory_tasks.py 的记忆抽取模型已验证过这个模式）。这里只用于
+        # _invoke_json 的无工具调用（case_analyst/legal_counsel/reviewer/
+        # evidence_selector）；create_agent 内部另外用原始未绑定的 model，因为
+        # 它需要自己 bind_tools + tool_choice，不能与固定 response_format 叠加。
+        self.model = model.bind(response_format={"type": "json_object"})
         self.tools = tools
-        self.registry = registry
-        self.settings = settings
-        self.checkpointer = checkpointer
-        # LangChain create_agent 返回一个可 astream 的模型—工具循环：model 是共享
-        # DeepSeek ChatOpenAI，tools 是 MCP Adapter 包装的 BaseTool，context_schema
-        # 让中间件取得本轮身份和计数。中间件负责真实调用上限、超时与安全审计。
-        # 构造阶段不会请求模型；没有工具时保留 None，由节点走 tool_unavailable。
+        # 真实 MCP 工具名集合，供 legal_researcher 从 update 消息里区分“真实检索
+        # 结果”和 ToolStrategy 自动生成的结构化输出 ToolMessage。
+        self.tool_names = {tool.name for tool in tools}
+        # LangChain create_agent 返回一个可 astream 的模型—工具循环：tools 是 MCP
+        # Adapter 包装的 BaseTool，context_schema 让中间件取得本轮身份和计数。
+        # response_format=ToolStrategy(EvidencePacket) 让 LangChain 对每一轮模型
+        # 调用都设置 tool_choice="required"：模型必须调用某个工具（真实检索工具，
+        # 或代表“完成”的结构化输出工具），不能返回自由文本，从接口层杜绝了模型在
+        # 撞到工具调用上限后转而输出大段自然语言解释的情况。handle_errors=True 让
+        # Schema 校验失败时自动生成一条错误 ToolMessage 要求模型重试，而不是直接
+        # 抛异常降级。构造阶段不会请求模型；没有工具时保留 None，由节点走
+        # tool_unavailable。
         self.research_agent = create_agent(
             model=model,
             tools=tools,
+            response_format=ToolStrategy(EvidencePacket, handle_errors=True),
             context_schema=AgentInvocationContext,
             middleware=[
                 InvocationModelLimitMiddleware(settings),
-                ToolCallLimitMiddleware(run_limit=min(settings.agent_max_tool_calls, 2), exit_behavior="continue"),
+                # 工具调用上限只由 ToolAuditMiddleware 强制执行：达到上限时返回一条
+                # 正常 ToolMessage（而不是叠加 LangChain 内置 ToolCallLimitMiddleware
+                # 在模型/工具循环外层强制打断），让模型在其熟悉的“处理工具结果”
+                # 路径里继续，避免两套限流机制给出不一致信号。
                 ModelCallLimitMiddleware(run_limit=settings.agent_max_model_calls, exit_behavior="end"),
                 ToolAuditMiddleware(registry, settings),
             ],
             name="legal-research-agent",
         ) if tools else None
+        self.registry = registry
+        self.settings = settings
+        self.checkpointer = checkpointer
         self.compiled = self._compile()
 
     def _compile(self):
@@ -452,8 +476,8 @@ class LegalConsultationGraph:
         started = time.perf_counter()
         audit("agent.node.started", status="started", agent=agent_name, **context.audit_fields)
         try:
-            # ChatOpenAI 是 LangChain 对 DeepSeek OpenAI-compatible API 的包装；这里
-            # 没有 bind_tools，因此模型只能返回文本，不能在该调用中执行 MCP。
+            # self.model 已在 __init__ 绑定 response_format=json_object，且这里没有
+            # bind_tools，因此模型只能返回一个 JSON 对象，不能在该调用中执行 MCP。
             response = await self.model.ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
@@ -566,9 +590,10 @@ class LegalConsultationGraph:
     async def legal_researcher(self, state: LegalConsultationState, runtime: Runtime[AgentInvocationContext]) -> dict[str, Any]:
         """运行唯一允许调用 MCP 的 LangChain Agent，并生成可验证 EvidencePacket。
 
-        输入：CaseAnalysis 中的争议点/研究任务，以及补检索时的 ReviewResult。
-        输出：EvidencePacket、实际模型/工具计数和工具轨迹。工具返回的候选必须再次
-        映射为权威 chunk，模型不能自行提供法条正文或证据元数据。
+        输入：CaseAnalysis 中的争议点/研究任务，以及补检索时的 ReviewResult。模型
+        自主决定检索次数、查询和何时停止；``response_format=ToolStrategy`` 强制它
+        最终必须通过结构化工具汇报 EvidencePacket，而不是自由文本。工具返回的候选
+        必须再次映射为权威 chunk，模型不能自行提供法条正文或证据元数据。
         """
 
         # 步骤 1：发布“研究中”状态。此事件只描述阶段，不包含查询参数或法规正文。
@@ -595,18 +620,21 @@ class LegalConsultationGraph:
         if state["review_result"] and state["review_result"].revision_instruction:
             research_payload["supplemental_instruction"] = state["review_result"].revision_instruction
         try:
-            # 步骤 6：初始化本次 LangChain 子 Agent 流的聚合变量。
-            # final_message 保存最后一条 AIMessage；candidates 只收集成功 ToolMessage；
-            # seen_tool_messages 防止 updates 重复；两个布尔值用于区分空结果与工具故障。
-            final_message: BaseMessage | None = None
+            # 步骤 6：初始化本次 LangChain 子 Agent 流的聚合变量。structured_response
+            # 保存 ToolStrategy 校验通过的 EvidencePacket；candidates 只收集真实检索
+            # 工具（self.tool_names）返回的 ToolMessage，不包含 ToolStrategy 自动生成
+            # 的“结构化输出”ToolMessage；seen_tool_messages 防止 updates 重复；两个
+            # 布尔值用于区分空结果与工具故障。
+            structured_response: EvidencePacket | None = None
             candidates: list[dict[str, Any]] = []
             seen_tool_messages: set[str] = set()
             successful_tool_result = False
             failed_tool_result = False
             # 步骤 7：启动 LangChain Agent 内部模型—工具循环。传入 SystemMessage
             # 约束研究角色，HumanMessage 携带结构化任务；context 供 Middleware 读取
-            # 身份/计数。updates 携带模型/工具 Message，custom 携带 Middleware 写出
-            # 的安全状态；完整工具参数、法规正文和推理不会直接转发给客户端。
+            # 身份/计数。updates 携带模型/工具 Message 与 structured_response，custom
+            # 携带 Middleware 写出的安全状态；完整工具参数、法规正文和推理不会直接
+            # 转发给客户端。
             async for part in self.research_agent.astream(
                 {"messages": [SystemMessage(content=RESEARCH_PROMPT), HumanMessage(content=json.dumps(research_payload, ensure_ascii=False, default=str))]},
                 context=context,
@@ -619,17 +647,19 @@ class LegalConsultationGraph:
                     runtime.stream_writer(part["data"])
 
                 # 步骤 8B：updates 是 LangChain 子 Agent 的内部状态增量。只读取其中
-                # Message，不把完整 update 或内部 Agent State 暴露给外层调用者。
+                # Message 和 structured_response，不把完整 update 或内部 Agent State
+                # 暴露给外层调用者。
                 elif part.get("type") == "updates" and isinstance(part.get("data"), dict):
                     for update in part["data"].values():
-                        messages = update.get("messages", []) if isinstance(update, dict) else []
-                        # 最新消息可能是模型消息或 ToolMessage；循环完成后最后一条
-                        # AIMessage 应包含 RESEARCH_PROMPT 要求的 EvidencePacket JSON。
-                        if messages:
-                            final_message = messages[-1]
-                        for message in messages:
-                            # 普通 AI/Human/System Message 不含工具结果，直接跳过。
-                            if not isinstance(message, ToolMessage):
+                        if not isinstance(update, dict):
+                            continue
+                        if update.get("structured_response") is not None:
+                            structured_response = update["structured_response"]
+                        for message in update.get("messages", []):
+                            # 只有真实检索工具（search_laws/get_law_article）的
+                            # ToolMessage 才是候选来源；ToolStrategy 为完成结构化
+                            # 输出而自动追加的 ToolMessage 用 name 区分，跳过即可。
+                            if not isinstance(message, ToolMessage) or message.name not in self.tool_names:
                                 continue
                             # state update 可能重复包含旧 ToolMessage，按 tool_call_id
                             # 去重，避免同一次 MCP 结果被重复收集和审计。
@@ -645,14 +675,15 @@ class LegalConsultationGraph:
                                 successful_tool_result = True
                                 candidates.extend(_tool_documents(message))
 
-            # 步骤 9：没有任何最终消息说明 LangChain 子 Agent 未正常收敛，转入统一
-            # exception 分支生成 tool_error EvidencePacket。
-            if final_message is None:
-                raise RuntimeError("法律研究 Agent 未返回结果")
+            # 步骤 9：没有 structured_response 说明 LangChain 子 Agent 未能通过
+            # ToolStrategy 收敛（例如撞到 ModelCallLimitMiddleware 的硬上限），转入
+            # 统一 exception 分支生成 tool_error EvidencePacket。
+            if structured_response is None:
+                raise RuntimeError("法律研究 Agent 未返回结构化结果")
 
-            # 步骤 10：最后一条 AIMessage 是模型整理的研究 JSON。先验证结构，再使用真实
-            # ToolMessage 候选回填元数据；绝不直接信任模型生成的正文或证据 ID。
-            raw_packet = EvidencePacket.model_validate(_extract_json(_message_text(final_message)))
+            # 步骤 10：structured_response 已经过 Pydantic 校验，直接作为 raw_packet；
+            # 仍需用真实 ToolMessage 候选回填元数据，绝不直接信任模型生成的正文。
+            raw_packet = structured_response
 
             # 步骤 11：兼容模型只返回 accepted_chunk_ids 的情况。先用候选构造最小
             # EvidenceItem 选择声明，后续仍由 _authoritative_evidence 回填权威字段。
@@ -727,11 +758,16 @@ class LegalConsultationGraph:
                 retrieval_status = "tool_error"
             else:
                 retrieval_status = "no_match"
-            # 步骤 15：保证 no_match 至少携带一个可解释的未解决问题，供 Counsel
-            # 说明证据限制；这不是异常，也不触发第二次相同查询。
+            # 步骤 15：保证 no_match/tool_error 至少携带一个可解释的未解决问题，
+            # 供 Counsel 说明证据限制；这不是异常，也不触发第二次相同查询。
+            # 没有候选时收尾调用被跳过，raw_packet.unresolved_issues 恒为空，
+            # 因此这里用 Analyst 已识别的争议点兜底，而不是笼统的单条占位说明。
             unresolved = raw_packet.unresolved_issues
-            if retrieval_status == "no_match" and not unresolved:
-                unresolved = [UnresolvedIssue(issue_id="issue-1", description="当前法规库未检索到可直接引用的依据")]
+            if not unresolved and retrieval_status in {"no_match", "tool_error"}:
+                unresolved = [
+                    UnresolvedIssue(issue_id=f"issue-{index + 1}", description=item)
+                    for index, item in enumerate(analysis.legal_issues if analysis else [])
+                ] or [UnresolvedIssue(issue_id="issue-1", description="当前法规库未检索到可直接引用的依据")]
             # 步骤 16：归一化最终 EvidencePacket。candidate_status 描述是否召回候选，
             # evidence_status 描述候选是否被接受，retrieval_status 描述业务终态。
             # EvidencePacket 是 Counsel/Reviewer 唯一允许引用的法规事实源。空结果

@@ -60,12 +60,35 @@ class CaseAnalysis(BaseModel):
         return "其他" if value is None else str(value)
 
     @field_validator(
-        "key_facts", "missing_facts", "legal_issues", "research_tasks",
+        "key_facts", "missing_facts", "research_tasks",
         "clarification_questions", "current_fact_overrides", mode="before",
     )
     @classmethod
     def normalize_optional_lists(cls, value):
         return [] if value is None else value
+
+    @field_validator("legal_issues", mode="before")
+    @classmethod
+    def normalize_legal_issues(cls, value):
+        # 模型偶尔会把每个争议点输出为 {"issue_id": ..., "issue": ...} 这类结构化
+        # 对象而非纯字符串；容错提取文本，避免因单个字段格式偏移丢弃整份分析结果。
+        if value is None:
+            return []
+        normalized = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append(item)
+            elif isinstance(item, dict):
+                text = (
+                    item.get("issue")
+                    or item.get("description")
+                    or item.get("text")
+                    or item.get("summary")
+                )
+                normalized.append(str(text) if text is not None else str(item))
+            else:
+                normalized.append(str(item))
+        return normalized
 
 
 class EvidenceItem(BaseModel):
@@ -79,6 +102,16 @@ class EvidenceItem(BaseModel):
     retrieval_sources: list[str] = Field(default_factory=list)
     verification_status: Literal["retrieved", "exact_article_verified"] = "retrieved"
     data_version: str = ""
+
+    @field_validator("verification_status", mode="before")
+    @classmethod
+    def normalize_verification_status(cls, value):
+        # 模型偶尔输出 "verified" 等非法枚举同义词；安全默认降级为更保守的
+        # "retrieved"，而不是让整个 EvidencePacket 因单个字段校验失败被丢弃。
+        text = str(value or "").strip().lower()
+        if text in {"exact_article_verified", "exact", "exact_verified", "article_verified"}:
+            return "exact_article_verified"
+        return "retrieved"
 
 
 class UnresolvedIssue(BaseModel):

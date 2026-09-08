@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     mcp_debug_port: int = 8100
     mcp_tool_timeout_seconds: int = 30
     mcp_tool_discovery_retry_seconds: int = 30
-    agent_max_tool_calls: int = 4
+    agent_max_tool_calls: int = 8
     agent_max_model_calls: int = 10
     agent_global_concurrency: int = 6
     agent_per_user_concurrency: int = 2

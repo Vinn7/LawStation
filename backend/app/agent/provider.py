@@ -21,8 +21,9 @@ class LLMProvider:
         if not self.settings.deepseek_api_key:
             raise AgentConfigurationError("尚未配置 DEEPSEEK_API_KEY，暂时无法生成回答。")
         if self._model is None:
-            # ChatOpenAI 是 LangChain Provider 封装；之后可被直接 ainvoke，也可由
-            # create_agent 绑定 MCP BaseTool。streaming 不代表所有节点都输出原始 token。
+            # ChatOpenAI 是 LangChain Provider 封装；LegalConsultationGraph 会在此
+            # 基础上 bind response_format=json_object 供 _invoke_json 使用。
+            # streaming 不代表所有节点都输出原始 token。
             self._model = ChatOpenAI(
                 model=self.settings.deepseek_model,
                 api_key=self.settings.deepseek_api_key,
@@ -31,6 +32,10 @@ class LLMProvider:
                 temperature=self.settings.llm_temperature,
                 timeout=self.settings.llm_request_timeout_seconds,
                 max_retries=self.settings.llm_max_retries,
+                # 三 Agent 只消费结构化 JSON/工具调用结果，不展示推理过程；显式关闭
+                # Thinking 避免为不可见的推理 token 支付延迟（实测单次调用可达 10+
+                # 秒且与可见输出长度不成比例）。写法与 get_memory_model 保持一致。
+                extra_body={"thinking": {"type": "disabled"}},
             )
         return self._model
 
