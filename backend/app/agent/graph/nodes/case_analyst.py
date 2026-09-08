@@ -28,7 +28,7 @@ class CaseAnalystNode:
         runtime.stream_writer({"event": "agent_status", "data": {"agent": "case_analyst", "status": "analyzing", "message": "正在分析案情"}})
 
         # 步骤 2A（仅离线评测）：evaluation_case_analysis 是测试提供的固定分析结果，
-        # 用于把"路由/后续节点测试"与真实 Analyst 模型波动分离。生产请求默认为
+        # 用于把“路由/后续节点测试”与真实 Analyst 模型波动分离。生产请求默认为
         # None；即使走固定输入，仍必须执行事实所有权校验。
         if runtime.context.evaluation_case_analysis is not None:
             # 步骤 2A-1：先用 CaseAnalysis 校验测试对象，保证字段与真实模型输出一致。
