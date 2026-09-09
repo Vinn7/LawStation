@@ -94,7 +94,7 @@ AgentRunManager._execute
 - `backend/app/services/agent_runs.py::AgentRunManager._execute`
 - `backend/app/agent/service.py::AgentService.run`
 - `backend/app/agent/runtime.py::AgentRuntime.stream`
-- `backend/app/agent/graph.py::LegalConsultationGraph`
+- `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`
 
 ## 4. LangChain 使用方式
 
@@ -560,8 +560,8 @@ Graph 节点、模型、工具和 MCP/RAG 阶段可以进入同一 Trace，同�
 ## 13. 关键代码阅读顺序
 
 1. `backend/app/agent/state.py`：先理解 State、Identity、Metrics、Context。
-2. `backend/app/agent/graph.py::LegalConsultationGraph._compile`：理解节点和路由。
-3. `backend/app/agent/graph.py::legal_researcher`：理解内层 `create_agent`。
+2. `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph._compile`：理解节点和路由。
+3. `backend/app/agent/graph/nodes/research.py::legal_researcher`：理解内层 `create_agent`。
 4. `backend/app/agent/middleware.py`：理解模型/工具调用治理。
 5. `backend/app/agent/registry.py`：理解 MCP Tool 如何成为 `BaseTool`。
 6. `backend/app/agent/runtime.py::AgentRuntime.stream`：理解执行、流和恢复。

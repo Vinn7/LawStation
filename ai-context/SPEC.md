@@ -609,7 +609,7 @@ SSE_HEARTBEAT_SECONDS
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
 6. `backend/app/services/memory.py::MemoryService`：分层作用域、预算和安全上下文装配。
 7. `backend/app/services/memory_tasks.py::MemoryTaskManager`：持久后台抽取与增量摘要。
-8. `backend/app/agent/graph.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
+8. `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
 9. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
 10. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
 11. `backend/app/agent/registry.py::MCPToolRegistry`：工具首次发现、缓存、失效和冷却刷新。

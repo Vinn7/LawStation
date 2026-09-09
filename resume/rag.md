@@ -444,7 +444,7 @@ Agent API 不直接导入 `LawSearchEngine.search`，而是通过 `langchain-mcp
 
 ### 10.2 服务端权威重建
 
-`backend/app/agent/graph.py::_authoritative_evidence` 不信任模型回填的法律名称、条号和正文，只使用模型选择的 `chunk_id` 到真实 ToolMessage 候选中重新取值。
+`backend/app/agent/graph/evidence.py::_authoritative_evidence` 不信任模型回填的法律名称、条号和正文，只使用模型选择的 `chunk_id` 到真实 ToolMessage 候选中重新取值。
 
 如果模型只返回旧版 `document_id`，仅当该法条在本轮候选中只有一个 chunk 时兼容；多个 chunk 时拒绝歧义选择。
 
@@ -610,9 +610,9 @@ matched检索状态与memory最新事实优先两个非门禁诊断各为83.33%�
 - `backend/app/core/ollama.py::OllamaProcessManager`
 - `mcp_servers/law_rag/server.py::search_laws`
 - `mcp_servers/law_rag/server.py::get_law_article`
-- `backend/app/agent/graph.py::LegalConsultationGraph.legal_researcher`
-- `backend/app/agent/graph.py::_authoritative_evidence`
-- `backend/app/agent/graph.py::LegalConsultationGraph.finalize`
+- `backend/app/agent/graph/nodes/research.py::legal_researcher`
+- `backend/app/agent/graph/evidence.py::_authoritative_evidence`
+- `backend/app/agent/graph/nodes/finalize.py::finalize`
 - `backend/app/agent/middleware.py::ToolAuditMiddleware`
 
 ## 17. 检索状态与证据状态分离

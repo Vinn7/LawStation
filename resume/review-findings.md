@@ -12,7 +12,7 @@ LawStation 已不是简单的 LLM Chat Demo。当前代码形成了较完整的�
 
 `LegalResearchAgent` 只能选择工具真实返回的 chunk，服务端 `_authoritative_evidence` 重建 EvidenceItem，`_citation_errors` 和 `finalize` 再约束草稿与 citations。模型伪造 ID 不能进入最终引用。
 
-关键 symbol：`backend/app/agent/graph.py::_authoritative_evidence`、`LegalConsultationGraph.finalize`。
+关键 symbol：`backend/app/agent/graph/evidence.py::_authoritative_evidence`、`backend/app/agent/graph/nodes/finalize.py::finalize`。
 
 ### 2.2 no_match 具有正常业务语义
 
@@ -149,7 +149,7 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 | 顺序 | 文件 | 原因 |
 |---|---|---|
 | 1 | `backend/app/api/routes.py` | 看清用户上下文、SSE、短事务和主链路 |
-| 2 | `backend/app/agent/graph.py` | 三 Agent、状态路由和证据安全核心 |
+| 2 | `backend/app/agent/graph/` | 三 Agent、状态路由和证据安全核心 |
 | 3 | `mcp_servers/law_rag/engine.py` | 全量建库与在线混合检索 |
 | 4 | `backend/app/services/memory_tasks.py` | 异步记忆、最新事实覆盖和增量摘要 |
 | 5 | `frontend/src/App.tsx` | 多用户后台流与客户端隔离 |
