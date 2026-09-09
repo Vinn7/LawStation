@@ -1,6 +1,6 @@
 # LawStation 三 Agent 行为与协作机制详解
 
-> Review 基线：2026-09-01 当前工作区。本文以 `backend/app/agent/graph.py`、`schemas.py`、`state.py`、Middleware 和自动化测试为依据，只描述已经接入正式回答链路的行为。
+> Review 基线：2026-09-01 当前工作区。本文以 `backend/app/agent/graph/`、`schemas.py`、`state.py`、Middleware 和自动化测试为依据，只描述已经接入正式回答链路的行为。
 
 ## 1. 三 Agent 的真实边界
 
@@ -758,10 +758,10 @@ Research → tool_unavailable/tool_error
 
 1. `backend/app/agent/schemas.py`：理解三个 Agent 的输入输出合同。
 2. `backend/app/agent/state.py`：理解 Agent 如何通过 State 交接。
-3. `backend/app/agent/graph.py::case_analyst`：分析与路由。
-4. `backend/app/agent/graph.py::legal_researcher`：工具循环和证据包。
-5. `backend/app/agent/graph.py::legal_counsel`：回答模式和 Skill 输出。
-6. `backend/app/agent/graph.py::review_gate/reviewer/after_review`：复核和回流。
-7. `backend/app/agent/graph.py::finalize`：最终安全出口和 Citation。
+3. `backend/app/agent/graph/nodes/case_analyst.py::case_analyst`：分析与路由。
+4. `backend/app/agent/graph/nodes/research.py::legal_researcher`：工具循环和证据包。
+5. `backend/app/agent/graph/nodes/counsel.py::legal_counsel`：回答模式和 Skill 输出。
+6. `backend/app/agent/graph/nodes/review.py::review_gate/reviewer`、`backend/app/agent/graph/orchestrator.py::after_review`：复核和回流。
+7. `backend/app/agent/graph/nodes/finalize.py::finalize`：最终安全出口和 Citation。
 8. `backend/app/agent/middleware.py`：模型/工具上限、超时和审计。
 9. `backend/app/agent/runtime.py`：Graph 执行、事件适配和恢复。

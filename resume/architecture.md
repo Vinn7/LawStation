@@ -9,7 +9,7 @@
 - `run.py::main`：唯一正式启动入口。
 - `backend/app/main.py::lifespan`：应用资源生命周期。
 - `backend/app/api/routes.py::stream_message`：咨询主入口。
-- `backend/app/agent/graph.py::LegalConsultationGraph`：三 Agent 编排。
+- `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`：三 Agent 编排。
 - `mcp_servers/law_rag/engine.py::LawSearchEngine`：法规索引和查询。
 
 LangChain `create_agent`、LangGraph State/Context、Middleware、Streaming 与
@@ -157,7 +157,7 @@ Agent 没有直接 import `LawSearchEngine`；正式问答通过 MCP Tool 保持
 |---|---|---|
 | Web API | FastAPI + Uvicorn | `backend/app/main.py` |
 | 前端 | React + TypeScript + Vite | `frontend/package.json` |
-| Agent | LangChain `create_agent` + LangGraph `StateGraph` | `backend/app/agent/graph.py` |
+| Agent | LangChain `create_agent` + LangGraph `StateGraph` | `backend/app/agent/graph/orchestrator.py` |
 | 主模型 | DeepSeek OpenAI-compatible API | `LLMProvider.get_chat_model` |
 | Embedding | Ollama `qwen3-embedding:0.6b`，保留 DashScope Provider | `create_embedding_provider` |
 | 精排 | TEI `BAAI/bge-reranker-v2-m3`，原生 `/rerank` | `TEIReranker.rerank` |

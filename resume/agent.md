@@ -13,7 +13,7 @@ LawStation 的“三 Agent”是同一进程、同一 LangGraph 内的角色分�
 | `LegalResearchAgent` | 选择工具与参数、组织证据包 | 是，唯一调用者 |
 | `LegalCounselAgent` | 基于案情和 EvidencePacket 形成法律意见 | 否 |
 
-Reviewer 是 Case Analyst 的复核阶段，不是第四个独立服务。核心实现：`backend/app/agent/graph.py::LegalConsultationGraph`。
+Reviewer 是 Case Analyst 的复核阶段，不是第四个独立服务。核心实现：`backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`。
 
 ## 2. 调用层次
 
