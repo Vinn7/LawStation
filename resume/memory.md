@@ -507,11 +507,11 @@ MemoryTaskManager._process
 |---|---|---|
 | `backend/app/services/memory.py` | `MemoryService.context` | 读取并裁剪本轮记忆上下文 |
 | `backend/app/services/memory.py` | `estimate_tokens`、`fit_text` | Token 估算与文本裁剪 |
-| `backend/app/services/memory_tasks.py` | `MemoryTaskManager` | 持久化后台任务 Worker |
-| `backend/app/services/memory_tasks.py` | `_invoke_structured_json` | JSON Output 与 Pydantic 校验 |
-| `backend/app/services/memory_tasks.py` | `_persist_candidates` | 新增、去重和冲突判定 |
-| `backend/app/services/memory_tasks.py` | `_replace_memory` | 原位替换和修订审计 |
-| `backend/app/services/memory_tasks.py` | `_update_summary` | 增量结构化摘要 |
+| `backend/app/services/memory_tasks/manager.py` | `MemoryTaskManager` | 持久化后台任务 Worker |
+| `backend/app/services/memory_tasks/invocation.py` | `_invoke_structured_json` | JSON Output 与 Pydantic 校验 |
+| `backend/app/services/memory_tasks/persistence.py` | `_persist_candidates` | 新增、去重和冲突判定 |
+| `backend/app/services/memory_tasks/persistence.py` | `_replace_memory` | 原位替换和修订审计 |
+| `backend/app/services/memory_tasks/summary.py` | `_update_summary` | 增量结构化摘要 |
 | `backend/app/services/memory_schemas.py` | `ExtractedMemory` | 结构化记忆 Schema |
 | `backend/app/services/repositories.py` | `OwnedRepository` | 用户所有权和作用域隔离 |
 | `backend/app/db/models.py` | `ConversationSummary` | 会话滚动摘要模型 |

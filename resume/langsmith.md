@@ -127,7 +127,7 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 - `backend/app/agent/registry.py::MCPTraceContextInterceptor`
 - `mcp_servers/law_rag/server.py::MCPTracePropagationApp`
 - `mcp_servers/law_rag/engine.py::LawSearchEngine.search`
-- `backend/app/services/memory_tasks.py::MemoryTaskManager._process`
+- `backend/app/services/memory_tasks/manager.py::MemoryTaskManager._process`
 - `backend/app/evaluation/evaluators.py::DETERMINISTIC_EVALUATORS`
 - `backend/app/evaluation/judge.py::LegalQualityJudge`
 - `backend/app/evaluation/reporting.py::ReportRun`

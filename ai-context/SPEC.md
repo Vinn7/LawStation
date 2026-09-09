@@ -608,7 +608,7 @@ SSE_HEARTBEAT_SECONDS
 4. `backend/app/core/context.py::RequestUserContext`：用户隔离信任边界。
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
 6. `backend/app/services/memory.py::MemoryService`：分层作用域、预算和安全上下文装配。
-7. `backend/app/services/memory_tasks.py::MemoryTaskManager`：持久后台抽取与增量摘要。
+7. `backend/app/services/memory_tasks/manager.py::MemoryTaskManager`：持久后台抽取与增量摘要。
 8. `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`：三 Agent 节点、结构化证据和复核回流。
 9. `backend/app/agent/concurrency.py::AgentConcurrencyManager`：会话唯一、用户及全局并发准入。
 10. `backend/app/agent/runtime.py::AgentRuntime`：Graph 编译缓存与 SSE 事件适配。
@@ -662,6 +662,7 @@ SSE_HEARTBEAT_SECONDS
 - **4.3 / 2026-09-02**：修复将 LangGraph 根图 `checkpoint_ns` 误作业务版本标签导致的 `Subgraph ... not found`；根图 invocation 只传唯一 AgentRun `thread_id`，最终 checkpoint 元数据和场景摘要读取失败时安全降级，不再覆盖已生成回答。恢复前的 State 读取仍保持严格失败。
 - **4.4 / 2026-09-02**：增加事实忠实度、Reviewer有效性和回答质量三套冻结Agent评测；评测专用Target复用生产Counsel/Review Gate/Reviewer/Finalize节点，一次结构化Judge返回专项指标，30条合成分层样本分别上传三个LangSmith实验并生成时间戳报告与简历摘要。该能力不写业务消息、记忆、AgentRun或Checkpoint。
 - **4.5 / 2026-09-09**：`backend/app/agent/graph.py` 拆分为 `graph/` 包（`orchestrator.py` + `prompts.py` + `evidence.py` + `nodes/` 5 个 Mixin 文件），外部接口 `LegalConsultationGraph` 和导入路径 `backend.app.agent.graph` 不变，runtime 调用方不需修改，全量测试 176 passed 验证通过。
+- **4.6 / 2026-09-09**：`backend/app/services/memory_tasks.py` 拆分为 `memory_tasks/` 包（`manager.py` + `persistence.py` + `summary.py` + `invocation.py` + `prompts.py` + `errors.py` + `helpers.py`），外部接口 `MemoryTaskManager` 和导入路径 `backend.app.services.memory_tasks` 不变，`tests/test_memory.py` 的 10 处 `SessionLocal`/`audit` monkeypatch 已同步改为具体子模块路径，全量测试 176 passed 验证通过。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 
