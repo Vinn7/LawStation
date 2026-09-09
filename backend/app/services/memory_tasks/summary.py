@@ -12,9 +12,7 @@ from backend.app.services.memory import estimate_tokens
 from backend.app.services.memory_schemas import StructuredConversationSummary
 
 from .helpers import _utcnow
-
-SUMMARY_SYSTEM = """你负责压缩法律咨询会话。只总结用户和助手已经表达的内容，不添加法律结论。
-明确区分已确认事实、尚未确认的用户陈述、已被更正的信息和待补充问题。输出指定结构。"""
+from .prompts import SUMMARY_SYSTEM
 
 
 class SummaryMixin:
