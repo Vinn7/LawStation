@@ -25,7 +25,8 @@ from backend.app.services.memory_schemas import (
     MemoryExtractionResult,
     StructuredConversationSummary,
 )
-from backend.app.services.memory_tasks import MemoryTaskManager, _failure_details
+from backend.app.services.memory_tasks import MemoryTaskManager
+from backend.app.services.memory_tasks.helpers import _failure_details
 from backend.app.services.repositories import OwnedRepository
 
 
@@ -197,7 +198,8 @@ async def test_background_extraction_auto_activates_all_valid_memories(monkeypat
     db.add(job)
     db.commit()
     local_session = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr("backend.app.services.memory_tasks.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.persistence.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.summary.SessionLocal", local_session)
 
     extracted = MemoryExtractionResult(memories=[
         ExtractedMemory(
@@ -266,12 +268,12 @@ def test_model_target_replaces_different_canonical_key_in_place(monkeypatch):
     db.add(existing)
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     audit_events = []
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.audit",
+        "backend.app.services.memory_tasks.persistence.audit",
         lambda event, **fields: audit_events.append((event, fields)),
     )
     candidate = ExtractedMemory(
@@ -319,7 +321,7 @@ def test_invalid_cross_conversation_replacement_is_rejected(monkeypatch):
     db.add(other_case)
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     candidate = ExtractedMemory(
@@ -357,7 +359,7 @@ def test_user_memory_can_be_replaced_from_another_owned_conversation(monkeypatch
     db.add(preference)
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     candidate = ExtractedMemory(
@@ -399,7 +401,7 @@ def test_model_cannot_replace_another_users_memory(monkeypatch):
     db.add(foreign_memory)
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     candidate = ExtractedMemory(
@@ -435,7 +437,7 @@ def test_timeline_events_with_different_keys_coexist(monkeypatch):
     ))
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     candidate = ExtractedMemory(
@@ -470,7 +472,7 @@ def test_identical_active_memory_is_a_noop(monkeypatch):
     db.add(existing)
     db.commit()
     monkeypatch.setattr(
-        "backend.app.services.memory_tasks.SessionLocal",
+        "backend.app.services.memory_tasks.persistence.SessionLocal",
         sessionmaker(bind=db.get_bind(), expire_on_commit=False),
     )
     candidate = ExtractedMemory(
@@ -510,7 +512,7 @@ async def test_summary_uses_only_messages_after_previous_coverage(monkeypatch):
         initial.append(message)
     db.commit()
     local_session = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr("backend.app.services.memory_tasks.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.summary.SessionLocal", local_session)
     payloads = []
 
     class Runner:
@@ -576,7 +578,8 @@ async def test_empty_memory_extraction_is_success(monkeypatch):
     db.add(job)
     db.commit()
     local_session = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr("backend.app.services.memory_tasks.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.persistence.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.summary.SessionLocal", local_session)
 
     class Runner:
         async def ainvoke(self, _messages, config=None):
@@ -676,7 +679,7 @@ async def test_tool_choice_compatibility_error_is_not_retried(monkeypatch):
     db.add(job)
     db.commit()
     local_session = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr("backend.app.services.memory_tasks.SessionLocal", local_session)
+    monkeypatch.setattr("backend.app.services.memory_tasks.persistence.SessionLocal", local_session)
 
     class Provider:
         def get_memory_model(self):
