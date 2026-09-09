@@ -74,7 +74,7 @@ flowchart LR
 |---|---|---|
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
 | `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
-| `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `LegalConsultationGraph`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
+| `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `graph/orchestrator.py::LegalConsultationGraph`、`graph/nodes/{case_analyst,research,counsel,review,finalize}.py`、`graph/prompts.py`、`graph/evidence.py`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama/TEI 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`TEIRerankerProcessManager`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
 | `backend/app/services/` | 所有权限定仓储和记忆上下文/压缩 | `OwnedRepository`、`MemoryService` |
@@ -661,6 +661,7 @@ SSE_HEARTBEAT_SECONDS
 - **4.2 / 2026-09-01**：修复 `langchain-openai` 将记忆模型 `max_tokens` 转换为 DeepSeek 不兼容的 `max_completion_tokens`；改由 `extra_body` 发送 DeepSeek 原生参数，补充安全上游诊断、精确失败任务重排迁移和 Pytest 审计日志隔离。主 Agent Thinking 与 MCP 调用保持不变。
 - **4.3 / 2026-09-02**：修复将 LangGraph 根图 `checkpoint_ns` 误作业务版本标签导致的 `Subgraph ... not found`；根图 invocation 只传唯一 AgentRun `thread_id`，最终 checkpoint 元数据和场景摘要读取失败时安全降级，不再覆盖已生成回答。恢复前的 State 读取仍保持严格失败。
 - **4.4 / 2026-09-02**：增加事实忠实度、Reviewer有效性和回答质量三套冻结Agent评测；评测专用Target复用生产Counsel/Review Gate/Reviewer/Finalize节点，一次结构化Judge返回专项指标，30条合成分层样本分别上传三个LangSmith实验并生成时间戳报告与简历摘要。该能力不写业务消息、记忆、AgentRun或Checkpoint。
+- **4.5 / 2026-09-09**：`backend/app/agent/graph.py` 拆分为 `graph/` 包（`orchestrator.py` + `prompts.py` + `evidence.py` + `nodes/` 5 个 Mixin 文件），外部接口 `LegalConsultationGraph` 和导入路径 `backend.app.agent.graph` 不变，runtime 调用方不需修改，全量测试 176 passed 验证通过。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 
