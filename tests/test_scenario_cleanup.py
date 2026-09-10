@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.app.api import routes
+from backend.app.api.routes import scenarios
 from backend.app.core.context import RequestUserContext
 from backend.app.db.models import AgentRun, Base, Conversation, Tenant, User
 
@@ -18,7 +18,7 @@ def _database(monkeypatch):
     )
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
-    monkeypatch.setattr(routes, "SessionLocal", sessions)
+    monkeypatch.setattr(scenarios, "SessionLocal", sessions)
     with sessions() as db:
         db.add(Tenant(id="tenant", name="tenant"))
         db.add_all([
@@ -47,11 +47,11 @@ def test_cleanup_is_owner_and_prefix_scoped(monkeypatch):
     other = RequestUserContext("tenant", "user-b", "request-b")
 
     with pytest.raises(LookupError):
-        routes._delete_scenario_conversation(other, "scenario-a")
+        scenarios._delete_scenario_conversation(other, "scenario-a")
     with pytest.raises(PermissionError):
-        routes._delete_scenario_conversation(owner, "ordinary-a")
+        scenarios._delete_scenario_conversation(owner, "ordinary-a")
 
-    assert routes._delete_scenario_conversation(owner, "scenario-a") == []
+    assert scenarios._delete_scenario_conversation(owner, "scenario-a") == []
     with sessions() as db:
         assert db.get(Conversation, "scenario-a") is None
         assert db.get(Conversation, "ordinary-a") is not None
@@ -74,7 +74,7 @@ def test_cleanup_rejects_active_run(monkeypatch):
         db.commit()
 
     with pytest.raises(RuntimeError, match="任务运行"):
-        routes._delete_scenario_conversation(owner, "scenario-a")
+        scenarios._delete_scenario_conversation(owner, "scenario-a")
 
 
 def test_disabled_catalog_is_hidden_as_not_found():
@@ -87,6 +87,6 @@ def test_disabled_catalog_is_hidden_as_not_found():
     })()
 
     with pytest.raises(HTTPException) as raised:
-        routes._scenario_catalog(request)
+        scenarios._scenario_catalog(request)
 
     assert raised.value.status_code == 404
