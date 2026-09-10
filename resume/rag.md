@@ -599,7 +599,7 @@ matched检索状态与memory最新事实优先两个非门禁诊断各为83.33%�
 6. **为什么使用本地 Embedding？** 避免全量数据的云端费用、限流和外发风险。
 7. **如何保证切换索引不中断查询？** 新索引在 staging 完整构建和校验，通过后在锁内原子替换内存 FAISS；构建期间继续使用 BM25。
 
-## 16. 关键代码
+## 17. 关键代码
 
 - `mcp_servers/law_rag/engine.py::LawSearchEngine`
 - `mcp_servers/law_rag/engine.py::load_chunks`
@@ -615,7 +615,7 @@ matched检索状态与memory最新事实优先两个非门禁诊断各为83.33%�
 - `backend/app/agent/graph/nodes/finalize.py::finalize`
 - `backend/app/agent/middleware.py::ToolAuditMiddleware`
 
-## 17. 检索状态与证据状态分离
+## 18. 检索状态与证据状态分离
 
 `search_laws` 现在返回 `law-search-v2` Envelope：`retrieval_status/documents/no_match_reason/diagnostics`；MCP 入参保持不变，Agent 的递归解析器兼容旧数组结果。`RetrievalConfidenceGate` 综合 BGE、Top1/Top2 差距、BM25/Dense 共同命中、原始分数、RRF 和查询覆盖率，只判断候选是否达到检索置信度。
 
