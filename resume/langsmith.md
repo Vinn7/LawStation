@@ -123,7 +123,7 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 - `backend/app/observability/langsmith.py::LangSmithObservability`
 - `backend/app/observability/langsmith.py::RootTrace`
 - `backend/app/observability/langsmith.py::SessionTraceBudget`
-- `backend/app/api/routes.py::stream_message`
+- `backend/app/api/routes/chat.py::stream_message`
 - `backend/app/agent/registry.py::MCPTraceContextInterceptor`
 - `mcp_servers/law_rag/server.py::MCPTracePropagationApp`
 - `mcp_servers/law_rag/engine.py::LawSearchEngine.search`
@@ -133,4 +133,4 @@ Markdown 汇总，避免覆盖历史实验。分阶段失败仍保留已完成�
 - `backend/app/evaluation/reporting.py::ReportRun`
 - `scripts/run_langsmith_eval.py`
 - `scripts/run_staged_langsmith_eval.py`
-- `backend/app/api/routes.py::message_feedback`
+- `backend/app/api/routes/feedback.py::message_feedback`

@@ -41,7 +41,7 @@ flowchart LR
 - 追踪长期记忆来源；
 - 区分助手回答的 `complete` 和 `interrupted` 状态。
 
-每轮对话在 `backend/app/api/routes.py::_prepare_chat` 中先保存用户消息；Agent 完成后再通过 `_save_assistant` 保存助手回答。
+每轮对话在 `backend/app/api/routes/chat.py::_prepare_chat` 中先保存用户消息；Agent 完成后再通过同文件的 `_save_assistant` 保存助手回答。
 
 ### 2.2 近期对话
 
@@ -519,8 +519,8 @@ MemoryTaskManager._process
 | `backend/app/db/models.py` | `MemoryRevision` | 记忆变更历史 |
 | `backend/app/db/models.py` | `MemoryJob` | 后台任务状态 |
 | `backend/app/agent/provider.py` | `LLMProvider.get_memory_model` | 无工具、非 Thinking 的记忆模型 |
-| `backend/app/api/routes.py` | `_prepare_chat` | 保存问题并创建记忆快照 |
-| `backend/app/api/routes.py` | `stream_message` | 回答完成后创建记忆任务 |
+| `backend/app/api/routes/chat.py` | `_prepare_chat` | 保存问题并创建记忆快照 |
+| `backend/app/api/routes/chat.py` | `stream_message` | 回答完成后创建记忆任务 |
 | `frontend/src/components/MemoryPanel.tsx` | `MemoryPanel` | 记忆查看、修正与删除 |
 
 ## 15. MemorySnapshot 与当前事实覆盖

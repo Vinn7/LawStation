@@ -8,7 +8,7 @@
 
 - `run.py::main`：唯一正式启动入口。
 - `backend/app/main.py::lifespan`：应用资源生命周期。
-- `backend/app/api/routes.py::stream_message`：咨询主入口。
+- `backend/app/api/routes/chat.py::stream_message`：咨询主入口。
 - `backend/app/agent/graph/orchestrator.py::LegalConsultationGraph`：三 Agent 编排。
 - `mcp_servers/law_rag/engine.py::LawSearchEngine`：法规索引和查询。
 
@@ -66,7 +66,7 @@ flowchart TB
 | 边界 | 已验证职责 | 关键文件 / symbol |
 |---|---|---|
 | 前端 | 用户切换、会话缓存、流消费、记忆治理和反馈 | `frontend/src/App.tsx::App` |
-| API | 所有权校验、短事务、SSE 协调、回答与任务持久化 | `backend/app/api/routes.py` |
+| API | 所有权校验、短事务、SSE 协调、回答与任务持久化 | `backend/app/api/routes/` |
 | Agent | 案情分析、法律研究、意见生成、复核 | `LegalConsultationGraph` |
 | MCP Client | 工具发现缓存和协议调用 | `MCPToolRegistry` |
 | MCP Server | 标准工具定义，不管理用户状态 | `mcp_servers/law_rag/server.py::mcp` |

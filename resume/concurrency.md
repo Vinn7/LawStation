@@ -33,7 +33,7 @@ Conversation reservation 在进入排队前获得，因此同一会话的第二�
 
 ## 3. 记忆快照时间点
 
-`backend/app/api/routes.py::stream_message` 在 `async with concurrency.slot(identity)` 成功后才调用 `_prepare_chat`：
+`backend/app/api/routes/chat.py::stream_message` 在 `async with concurrency.slot(identity)` 成功后才调用 `_prepare_chat`：
 
 1. 获得用户和全局运行配额；
 2. 保存本轮用户消息；

@@ -4,7 +4,7 @@ SSE 协议本身的字段、心跳、重连和交付语义见 [SSE 技术原理]
 
 ## 1. API 边界
 
-所有业务接口位于 `backend/app/api/routes.py::router`，统一前缀 `/api`。
+所有业务接口位于 `backend/app/api/routes/__init__.py::router`（各子模块的 `router` 经 `include_router` 组合而成），统一前缀 `/api`。
 
 | 接口 | 用户上下文 | 关键行为 |
 |---|---|---|

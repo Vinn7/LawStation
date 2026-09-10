@@ -35,9 +35,9 @@ flowchart LR
 ## 2. 建议阅读顺序
 
 1. `backend/app/db/models.py::AgentRun/AgentRunEvent`：任务与事件的数据结构。
-2. `backend/app/api/routes.py::create_agent_run`：任务如何创建。
+2. `backend/app/api/routes/agent_runs.py::create_agent_run`：任务如何创建。
 3. `backend/app/services/agent_runs.py::AgentRunManager`：Worker 如何执行和写事件。
-4. `backend/app/api/routes.py::agent_run_events`：事件如何转换为 SSE。
+4. `backend/app/api/routes/agent_runs.py::agent_run_events`：事件如何转换为 SSE。
 5. `frontend/src/sse.ts`：字节流如何解析。
 6. `frontend/src/App.tsx::followRun/handleStreamEvent`：重连、游标和 UI 更新。
 
@@ -60,7 +60,7 @@ Content-Type: application/json
 {"content":"用户问题"}
 ```
 
-后端入口是 [routes.py](../backend/app/api/routes.py#L297) 的 `create_agent_run()`：
+后端入口是 [agent_runs.py](../backend/app/api/routes/agent_runs.py) 的 `create_agent_run()`：
 
 1. 构造当前请求的并发身份；
 2. 预占会话，防止同会话并发创建两个任务；
@@ -167,7 +167,7 @@ message_end(status=completed)
 
 ## 8. 第五步：后端把事件表变成 SSE
 
-订阅入口是 [routes.py](../backend/app/api/routes.py#L357) 的 `agent_run_events()`。
+订阅入口是 [agent_runs.py](../backend/app/api/routes/agent_runs.py) 的 `agent_run_events()`。
 
 ### 8.1 建连前校验
 
@@ -231,7 +231,7 @@ AND
 
 ### 8.5 响应头
 
-[routes.py](../backend/app/api/routes.py#L398) 返回：
+[agent_runs.py](../backend/app/api/routes/agent_runs.py) 返回：
 
 ```text
 Content-Type: text/event-stream
@@ -357,7 +357,7 @@ POST /api/agent-runs/{run_id}/cancel
 
 而网络异常或场景测试的 `disconnect_stream` 只 abort 本地订阅，不调用 Cancel API，服务端 Worker 继续运行。
 
-后端取消入口是 [routes.py](../backend/app/api/routes.py#L349)。Worker 在 Graph 事件边界检查 `cancel_requested`；被取消后写 `interrupted` 状态和 `message_end`。
+后端取消入口是 [agent_runs.py](../backend/app/api/routes/agent_runs.py)。Worker 在 Graph 事件边界检查 `cancel_requested`；被取消后写 `interrupted` 状态和 `message_end`。
 
 ## 15. 事件契约
 
@@ -379,7 +379,7 @@ error
 
 ## 16. Legacy POST SSE
 
-项目仍保留 [routes.py](../backend/app/api/routes.py#L562) 的：
+项目仍保留 [chat.py](../backend/app/api/routes/chat.py) 的：
 
 ```http
 POST /api/conversations/{conversation_id}/messages/stream

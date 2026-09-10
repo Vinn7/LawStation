@@ -73,7 +73,7 @@ flowchart LR
 | 路径 | 职责 | 关键 symbol / 文件 |
 |---|---|---|
 | `backend/app/main.py` | FastAPI 组装、生命周期、数据库初始化、MCP 挂载、静态页面托管 | `initialize_database`、`lifespan`、`app` |
-| `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes.py::stream_message`、`routes.py::sse` |
+| `backend/app/api/` | REST 与 SSE 接口，串联用户上下文、数据库、记忆和 Agent | `routes/chat.py::stream_message`、`routes/helpers.py::sse` |
 | `backend/app/agent/` | 三 Agent LangGraph、并发准入、DeepSeek Provider、MCP 工具缓存、流式适配和工具审计 | `graph/orchestrator.py::LegalConsultationGraph`、`graph/nodes/{case_analyst,research,counsel,review,finalize}.py`、`graph/prompts.py`、`graph/evidence.py`、`AgentConcurrencyManager`、`AgentRuntime`、`MCPToolRegistry` |
 | `backend/app/core/` | `.env` 配置、不可变用户上下文、审计日志、脱敏与 Ollama/TEI 进程管理 | `Settings`、`RequestUserContext`、`OllamaProcessManager`、`TEIRerankerProcessManager`、`audit`、`redact` |
 | `backend/app/db/` | SQLAlchemy 引擎、会话工厂和领域表模型 | `Base`、`SessionLocal`、各 ORM Model |
@@ -481,7 +481,7 @@ SSE_HEARTBEAT_SECONDS
 
 - **[已实现]** `LangSmithObservability` 在应用生命周期复用 Client。默认 `config` 沿用 `.env` 采样和月度预算；`--langsmith-trace-all` 将当前进程切为 100% 采样并使用咨询/记忆共享的 Session 根 Trace 上限（默认 200）；`--no-langsmith-trace` 强制关闭。CLI 覆盖不得写回 `.env`，互斥和非法上限必须在启动前拒绝。
 - **[已实现]** 全量模式在前端构建、Ollama 和 Uvicorn 前严格校验 API Key、HMAC、Workspace 及远端鉴权；启动后导出故障 fail-open。达到 Session 上限后停止创建新 Trace，只记录一次告警，业务继续。
-- **[已实现]** `backend/app/api/routes.py::stream_message` 持有 `lawstation.consultation` 根 Run，覆盖会话预占、排队、用户消息/MemorySnapshot、三 Agent Graph、回答持久化和记忆任务入队；heartbeat 和回答字符分片不得产生 Span。咨询根 Trace ID 写入用户及助手消息。
+- **[已实现]** `backend/app/api/routes/chat.py::stream_message` 持有 `lawstation.consultation` 根 Run，覆盖会话预占、排队、用户消息/MemorySnapshot、三 Agent Graph、回答持久化和记忆任务入队；heartbeat 和回答字符分片不得产生 Span。咨询根 Trace ID 写入用户及助手消息。
 - **[已实现]** LangGraph、DeepSeek 与 MCP Tool 继承请求级 Trace config。MCP Client Interceptor 只在当前父 Run 存在时传播 `langsmith-trace`/`baggage`，MCP Server 还必须验证进程内随机 Bridge Token；普通或伪造外部 MCP 请求不得注入咨询 Trace。
 - **[已实现]** Learn/Smoke 评测可使用 `LANGSMITH_TEST_CACHE`；Python 依赖通过 `langsmith[vcr]` 安装 `vcrpy`。上传的 Compare/Release 在 `aevaluate` 作用域内强制移除并随后恢复该环境变量，禁止 VCR 回放污染 Baseline/Candidate 的真实延迟、Token 和模型调用对比。
 - **[已实现]** RAG 以 `law_rag.search_laws` retriever 为父 Span，并记录 filter、BM25、query embedding、FAISS、RRF 和 get_article；不得上传原始向量、FAISS 对象或密钥，Dense 追踪候选明细限制为 100 条但不得改变实际检索结果。
@@ -604,7 +604,7 @@ SSE_HEARTBEAT_SECONDS
 
 1. `run.py::main`：统一启动和前端构建策略。
 2. `backend/app/main.py::lifespan`：全系统生命周期和 ASGI 挂载。
-3. `backend/app/api/routes.py::stream_message`：完整对话主链路。
+3. `backend/app/api/routes/chat.py::stream_message`：完整对话主链路。
 4. `backend/app/core/context.py::RequestUserContext`：用户隔离信任边界。
 5. `backend/app/services/repositories.py::OwnedRepository`：所有权 SQL 规则。
 6. `backend/app/services/memory.py::MemoryService`：分层作用域、预算和安全上下文装配。
@@ -663,6 +663,7 @@ SSE_HEARTBEAT_SECONDS
 - **4.4 / 2026-09-02**：增加事实忠实度、Reviewer有效性和回答质量三套冻结Agent评测；评测专用Target复用生产Counsel/Review Gate/Reviewer/Finalize节点，一次结构化Judge返回专项指标，30条合成分层样本分别上传三个LangSmith实验并生成时间戳报告与简历摘要。该能力不写业务消息、记忆、AgentRun或Checkpoint。
 - **4.5 / 2026-09-09**：`backend/app/agent/graph.py` 拆分为 `graph/` 包（`orchestrator.py` + `prompts.py` + `evidence.py` + `nodes/` 5 个 Mixin 文件），外部接口 `LegalConsultationGraph` 和导入路径 `backend.app.agent.graph` 不变，runtime 调用方不需修改，全量测试 176 passed 验证通过。
 - **4.6 / 2026-09-09**：`backend/app/services/memory_tasks.py` 拆分为 `memory_tasks/` 包（`manager.py` + `persistence.py` + `summary.py` + `invocation.py` + `prompts.py` + `errors.py` + `helpers.py`），外部接口 `MemoryTaskManager` 和导入路径 `backend.app.services.memory_tasks` 不变，`tests/test_memory.py` 的 10 处 `SessionLocal`/`audit` monkeypatch 已同步改为具体子模块路径，全量测试 176 passed 验证通过。
+- **4.7 / 2026-09-10**：`backend/app/api/routes.py` 拆分为 `routes/` 包（`chat.py` + `agent_runs.py` + `scenarios.py` + `memories.py` + `conversations.py` + `feedback.py` + `index.py` + `helpers.py`），外部接口 `router` 和导入路径 `backend.app.api.routes` 不变，`tests/test_scenario_cleanup.py` 的 `SessionLocal` monkeypatch 已同步改为 `scenarios.SessionLocal`，全量测试 176 passed 验证通过。
 
 ## 18. 持久化 Agent Run 与 LangGraph Checkpoint
 

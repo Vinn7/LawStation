@@ -38,7 +38,7 @@ Graph 执行层：LangGraph AsyncSqliteSaver
 |---:|---|---|
 | 1 | `backend/app/main.py:70-107` `lifespan()` | 共享 Saver、Runtime 和 Worker 如何创建、关闭 |
 | 2 | `backend/app/db/models.py:209-283` `AgentRun/AgentRunEvent` | 任务、租约、幂等和事件字段 |
-| 3 | `backend/app/api/routes.py:297-405` | 创建任务、查询、取消和事件订阅 API |
+| 3 | `backend/app/api/routes/agent_runs.py` | 创建任务、查询、取消和事件订阅 API |
 | 4 | `backend/app/services/agent_runs.py:89-174` | Worker 启动及 queued Run 创建 |
 | 5 | `backend/app/services/agent_runs.py:331-531` | 调度、领取、租约和完整执行 |
 | 6 | `backend/app/agent/checkpoint.py:16-43` | `AsyncSqliteSaver` 生命周期 |
@@ -81,7 +81,7 @@ await saver.setup()
 
 ## 4. 创建任务：HTTP 只负责入队
 
-前端调用 `POST /api/conversations/{conversation_id}/runs`。入口位于 `backend/app/api/routes.py:297-328`。
+前端调用 `POST /api/conversations/{conversation_id}/runs`。入口位于 `backend/app/api/routes/agent_runs.py:18-49`（`create_agent_run`）。
 
 API 的工作只有：
 
@@ -324,7 +324,7 @@ if not has_tokens:
 
 ## 12. SSE 事件重放：恢复客户端视图
 
-事件订阅入口位于 `backend/app/api/routes.py:357-405`：
+事件订阅入口位于 `backend/app/api/routes/agent_runs.py:78-127`（`agent_run_events`）：
 
 ```http
 GET /api/agent-runs/{run_id}/events?after_sequence=N
@@ -357,7 +357,7 @@ data: {...}
 
 ## 13. 显式取消：与浏览器断线严格区分
 
-取消入口为 `POST /api/agent-runs/{run_id}/cancel`，路由位于 `backend/app/api/routes.py:349-354`。
+取消入口为 `POST /api/agent-runs/{run_id}/cancel`，路由位于 `backend/app/api/routes/agent_runs.py:70-75`（`cancel_agent_run`）。
 
 `AgentRunManager.cancel()` 和 `_request_cancel()` 位于 `backend/app/services/agent_runs.py:253-288`：
 

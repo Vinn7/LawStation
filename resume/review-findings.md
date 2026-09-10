@@ -148,7 +148,7 @@ AgentRun和事件可跨刷新恢复，但`ScenarioSession`步骤游标、订阅e
 
 | 顺序 | 文件 | 原因 |
 |---|---|---|
-| 1 | `backend/app/api/routes.py` | 看清用户上下文、SSE、短事务和主链路 |
+| 1 | `backend/app/api/routes/` | 看清用户上下文、SSE、短事务和主链路 |
 | 2 | `backend/app/agent/graph/` | 三 Agent、状态路由和证据安全核心 |
 | 3 | `mcp_servers/law_rag/engine.py` | 全量建库与在线混合检索 |
 | 4 | `backend/app/services/memory_tasks/` | 异步记忆、最新事实覆盖和增量摘要 |
