@@ -214,7 +214,7 @@ backend/app/api/routes/
 from fastapi import APIRouter
 
 from . import agent_runs, chat, conversations, feedback, index, memories, scenarios
-from .chat import with_sse_heartbeat
+from .helpers import with_sse_heartbeat
 from .feedback import message_feedback
 from .scenarios import _delete_scenario_conversation, _scenario_catalog
 
