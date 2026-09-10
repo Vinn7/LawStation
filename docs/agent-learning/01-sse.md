@@ -50,7 +50,7 @@ event: heartbeat
 
 ### 4.1 最基础的 SSE 帧格式化：`sse()` / `persisted_sse()`
 
-[routes.py:286-294](../../backend/app/api/routes.py#L286)：
+[routes/helpers.py:9-17](../../backend/app/api/routes/helpers.py#L9)：
 
 ```python
 def sse(event: str, data) -> str:
@@ -67,7 +67,7 @@ def persisted_sse(sequence: int, event: str, data) -> str:
 
 ### 4.2 业务对话流：`POST /api/conversations/{id}/messages/stream`
 
-[routes.py:614-668](../../backend/app/api/routes.py#L614) 里的 `events()` 是一个 **async generator**（`async def events(): ... yield ...`）：
+[routes/chat.py:136-267](../../backend/app/api/routes/chat.py#L136) 里的 `events()` 是一个 **async generator**（`async def events(): ... yield ...`）：
 
 ```python
 async def events():
@@ -83,7 +83,7 @@ async def events():
 
 - `agent.run(...)` 本身也是一个 async generator（它内部驱动 LangGraph 的 `astream`，见 [04-langgraph-stategraph.md](04-langgraph-stategraph.md)），`events()` 只是把它吐出来的每个事件再包一层 `sse()` 格式化后继续往外 `yield`——**这是一层"业务事件流"套在"Graph 执行事件流"外面的适配层**。
 
-[routes.py:409-426](../../backend/app/api/routes.py#L409) 的 `with_sse_heartbeat(source, interval_seconds)`：
+[routes/helpers.py:20-46](../../backend/app/api/routes/helpers.py#L20) 的 `with_sse_heartbeat(source, interval_seconds)`：
 
 ```python
 async def with_sse_heartbeat(source, interval_seconds: float):
@@ -104,7 +104,7 @@ async def with_sse_heartbeat(source, interval_seconds: float):
 - `anext(iterator)`：Python 内置函数，等价于同步版的 `next()`，向一个异步迭代器要"下一个值"，返回的是一个 **awaitable**，所以要用 `asyncio.create_task` 包成一个可以被 `asyncio.wait` 等待、同时又能设超时的任务。
 - `asyncio.wait({pending}, timeout=...)`：**关键点**——同时等"下一个业务事件到了"和"超时"两件事，谁先发生就先处理。如果 15 秒（`SSE_HEARTBEAT_SECONDS`，[config.py:117](../../backend/app/core/config.py#L117)）内 LLM 还没吐出下一个事件（比如模型正在"思考"），就先发一条心跳 `: heartbeat\n\n`（注意前面是冒号，浏览器/Nginx 都会当注释处理，不会被解析成业务事件），连接不会被反向代理当成"死连接"掐掉，然后继续等**同一个** `pending` 任务（没有重新创建，避免打断真正在等的那次 `anext`）。
 
-最外层用 FastAPI 的 `StreamingResponse` 把这个 async generator 包成 HTTP 响应（[routes.py:747-756](../../backend/app/api/routes.py#L747)）：
+最外层用 FastAPI 的 `StreamingResponse` 把这个 async generator 包成 HTTP 响应（[routes/chat.py:270-278](../../backend/app/api/routes/chat.py#L270)）：
 
 ```python
 return StreamingResponse(
@@ -119,7 +119,7 @@ return StreamingResponse(
 
 ### 4.3 可断线重连的事件回放：`GET /api/agent-runs/{run_id}/events`
 
-这是另一个 SSE 端点，专门解决"页面刷新/断网后怎么接回之前没看完的流"这个问题（[routes.py:357-406](../../backend/app/api/routes.py#L357)）：
+这是另一个 SSE 端点，专门解决"页面刷新/断网后怎么接回之前没看完的流"这个问题（[routes/agent_runs.py:78-127](../../backend/app/api/routes/agent_runs.py#L78)）：
 
 ```python
 @router.get("/agent-runs/{run_id}/events")

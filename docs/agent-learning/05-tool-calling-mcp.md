@@ -54,7 +54,7 @@ async def get_law_article(law_name: str, article_number: str) -> dict:
 
 ### 4.3 让模型自主决定调用：`create_agent`
 
-[graph.py:404-419](../../backend/app/agent/graph.py#L404)：
+[graph/orchestrator.py:93-108](../../backend/app/agent/graph/orchestrator.py#L93)：
 
 ```python
 self.research_agent = create_agent(
@@ -107,7 +107,7 @@ async def awrap_tool_call(self, request: ToolCallRequest, handler):
 
 - LangChain 会把 `EvidencePacket` 这个 Pydantic 模型**也包装成一个"工具"**（工具名默认取 Pydantic 类名，即 `"EvidencePacket"`），追加进模型可以调用的工具列表里。
 - **关键点**：只要这个"结构化输出工具"存在，LangChain 在每一轮模型调用时都会显式设置 `tool_choice="required"`（对应 OpenAI 系 API 的标准参数）——这意味着模型在这个循环里**每一轮都必须返回至少一个 `tool_calls`，不能只返回自由文本**。它要么继续调用真实检索工具（`search_laws`/`get_law_article`），要么调用这个 `EvidencePacket` 工具来"收尾汇报"。
-- 模型一旦调用了 `EvidencePacket` 这个工具，参数会被自动用 Pydantic 校验，校验通过后写进 `state["structured_response"]`，本项目节点代码直接读这个字段拿到一个**已经校验过的真实对象**，不需要再自己写正则去从模型的文本回复里"抠"出 JSON（对比 [graph.py](../../backend/app/agent/graph.py) 里其它无工具节点用的 `_invoke_json`/`_extract_json`，那些是靠 Prompt 文字约束"只返回 JSON"，本质上是弱约束）。
+- 模型一旦调用了 `EvidencePacket` 这个工具，参数会被自动用 Pydantic 校验，校验通过后写进 `state["structured_response"]`，本项目节点代码直接读这个字段拿到一个**已经校验过的真实对象**，不需要再自己写正则去从模型的文本回复里"抠"出 JSON（对比其它无工具节点用的 [`_invoke_json`](../../backend/app/agent/graph/orchestrator.py#L154)/[`_extract_json`](../../backend/app/agent/graph/evidence.py#L35)，那些是靠 Prompt 文字约束"只返回 JSON"，本质上是弱约束）。
 - `handle_errors=True`：如果模型调用 `EvidencePacket` 工具时参数没通过 Pydantic 校验，LangChain 会自动生成一条报错 `ToolMessage` 让模型重试，而不是直接抛异常中断整个流程。
 
 这套机制解决了一个真实踩过的问题：早期实现里模型只是被 Prompt 文字"拜托"输出 JSON，撞到工具调用上限之类的边界情况时，模型有时会先用自然语言解释一大段"我已经检索了几次、接下来打算怎么办"，再附上 JSON（甚至有时候不附）——`tool_choice="required"` 从接口层面直接杜绝了这种可能性，模型**物理上没有"只说话不调用工具"这个选项**。

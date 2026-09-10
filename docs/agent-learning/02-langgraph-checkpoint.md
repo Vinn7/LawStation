@@ -72,7 +72,7 @@ snapshot = await graph.compiled.aget_state(config)
 
 ### 4.3 真正驱动 Graph 执行、并自动落 Checkpoint
 
-[graph.py 内 `legal_researcher` 等节点方法所在的同一个 Graph](../../backend/app/agent/graph.py) 由 [runtime.py:129](../../backend/app/agent/runtime.py#L129) 驱动：
+[graph/ 包内组装出的同一个 Graph](../../backend/app/agent/graph/orchestrator.py)（`legal_researcher` 等节点方法现在按阶段拆分在 `graph/nodes/` 目录下，通过多继承组合进 `orchestrator.py` 的 `LegalConsultationGraph`）由 [runtime.py:129](../../backend/app/agent/runtime.py#L129) 驱动：
 
 ```python
 async for part in graph.compiled.astream(

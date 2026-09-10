@@ -62,9 +62,9 @@ summary_budget = content_budget - recent_budget - case_budget - profile_budget
 
 ### 4.3 后台异步抽取：不阻塞主回答
 
-主回答保存完之后才 `enqueue` 一个记忆整理任务（[routes.py:678-684](../../backend/app/api/routes.py#L678)），真正的抽取逻辑在独立的后台 Worker 里跑（[memory_tasks.py::MemoryTaskManager](../../backend/app/services/memory_tasks.py)）。这里最值得看的是**结构化输出的实现方式**：
+主回答保存完之后才 `enqueue` 一个记忆整理任务（[routes/chat.py:200-206](../../backend/app/api/routes/chat.py#L200)），真正的抽取逻辑在独立的后台 Worker 里跑（[memory_tasks/manager.py::MemoryTaskManager](../../backend/app/services/memory_tasks/manager.py#L32)）。这里最值得看的是**结构化输出的实现方式**：
 
-[memory_tasks.py:453-501](../../backend/app/services/memory_tasks.py#L453) `_invoke_structured_json`：
+[memory_tasks/invocation.py:20-68](../../backend/app/services/memory_tasks/invocation.py#L20) `_invoke_structured_json`：
 
 ```python
 schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
@@ -85,7 +85,7 @@ return schema.model_validate(decoded)
 
 这是本项目记忆系统里工程质量最高的一处。当模型判断某条新提取的事实和已有记忆冲突、建议替换时，服务端**不会直接相信模型给的目标 ID**，而是重新做一次原子校验：
 
-[memory_tasks.py:699-762](../../backend/app/services/memory_tasks.py#L699) `_replace_memory`：
+[memory_tasks/persistence.py:216-279](../../backend/app/services/memory_tasks/persistence.py#L216) `_replace_memory`：
 
 ```python
 result = db.execute(

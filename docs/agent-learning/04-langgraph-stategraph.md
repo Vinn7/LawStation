@@ -34,14 +34,16 @@
 
 ### 4.1 两层"Agent"抽象，容易搞混
 
-本项目代码注释里专门强调了这一点（[graph.py:1-9](../../backend/app/agent/graph.py#L1)）：
+本项目代码注释里专门强调了这一点（[graph/orchestrator.py:1-22](../../backend/app/agent/graph/orchestrator.py#L1)）：
 
 1. **外层 `StateGraph`**——本文档讲的这一层，负责三个业务角色之间的路由，它本身**不是**大模型，`compile()` 这一步也不会发起任何模型调用。
 2. **`legal_researcher` 节点内部**又用了 LangChain 的 `create_agent`——这是另一个更小的"模型自主决定要不要调用工具"的子循环，属于 [05-tool-calling-mcp.md](05-tool-calling-mcp.md) 的内容，不要和外层 StateGraph 混为一谈。
 
+（拆分后，六个节点的业务逻辑按阶段分别放进了 `graph/nodes/` 目录下的独立文件——`legal_researcher` 在 `nodes/research.py`、`review_gate` 在 `nodes/review.py` 等——通过多继承组合进 `orchestrator.py` 的 `LegalConsultationGraph`；`orchestrator.py` 本身只负责图拓扑组装和跨节点共享的基础设施，不含任何一个节点的业务逻辑。）
+
 ### 4.2 声明拓扑：`_compile()`
 
-[graph.py:425-457](../../backend/app/agent/graph.py#L425)：
+[graph/orchestrator.py:114-152](../../backend/app/agent/graph/orchestrator.py#L114)：
 
 ```python
 graph = StateGraph(LegalConsultationState, context_schema=AgentInvocationContext)
@@ -109,11 +111,11 @@ class AgentInvocationContext:
 
 判断一个字段该放 State 还是 Context 的简单标准：**"如果进程重启、从 Checkpoint 恢复，这个值还应该是原来的值吗？"**——是，放 State；"不是，它应该重新构造"，放 Context。
 
-一个体现两者边界微妙之处的细节：`context.metrics.tool_call_count`（本次调用的实时计数，在 Context 里）在每个节点执行完后，会**同步写回** `state["tool_call_count"]`（[graph.py](../../backend/app/agent/graph.py) 各节点 `return` 语句里都有这一行）——这是因为 Checkpoint 恢复后 Context 会被重新构造成初始值（计数器归零），但业务上需要"恢复后这个计数不能真的归零"，所以真正权威的历史累计值要落在能被持久化的 State 里，Context 里的 `metrics` 只是"当前进程内跑这一段时的实时统计"。
+一个体现两者边界微妙之处的细节：`context.metrics.tool_call_count`（本次调用的实时计数，在 Context 里）在每个节点执行完后，会**同步写回** `state["tool_call_count"]`（[graph/nodes/](../../backend/app/agent/graph/nodes) 下各节点文件的 `return` 语句里都有这一行）——这是因为 Checkpoint 恢复后 Context 会被重新构造成初始值（计数器归零），但业务上需要"恢复后这个计数不能真的归零"，所以真正权威的历史累计值要落在能被持久化的 State 里，Context 里的 `metrics` 只是"当前进程内跑这一段时的实时统计"。
 
 ### 4.4 路由函数：把结构化产物翻译成"下一步去哪"
 
-路由函数是纯函数，不调用模型/工具，只读 State。以 `review_gate` 的确定性快速路径为例（[graph.py:968-1009](../../backend/app/agent/graph.py#L968)）：
+路由函数是纯函数，不调用模型/工具，只读 State。以 `review_gate` 的确定性快速路径为例（[graph/nodes/review.py:103-128](../../backend/app/agent/graph/nodes/review.py#L103)）：
 
 ```python
 skip_reason = ""
@@ -133,7 +135,7 @@ elif _no_match_violations(draft.answer):
 
 这不是路由函数本身（路由函数是紧接着的 `after_review_gate`），而是给路由函数准备判断依据的节点——它把"要不要走一次真正的 LLM Reviewer"这个决定，尽量用**确定性规则**（风险等级、检索状态、置信度、正则规则）来做，只有低风险 + 无证据 + 低置信度 + 通过安全检查的简单问题才允许跳过 LLM 复核，省掉一次模型调用的延迟，同时不放松安全边界——这是"能用代码判断的就不要交给模型判断"这条设计原则的具体体现。
 
-再看真正的路由函数 `after_review`（[graph.py:1051-1077](../../backend/app/agent/graph.py#L1051)），它把 `ReviewResult.next_action`（模型的建议）和两个循环计数器（`retry_count`/`revision_count`）结合起来决定走向：
+再看真正的路由函数 `after_review`（[graph/orchestrator.py:197-223](../../backend/app/agent/graph/orchestrator.py#L197)），它把 `ReviewResult.next_action`（模型的建议）和两个循环计数器（`retry_count`/`revision_count`）结合起来决定走向：
 
 ```python
 if not review or review.approved or review.next_action == "finalize":
