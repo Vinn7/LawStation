@@ -1,21 +1,31 @@
 # Agent 开发学习笔记
 
-面向中级后端工程师、Agent/前端知识较薄弱的学习材料，基于 LawStation 项目实际代码整理。每篇文档统一按以下结构组织：
+面向中级后端工程师、Agent/前端知识较薄弱的学习材料，基于 LawStation 项目实际代码整理。目标不只是"看懂这个项目怎么写的"，而是通过项目里的具体实现，了解**这一类组件在生产环境里通常怎么做、本项目省略了什么、面试被追问时该怎么答**——LawStation 本身是一个练手项目，每篇文档的最后都会明确划一条"当前实现"和"生产级实现"之间的边界。
 
+每篇文档统一按以下结构组织：
+
+0. 前置知识（读这篇前该知道什么，链接到依赖的其他篇）
 1. 要解决的问题
-2. 行业内一般怎么做
-3. 核心机制原理
-4. 本项目具体实现（函数级，含框架内部函数说明）
-5. 对比：本项目 vs 行业常规方案
-6. 本项目内部的关键设计取舍与易错点
-7. 动手验证方式
+2. 核心机制原理（含行业主流方案对比，边讲边比）
+3. 本项目具体实现（函数级，含框架内部函数说明）
+4. 设计取舍（为什么选 A 不选 B）
+5. 易错点（具体场景 → 错误后果 → 怎么避免）
+6. **生产化差距与面试应对**（这本质是练手项目，生产环境通常还需要什么，面试怎么诚实且有条理地回答）
+7. 动手验证方式（含自测题）
 
 ## 目录
 
-1. [SSE（Server-Sent Events）流式通信机制](01-sse.md)
-2. [LangGraph Checkpoint 持久化机制](02-langgraph-checkpoint.md)
-3. [分层记忆系统与 Context 工程](03-memory-context-engineering.md)
-4. [LangGraph StateGraph 多 Agent 编排](04-langgraph-stategraph.md)
-5. [Tool Calling / Function Calling 机制 + MCP 协议](05-tool-calling-mcp.md)
+按六个层次分组，每组内部按依赖顺序排列：
 
-建议阅读顺序：4 → 5 → 2 → 3 → 1（先建立"什么是 Agent 编排"和"Agent 怎么用工具"的框架性认知，再看持久化和记忆这两块支撑性基础设施，最后看贯穿前后端的 SSE）。如果更想从已经熟悉的通信机制切入，也可以反过来从 1 开始。
+| 层次 | 文档 | 一句话 |
+|---|---|---|
+| 编排层 | [04. LangGraph StateGraph 多 Agent 编排](04-langgraph-stategraph.md) | 三个业务角色怎么连成一个可路由、可循环控制的图 |
+| 编排层 | [05. Tool Calling / Function Calling 机制 + MCP 协议](05-tool-calling-mcp.md) | Agent 怎么自主决定调用工具，MCP 怎么解耦工具实现和使用方 |
+| 检索层 | [06. RAG 混合检索与 Reranker](06-rag-hybrid-retrieval.md) | BM25 + Dense + RRF + BGE 精排，以及"向量数据库"这个词该怎么准确使用 |
+| 持久层 | [02. LangGraph Checkpoint 持久化机制](02-langgraph-checkpoint.md) | 框架怎么在节点边界自动保存执行状态 |
+| 持久层 | [07. Agent 持久化：AgentRun 业务任务层](07-agent-run-persistence.md) | Checkpoint 之上还要补的任务所有权、排队、取消、断线重连 |
+| 记忆层 | [03. 分层记忆系统与 Context 工程](03-memory-context-engineering.md) | 四层记忆预算分配、作用域隔离、冲突消解 |
+| 通信层 | [01. SSE（Server-Sent Events）流式通信机制](01-sse.md) | 服务器怎么把生成结果流式推给前端，怎么断线重连 |
+| 质量层 | [08. Agent / RAG 评测方法论](08-agent-rag-eval-methodology.md) | 怎么证明前面这些组件的改动真的有效，而不是"跑起来看着还行" |
+
+建议阅读顺序：**04 → 05 → 06 → 02 → 07 → 03 → 01 → 08**——先建立"Agent 怎么编排、怎么用工具"的框架性认知，接着看编排里最常被调用的检索能力，再看任务怎么扛得住重启和断线（Checkpoint → AgentRun），然后是怎么记住东西（记忆），怎么把结果流式传出去（SSE），最后是怎么证明这一整条链路真的有效（评测）——这是一条完整的故事线，也大致对应"面试官通常会顺着问下去"的追问路径。如果更想从已经熟悉的通信机制切入，也可以反过来从 01 开始。
