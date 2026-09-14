@@ -44,6 +44,9 @@ Checkpoint 保存的是某个 `thread_id`（一次执行的唯一标识）在某
 ```python
 @asynccontextmanager
 async def checkpoint_saver(settings: Settings):
+    if not settings.langgraph_checkpoint_enabled:
+        yield None
+        return
     ...
     connection = await aiosqlite.connect(path)
     saver = AsyncSqliteSaver(connection, serde=JsonPlusSerializer(pickle_fallback=False))
@@ -56,6 +59,7 @@ async def checkpoint_saver(settings: Settings):
 
 逐个说明用到的框架内部对象：
 
+- **`langgraph_checkpoint_enabled`（默认 `True`）**：Checkpoint 其实是可以被整个关掉的配置开关。关掉之后这个函数直接 `yield None`，不会创建任何 `AsyncSqliteSaver`——`AgentRuntime`/`AgentRunManager` 里好几处都专门判断 `self.checkpointer is None` 来处理这种情况（比如 `checkpoint_info()` 一进来就 `if self.checkpointer is None: return {}`）。理解这个开关的存在，下面讲的"每个 super-step 自动落盘"才有一个明确的前提：它是在 Checkpoint 启用的情况下才成立。
 - **`AsyncSqliteSaver`**：LangGraph 官方提供的 Checkpoint 存储后端实现之一（还有 Postgres 版等，见 §6），负责"把 State 序列化写入/从 SQLite 读出"这件事的具体落地。它实现了 LangGraph 定义的 `BaseCheckpointSaver` 接口，Graph 编译时把它传进去，之后每个 super-step 自动调用它保存。
 - 构造参数 `connection`：`aiosqlite`（异步 SQLite 客户端）的连接对象，**不是**本项目业务用的 SQLAlchemy 连接——这是一条独立的、专属 Checkpoint 的数据库连接，物理上和业务库（`data/runtime/lawstation.db`）是两个文件。
 - `serde=JsonPlusSerializer(pickle_fallback=False)`：`serde`（serializer/deserializer）决定 State 里的 Python 对象怎么变成字节存进 SQLite。这里显式关闭 `pickle_fallback`——遇到序列化器不认识的类型会直接报错，而不是退化用 Python 的 `pickle` 兜底。这是有意的安全选择：`pickle` 反序列化任意数据是已知的安全风险（构造恶意 pickle 数据可以在反序列化时执行任意代码），Checkpoint 数据库理论上是持久化文件，不应该允许"读出来就能跑代码"这种攻击面。
@@ -63,17 +67,29 @@ async def checkpoint_saver(settings: Settings):
 
 ### 3.2 发起一次新的 / 续跑的 Agent 执行
 
-[runtime.py:104-116](../../backend/app/agent/runtime.py#L104)：
+[runtime.py:107-126](../../backend/app/agent/runtime.py#L107)：
 
 ```python
-configurable["thread_id"] = thread_id or configurable.get("thread_id") or context.identity.request_id
+configurable["thread_id"] = (
+    thread_id or configurable.get("thread_id") or context.identity.request_id
+)
 configurable.pop("checkpoint_ns", None)
-...
-snapshot = await graph.compiled.aget_state(config)
+config["configurable"] = configurable
+graph_input: LegalConsultationState | None = state   # 默认：全新构造的初始 State
+if resume and self.checkpointer is not None:
+    snapshot = await graph.compiled.aget_state(config)
+    if snapshot and snapshot.values:
+        final_state.update(snapshot.values)
+        context.metrics.model_call_count = int(snapshot.values.get("model_call_count", 0))
+        context.metrics.tool_call_count = int(snapshot.values.get("tool_call_count", 0))
+        context.metrics.tool_trajectory = list(snapshot.values.get("tool_trajectory", []))
+        graph_input = None
 ```
 
+**关键点，容易理解错：`aget_state()` 不是每次执行都会调用的**。`graph_input` 默认就是上面刚构造好的全新 `state`——一次全新的、第一次尝试的 Run，代码根本不会去碰 Checkpoint，直接拿这个新 State 往下跑。**只有 `resume=True`（意味着这是一次 `attempt > 1` 的恢复执行，见 [07-agent-run-persistence.md](07-agent-run-persistence.md)）且 Checkpointer 存在时，才会调用 `aget_state()`**，把上次的 State 读回来、把持久化的调用计数同步回 Context，并且只有在这条分支里，`graph_input` 才会被改成 `None`——这才是"从最近 Checkpoint 的下一节点继续"的真正触发条件，不是"每次都查一下、查不到就当新的"。
+
 - **`graph.compiled`**：`StateGraph.compile()` 的返回值，类型是 `CompiledStateGraph`——把节点/边的拓扑关系固化成一个可执行对象。编译这一步本身**不会**发起任何模型调用，纯粹是结构组装。
-- **`aget_state(config)`**：`CompiledStateGraph` 提供的方法，真实签名是 `aget_state(config: RunnableConfig, *, subgraphs: bool = False) -> StateSnapshot`。`config` 是一个形如 `{"configurable": {"thread_id": "..."}}` 的字典，`thread_id` 就是 §3.1 里存进 SQLite 的那个 Checkpoint 记录的分区键。返回一个 `StateSnapshot`：如果这个 `thread_id` 之前跑过、有 Checkpoint，就能拿到"上次跑到哪一步"的完整 State；没有则返回一个空快照，等价于"从头开始"。
+- **`aget_state(config)`**：`CompiledStateGraph` 提供的方法，真实签名是 `aget_state(config: RunnableConfig, *, subgraphs: bool = False) -> StateSnapshot`。`config` 是一个形如 `{"configurable": {"thread_id": "..."}}` 的字典，`thread_id` 就是 §3.1 里存进 SQLite 的那个 Checkpoint 记录的分区键。只有在恢复分支里被调用时，返回的 `StateSnapshot` 才会被使用；这个函数本身在没有 Checkpoint 的 `thread_id` 上也能调用、会返回一个空快照，但本项目的正常新建流程根本用不到这个"空快照"分支，因为新建从一开始就不会走到这条调用。
 - **`configurable.pop("checkpoint_ns", None)`**：`checkpoint_ns`（namespace）是 LangGraph 内部专门留给**嵌套子图**的字段——如果一个 Graph 里又调用了另一个 Graph（子图），子图的 Checkpoint 要和外层区分命名空间。本项目三个业务 Agent 全在一个顶层 Graph 里，没有嵌套子图，如果不小心把这个字段传进去（比如误用了别的地方留下的 config），LangGraph 会把它当成"某个子图的 State"去查，查不到就抛 `Subgraph ... not found`。**这是本项目真实踩过的一个 bug**（对应 [SPEC.md](../../ai-context/SPEC.md) 变更记录 4.3 版本："修复将 LangGraph 根图 checkpoint_ns 误作业务版本标签导致的 Subgraph not found"）。
 
 ### 3.3 真正驱动 Graph 执行、并自动落 Checkpoint
@@ -82,11 +98,17 @@ snapshot = await graph.compiled.aget_state(config)
 
 ```python
 async for part in graph.compiled.astream(
-    input, config, stream_mode=["updates", "custom"], version="v2",
+    graph_input,
+    context=context,
+    config=config,
+    stream_mode=["updates", "custom"],
+    version="v2",
 ):
 ```
 
 - **`astream`**：真正把 Graph 往下推进的方法，每完成一个 super-step 就**自动**调用 Checkpoint Saver 落一次快照——业务代码完全不感知这个动作。它是一个异步生成器，边跑边把每一步的产出 `yield` 出来。
+- **`graph_input`**：就是 §3.2 里那个变量——新建时是全新构造的 State，恢复时是 `None`（表示"从最近 Checkpoint 的下一节点继续"，不是重新提交一份初始 State）。
+- **`context=context`**：把这次调用专属的 `AgentInvocationContext` 对象传进去，这正是 [04-langgraph-stategraph.md](04-langgraph-stategraph.md) §3.3 讲的 State/Context 机制里，Context 真正"进入"Graph 执行、被节点函数通过 `runtime.context` 读到的地方——不传这个参数，节点内部就拿不到本次调用的身份、调用计数这些请求级依赖。
 - `stream_mode=["updates", "custom"]`：控制它往外吐什么——`"updates"` 是每个节点返回的 State 增量字典，`"custom"` 是节点内部用 `runtime.stream_writer(...)` 主动写出的自定义事件（本项目用来发 SSE 的 `tool_call_start` 之类事件，参见 [01-sse.md](01-sse.md)）。这两路数据混在同一个异步生成器里吐出来，靠 `part.get("type")` 区分。
 
 ### 3.4 只读元数据、失败时的两种不同容错策略
@@ -120,7 +142,8 @@ except Exception as exc:
 ## 5. 易错点
 
 - **`checkpoint_ns` 误用导致的 `Subgraph not found`**（见 §3.2）——通用教训：使用框架预留字段前，先搞清楚它的语义边界，不要"看起来能用就用"。本项目真实踩过这个坑：曾经把业务版本号误传进这个字段，导致 LangGraph 把它当成子图路径去查，查不到就报错。
-- **两处 `aget_state` 用同一套失败处理逻辑**（见 §3.4）——通用教训：同一个 API 在不同调用场景下，"失败了该怎么办"要结合业务语义单独设计，不能一刀切复制粘贴同一段 `try/except`。
+- **误以为两处 `aget_state` 用的是同一套失败处理逻辑**（见 §3.4）——实际正相反，两处的容错策略是**刻意设计成相反的**：§3.2 恢复执行时读失败会让本次尝试直接失败，交给上层重试；§3.4 读补充元数据时失败则安静降级返回空字典。通用教训：同一个 API 在不同调用场景下，"失败了该怎么办"要结合业务语义单独设计，绝不能因为调用方式看着差不多就复制粘贴同一段 `try/except`。
+- **误以为新建一次 Run 也会调用 `aget_state()`**（见 §3.2）——实际上只有 `resume=True` 的恢复执行才会调用它；新建流程直接用全新构造的 State，根本不查 Checkpoint。混淆这一点会导致误判"是不是每次请求都有一次多余的数据库读"。
 - **把 Checkpoint 当成跨轮长期记忆**——它只保存"这一次 AgentRun 执行到哪了"，跨会话的用户偏好/案件事实走的是完全独立的分层记忆机制（见 [03-memory-context-engineering.md](03-memory-context-engineering.md)），两者不要混为一谈。混淆的后果是：以为某个信息"应该能通过 Checkpoint 恢复"，结果发现新会话根本读不到——因为它本来就不该从这里读。
 
 ## 6. 生产化差距与面试应对
