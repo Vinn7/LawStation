@@ -64,19 +64,20 @@ async def close_engine() -> None:
 
 @mcp.tool()
 async def search_laws(query: str, top_k: int = 8, filters: dict | None = None) -> dict:
-    """返回候选 chunk、法名、条号和检索分数；是否采纳由 Research 再判断。
+    """混合检索中国法律法规，返回候选 chunk、法名、条号和检索分数；法律问题、权利义务
+    或法条核验时使用，是否采纳由 Research 再判断。
 
     工具只读，因此当前 LangGraph 至少一次恢复语义下允许节点重跑；未来副作用
     Tool 必须另行设计幂等键，不能沿用这一假设。
     """
-    """混合检索中国法律法规。法律问题、权利义务或法条核验时使用。"""
     return await (await initialize_engine()).search(query, top_k, filters, envelope=True)
 
 
 @mcp.tool()
 async def get_law_article(law_name: str, article_number: str) -> dict:
-    """按规范化法名和条号进行只读精确查询，返回仍需进入证据边界校验。"""
-    """按法律名称与条号精确查找一条法条。"""
+    """按法律名称与条号精确查找一条法条：按规范化法名和条号进行只读精确查询，
+    返回仍需进入证据边界校验。
+    """
     engine = await initialize_engine()
     return await asyncio.to_thread(engine.get, law_name, article_number) or {
         "error": "未找到指定法条"
