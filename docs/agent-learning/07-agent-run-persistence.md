@@ -54,37 +54,252 @@ Graph 执行层：LangGraph AsyncSqliteSaver（独立 Checkpoint SQLite）
 
 ### 3.2 创建任务：HTTP 只负责入队
 
-[routes/agent_runs.py::create_agent_run](../../backend/app/api/routes/agent_runs.py)：请求进来后只做四件事——预占会话并发身份、校验会话所有权、创建一条 `status=queued` 的 `AgentRun`、返回 HTTP `202`。`202` 的语义是"已接受、已排队"，不是"已经跑完"；真正的模型调用完全在后台 Worker 里发生，因此这个 HTTP 请求结束不会终止 Agent 执行。
-
-每个 Run 固定 `langgraph_thread_id = f"agent-run:{run_id}"`，**不用** `conversation_id` 做 thread ID——如果用会话 ID，同一会话的下一轮咨询会在 LangGraph 层继承上一轮的 `EvidencePacket`、草稿等中间状态，等于凭空多出一套跟业务消息、`MemoryService` 打架的"第二套跨轮记忆"。
-
-同一会话的互斥用了两层保护：进程内的 `AgentConcurrencyManager.reserve()` 立即拒绝重复提交，加上数据库的部分唯一索引 `uq_agent_run_active_conversation` 兜底并发穿透的竞争窗口——冲突返回 HTTP `409`。
-
-### 3.3 Worker 调度、租约与并发准入
-
-`AgentRunManager` 后台每 `0.5` 秒轮询最早的 `queued` Run，为尚未在本进程 `_active` 集合里的 Run 创建 `asyncio.Task`。真正执行前必须先拿到全局/用户并发配额（`AGENT_GLOBAL_CONCURRENCY=6`、`AGENT_PER_USER_CONCURRENCY=2`），拿到配额后才把任务 `claim` 为 `running`，写入 `lease_owner`（当前 Worker 标识）和 `lease_expires_at`（默认 120 秒，每 40 秒续约一次）。排队期间不会调用模型或 MCP，也不会提前读取可能已经过期的记忆快照。
-
-### 3.4 消息与最终结果的幂等写入
-
-`_prepare()` 保存用户消息时先检查 `user_message_id` 是否已存在：
+[routes/agent_runs.py:18-49](../../backend/app/api/routes/agent_runs.py#L18) `create_agent_run`：
 
 ```python
-if current.user_message_id:
-    user_message = db.get(Message, current.user_message_id)
-else:
-    user_message = Message(role="user", content=run.input_text)
-    current.user_message_id = user_message.id
+@router.post("/conversations/{conversation_id}/runs", status_code=202)
+async def create_agent_run(
+    conversation_id: str,
+    payload: ChatRequest,
+    request: Request,
+    ctx=Depends(get_user_context),
+):
+    identity = ConcurrencyIdentity(
+        request_id=ctx.request_id, tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id, conversation_id=conversation_id,
+    )
+    try:
+        await request.app.state.agent_concurrency.reserve(identity)
+        run = await asyncio.to_thread(
+            request.app.state.agent_runs.create, ctx, conversation_id, payload.content
+        )
+    except ConversationBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        await request.app.state.agent_concurrency.release_reservation(identity)
+        raise HTTPException(404, str(exc)) from exc
+    ...
+    return run_payload(run)
 ```
 
-`_complete()` 对最终助手消息做了三层幂等检查：任务已完成且已有助手消息直接复用；助手消息不存在才创建；正文 Token 事件已存在就不再重复写。这意味着即使进程恰好在"助手消息已保存、任务状态还没改成 completed"这个窗口崩溃，恢复后也不会创建第二条助手回答，也不会重复推送已经发出的正文事件。
+这个路由函数只做两件事：`reserve(identity)` 先在**进程内存**里预占这个会话的并发名额（第一层互斥，见下），成功后才调用 `AgentRunManager.create()` 真正建 `AgentRun`。**它不执行任何模型调用**，`return run_payload(run)` 之后 HTTP `202` 立刻返回——`202` 的语义是"已接受、已排队"，不是"已经跑完"；真正的执行完全在后台 Worker 里发生，这次 HTTP 请求结束不会终止 Agent 执行。
+
+真正建任务的地方是 [agent_runs.py:125-174](../../backend/app/services/agent_runs.py#L125) `AgentRunManager.create()`：
+
+```python
+def create(self, ctx: RequestUserContext, conversation_id: str, content: str) -> AgentRun:
+    with SessionLocal() as db:
+        conversation = db.scalar(select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.tenant_id == ctx.tenant_id,
+            Conversation.user_id == ctx.user_id,
+        ))
+        if conversation is None:
+            raise LookupError("会话不存在或无权访问")
+        run_id = str(uuid4())
+        run = AgentRun(
+            id=run_id,
+            ...
+            status="queued",
+            current_stage="queued",
+            langgraph_thread_id=f"agent-run:{run_id}",
+        )
+        db.add(run)
+        try:
+            db.flush()
+            self._append_event_in_session(db, run, "message_start", {...})
+            self._append_event_in_session(db, run, "agent_status", {..., "status": "queued", ...})
+            db.commit()
+        except IntegrityError as exc:
+            # 数据库部分唯一索引是跨协程的第二道防线：即使进程内 reservation
+            # 出现竞态，同一会话也只能存在一个 queued/running Run。
+            db.rollback()
+            raise AgentRunConflict("该会话正在生成回答，请等待完成或先停止生成。") from exc
+        db.refresh(run)
+        return run
+```
+
+几个细节：
+
+- `select(Conversation).where(..., tenant_id=..., user_id=...)`——所有权校验直接写进 SQL 条件，不是"查出来之后再判断归属"，避免任何一处代码遗漏这个判断就直接越权。
+- `langgraph_thread_id = f"agent-run:{run_id}"`——每个 Run 固定用**自己的 `run_id`** 做 LangGraph 的 `thread_id`，**不用** `conversation_id`。如果用会话 ID，同一会话下一轮咨询会在 LangGraph 层"继承"上一轮的 `EvidencePacket`、草稿等中间状态，等于凭空多出一套跟业务 `messages` 表、[03-memory-context-engineering.md](03-memory-context-engineering.md) 讲的 `MemoryService` 打架的"第二套跨轮记忆"——这正是我们前面聊 Run/Conversation 关系时确认过的："一个 conversation_id 下面挂多个 run_id，每个 run_id 自己的事件序号从 1 开始"，根源就在这里的建表逻辑。
+- 同一个事务里顺带写了 `message_start` 和 `queued` 状态的 `agent_status` 两条 `AgentRunEvent`——这就是 [01-sse.md](01-sse.md) 里"前端订阅后能立刻看到排队状态"的数据来源。
+- `try/except IntegrityError`：这是同一会话互斥的**第二层保护**。第一层是路由函数里 `AgentConcurrencyManager.reserve()`（进程内内存判断，立即拒绝重复提交）；但进程内判断和数据库写入之间存在竞争窗口，所以这里又用了一条数据库**部分唯一索引**（`uq_agent_run_active_conversation`，只对 `status in (queued, running)` 的行生效）兜底——两个并发请求就算都通过了内存检查，最终写库时也只有一个能成功，另一个会撞索引冲突，转换成业务语义清晰的 `AgentRunConflict` → HTTP `409`。
+
+### 3.3 Worker 调度：从 queued 到 running
+
+[agent_runs.py:331-348](../../backend/app/services/agent_runs.py#L331)：
+
+```python
+async def _loop(self) -> None:
+    """轮询 queued Run，并为每个候选创建独立执行 Task。"""
+    while not self._closing:
+        run_ids = await asyncio.to_thread(self._queued_ids)
+        for run_id in run_ids:
+            if run_id not in self._active:
+                task = asyncio.create_task(self._execute(run_id), name=f"agent-run:{run_id}")
+                self._active[run_id] = task
+                task.add_done_callback(lambda _task, rid=run_id: self._active.pop(rid, None))
+        await asyncio.sleep(max(0.05, self.settings.agent_run_worker_poll_seconds))
+
+def _queued_ids(self) -> list[str]:
+    with SessionLocal() as db:
+        return list(db.scalars(select(AgentRun.id).where(
+            AgentRun.status == "queued"
+        ).order_by(AgentRun.created_at).limit(self.settings.agent_global_concurrency * 4)))
+```
+
+这是一个每 `0.5` 秒（`agent_run_worker_poll_seconds`）跑一次的轮询循环：查一批最早的 `queued` Run，为每个还没有对应 `asyncio.Task` 在跑的 Run 创建一个新 Task。`_active` 是一个**进程内内存字典**（`run_id → Task`），它的作用只是防止同一个 Worker 循环因为轮询间隔重叠、给同一个 `run_id` 重复创建 Task——注意它不是分布式锁，只在这一个进程里有效（这也是我们前面聊多实例场景时反复强调的那个边界）。
+
+真正拿到执行权限、把状态改成 `running` 的地方是 [agent_runs.py:515-531](../../backend/app/services/agent_runs.py#L515) `_claim()`：
+
+```python
+def _claim(self, run_id: str) -> AgentRun | None:
+    with SessionLocal() as db:
+        run = db.get(AgentRun, run_id)
+        if run is None or run.status != "queued" or run.cancel_requested:
+            return None
+        run.status = "running"
+        run.current_stage = "analyzing"
+        run.attempt += 1
+        run.started_at = run.started_at or datetime.now(UTC)
+        run.lease_owner = self.worker_id
+        run.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self.settings.agent_run_lease_seconds)
+        self._append_event_in_session(db, run, "agent_status", {
+            "agent": "case_analyst", "status": "analyzing", "message": "正在启动案情分析"
+        })
+        db.commit()
+        db.refresh(run)
+        return run
+```
+
+`_execute(run_id)`（[agent_runs.py:361-420](../../backend/app/services/agent_runs.py#L361)）拿到 Task 后，先 `await self.concurrency.acquire(identity)` 等到全局/用户并发配额可用（`AGENT_GLOBAL_CONCURRENCY=6`、`AGENT_PER_USER_CONCURRENCY=2`），**拿到配额之后才调用 `_claim()`**——也就是说排队等待配额期间，这个 Run 一直停在 `queued`，不会调用模型或 MCP，也不会提前读可能已经过期的记忆快照。`_claim()` 里顺便设置了 `lease_owner`（当前 Worker 的标识）和 `lease_expires_at`（默认 120 秒后过期，之后每 40 秒续约一次）——这就是我们前面聊"某个 Worker 挂了怎么办"时讲的租约机制的写入点。
+
+### 3.4 消息准备与最终结果的幂等写入
+
+[agent_runs.py:533-557](../../backend/app/services/agent_runs.py#L533) `_prepare()`：
+
+```python
+def _prepare(self, run: AgentRun, ctx: RequestUserContext, trace_id: str | None):
+    with SessionLocal() as db:
+        current = db.get(AgentRun, run.id)
+        if current.user_message_id:
+            user_message = db.get(Message, current.user_message_id)
+        else:
+            user_message = Message(
+                tenant_id=ctx.tenant_id, user_id=ctx.user_id,
+                conversation_id=run.conversation_id, role="user",
+                content=run.input_text, langsmith_trace_id=trace_id,
+            )
+            db.add(user_message)
+            db.commit()
+            current.user_message_id = user_message.id
+            db.commit()
+        snapshot = MemoryService(db, ctx).snapshot(
+            run.conversation_id, run.input_text, user_message.id
+        )
+        return user_message.id, snapshot
+```
+
+这段代码先判断 `user_message_id` 是否已经写过——如果服务在"用户消息保存后、Graph 还没跑完"这个窗口崩溃，恢复任务会走 `if current.user_message_id:` 这条分支直接复用旧消息，**不会把同一个问题再问一遍存成第二条**。用户消息确定之后，在**同一个短事务里**顺带读一次 `MemoryService.snapshot()`（[03-memory-context-engineering.md](03-memory-context-engineering.md) 讲的那套分层记忆快照），这个数据库 Session 随函数返回就关闭，不会一路拖到后面的模型和 MCP 调用还占着。
+
+Graph 跑完之后，[agent_runs.py:559-609](../../backend/app/services/agent_runs.py#L559) `_complete()` 负责幂等落最终结果，做了**三层检查**：
+
+```python
+def _complete(self, run_id, ctx, user_message_id, answer, citations, trace_id, model_calls, tool_calls, checkpoint_id):
+    with SessionLocal() as db:
+        run = db.get(AgentRun, run_id)
+        # ① 已经是终态且已有助手消息 → 直接复用，不再做任何写入
+        if run.status == "completed" and run.assistant_message_id:
+            return run.assistant_message_id
+        # ② 助手消息不存在才创建
+        assistant = db.get(Message, run.assistant_message_id) if run.assistant_message_id else None
+        if assistant is None:
+            assistant = Message(..., role="assistant", content=answer, status="complete", ...)
+            db.add(assistant)
+            db.flush()
+            run.assistant_message_id = assistant.id
+        # ③ 正文 token 事件已存在就跳过，避免重复推送
+        has_tokens = db.scalar(select(AgentRunEvent.id).where(
+            AgentRunEvent.run_id == run.id, AgentRunEvent.event_type == "token",
+        ).limit(1))
+        if not has_tokens:
+            for start in range(0, len(answer), 24):
+                self._append_event_in_session(db, run, "token", answer[start : start + 24])
+            if citations:
+                self._append_event_in_session(db, run, "citations", citations)
+        run.model_call_count = model_calls
+        run.tool_call_count = tool_calls
+        db.commit()
+        return assistant.id
+```
+
+三层检查分别堵住三个不同的崩溃窗口：① 整个任务都已经完成过了（比如网络问题导致调用方重试）；② 助手消息已经写了、但任务状态字段还没来得及改成 `completed`；③ 助手消息和状态都写了、但正文 Token 事件还没补全。**不管进程精确在哪个瞬间崩溃，恢复后走一遍 `_complete()` 都不会产生第二条助手消息，也不会把同一段正文重复推送给前端**。
 
 ### 3.5 SSE sequence 重放
 
-[routes/agent_runs.py::agent_run_events](../../backend/app/api/routes/agent_runs.py)：服务端取 Query 参数 `after_sequence` 和 `Last-Event-ID` 请求头两者的较大值作为游标，查询 `sequence > cursor` 的历史事件补发，发完存量事件后如果任务仍在运行就通过进程内 `asyncio.Condition` 等待新事件，默认 15 秒没有新事件发一次 `: heartbeat` 保活。**heartbeat 不占用序号、不写数据库，也不参与重放**——它只是防止连接被中间代理判定为空闲断开。浏览器主动断开只会终止这一次订阅生成器，不会取消后台正在执行的任务，这正是"页面刷新后任务继续跑"的关键实现点。
+[routes/agent_runs.py:78-127](../../backend/app/api/routes/agent_runs.py#L78) `agent_run_events`：
+
+```python
+@router.get("/agent-runs/{run_id}/events")
+async def agent_run_events(
+    run_id: str, request: Request,
+    after_sequence: int = Query(0, ge=0),
+    last_event_id: str | None = Header(None, alias="Last-Event-ID"),
+    ctx=Depends(get_user_context),
+):
+    cursor = max(after_sequence, int(last_event_id or 0))
+    manager = request.app.state.agent_runs
+    owned = await asyncio.to_thread(manager.owned, ctx, run_id)
+    if owned is None:
+        raise HTTPException(404, "任务不存在或无权访问")
+
+    async def source():
+        nonlocal cursor
+        while True:
+            run, rows = await asyncio.to_thread(manager.events, ctx, run_id, cursor)
+            if run is None:
+                return
+            for row in rows:
+                cursor = row.sequence
+                yield persisted_sse(row.sequence, row.event_type, json.loads(row.payload_json))
+            if run.status in TERMINAL_STATUSES and cursor >= run.last_event_seq:
+                return
+            await manager.wait_for_events(get_settings().sse_heartbeat_seconds)
+            if not rows:
+                yield ": heartbeat\n\n"
+
+    return StreamingResponse(source(), media_type="text/event-stream", headers={...})
+```
+
+这个函数在进入 `StreamingResponse` 之前先做一次**所有权预检**（`manager.owned(...)`，查不到直接 404），确保连接真正建立之前就已经拒绝了无权限的请求。`source()` 这个生成器里的 `while True` 循环是整个断线重连机制的核心：每一轮先按游标查一批已持久化的事件发出去（这一步不区分"这是第一次订阅还是重连"，永远是同一套查询逻辑），发完之后判断任务是否已经终态且游标已追平——是就 `return` 关闭连接；不是就调用 `manager.wait_for_events(...)` 挂起等待新事件（内部是一个进程内共享的 `asyncio.Condition`，Worker 每写一条新事件就 `notify_all()` 一次），等到超时（默认 15 秒）还没等到新数据，就发一条 `: heartbeat`。**心跳不占用 sequence、不写数据库、不会被下一次查询重放到**，它纯粹是为了防止连接被中间代理判定为空闲而断开。
+
+浏览器主动断开只会让这个 `source()` 生成器被 GC/取消，不会影响 `_execute()` 那个独立的 asyncio.Task——这正是"页面刷新后任务继续跑"在代码层面的关键：**SSE 连接的生命周期和 Agent 执行的生命周期是两个完全独立的对象，谁死了不影响另一个**。
 
 ### 3.6 服务重启恢复
 
-启动时 `_recover_stale()` 处理全部遗留的 `running` Run：`attempt` 小于恢复上限（默认 2）就清空租约重新置为 `queued`，达到上限就标记 `failed`。重新排队的任务被 Worker 再次领取后，`AgentService` 会传入 `resume=True`，[runtime.py](../../backend/app/agent/runtime.py) 用同一个 `thread_id` 调用 `graph.compiled.aget_state()` 取回最近一次 Checkpoint 的 State，把 `model_call_count`/`tool_call_count` 也一并恢复进请求级 Context——**恢复后调用计数不会归零**，避免服务重启变成绕过模型/工具调用上限的漏洞。
+[agent_runs.py:290-309](../../backend/app/services/agent_runs.py#L290) `_recover_stale()`，在 `AgentRunManager.start()` 里、启动轮询 Worker **之前**执行：
+
+```python
+def _recover_stale(self) -> None:
+    with SessionLocal() as db:
+        running = list(db.scalars(select(AgentRun).where(AgentRun.status == "running")))
+        for run in running:
+            if run.attempt >= self.settings.agent_run_recovery_max_attempts:
+                run.status = "failed"
+                run.error_type = "RecoveryLimitExceeded"
+                self._append_event_in_session(db, run, "error", {"message": "任务恢复次数达到上限，请重新发送问题"})
+            else:
+                run.status = "queued"
+                run.current_stage = "queued"
+                run.lease_owner = ""
+                run.lease_expires_at = None
+        db.commit()
+```
+
+进程重启后，任何停在 `status='running'` 的行都被认为是"上次没跑完就意外中断的任务"：`attempt`（累计尝试次数）还没到上限（默认 2 次）就清空租约、打回 `queued`，等着 Worker 循环重新捞到它；已经到上限就直接判失败，不再无限重试下去。**注意这一步目前没有按 `lease_owner` 过滤**——它把任何 `running` 行都当成"我自己上次遗留的"，这在单机单 Worker 场景下是成立的（因为不可能有别的 Worker），但在多实例共享数据库的场景下会出问题，这正是我们前面详细聊过的那个"会误杀其他实例正在合法执行的任务"的 bug，见 §6。
+
+重新被 Worker 领取（再次走一遍 §3.3 的 `_claim()`）之后，`attempt` 已经大于 1，`AgentService` 会据此传入 `resume=True`；[runtime.py](../../backend/app/agent/runtime.py) 见 [02-langgraph-checkpoint.md](02-langgraph-checkpoint.md) §3.2，只有这条 `resume=True` 分支才会真正调用 `graph.compiled.aget_state()`，把上次 Checkpoint 里的 State 和调用计数读回来——**恢复后调用计数不会归零**，避免服务重启变成绕过模型/工具调用上限的漏洞。
 
 ## 4. 设计取舍
 
