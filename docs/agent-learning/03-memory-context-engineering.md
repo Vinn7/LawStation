@@ -138,16 +138,32 @@ if not result.rowcount:
 - `result.rowcount` 为 0 说明这次 `UPDATE` 没有真正命中任何行（版本号已经被别的并发请求改过），会重试一次；仍然失败就放弃这次替换，返回 `version_conflict`，不会用一个过期的判断强行覆盖。
 - 旧内容会写进 `MemoryRevision` 表（`action="auto_replace"`）而不是直接消失——保留可追溯的修订历史。
 
-### 3.6 状态字段的实现现状：schema 预留的 superseded 链没有被启用
+### 3.6 状态字段的实现现状：两条并存、彼此不知道对方存在的冲突消解路径
 
-`UserMemory.status` 的类型定义了五种值：`pending/active/superseded/rejected/expired`（[memory_schemas.py:10](../../backend/app/services/memory_schemas.py#L10)），`superseded_by_id` 这一列（[models.py:153-155](../../backend/app/db/models.py#L153)）从命名上看，是为"旧记忆保留一行、标记 `superseded`、`superseded_by_id` 指向替换它的新记忆"这种典型的多版本链设计准备的。
+`UserMemory.status` 的类型定义了五种值：`pending/active/superseded/rejected/expired`（[memory_schemas.py:10](../../backend/app/services/memory_schemas.py#L10)）。全仓核实之后，实际情况是：**`superseded`/`rejected` 确实会被写入，但走的是和自动抽取完全不同的另一条代码路径**。
 
-但实际写路径不是这样跑的：新建记忆时永远直接写 `status="active"`（[persistence.py:188](../../backend/app/services/memory_tasks/persistence.py#L188)），从不经过 `pending`；`_replace_memory` 的 `UPDATE` 语句**原地覆写同一行的 `content`**，`status` 根本不出现在 `.values(...)` 里（保持原来的 `active`），`superseded_by_id` 还被显式设成 `None`（[persistence.py:255](../../backend/app/services/memory_tasks/persistence.py#L255)）。也就是说：
+**路径 A——自动抽取管道**（[memory_tasks/persistence.py::_replace_memory](../../backend/app/services/memory_tasks/persistence.py#L216)，§3.5 讲过）：`UPDATE` 语句原地覆写同一行的 `content`，`status` 不出现在 `.values(...)` 里（保持 `active`），`superseded_by_id` 被显式设成 `None`。历史只留在 `MemoryRevision` 表的一条 `action="auto_replace"` 记录里，旧内容本身不再以一条独立的 `UserMemory` 行存在。
 
-- `superseded`/`rejected`/`expired` 这三个状态值在当前代码里**从未被真正写入过**——它们是 `MemoryStatus` 类型定义里"预留但未使用"的字面量，全仓搜索也找不到任何一处对 `UserMemory.status` 赋这三个值的代码。
-- 版本历史不是靠"旧行标 `superseded`、留在表里"实现的，而是靠**同一行原地更新 + 另开一张 `MemoryRevision` 表记流水**（`action="auto_replace"`，记 `previous_content`/`new_content`/`previous_status`/`new_status`）。
+**路径 B——手动治理管道**（[repositories.py:132-163](../../backend/app/services/repositories.py#L132) `set_memory_status`，由前端"管理我的记忆"面板通过 [`POST /api/memories/{id}/confirm`](../../backend/app/api/routes/memories.py#L65) / [`/reject`](../../backend/app/api/routes/memories.py#L70) 触发）：
 
-这两种模式能达到的效果不一样：当前的"原地覆写 + 流水表"能回答"这条记忆的内容变更历史是什么"，但做不到"让某条历史版本重新变回 active"——因为旧内容已经不在 `UserMemory` 表的任何一行里，只作为一段文本存在于 `MemoryRevision.previous_content` 字段里，不是一条可查询、可重新激活的记忆记录。真正启用 `superseded` 状态链的做法是**插入新行而不是覆写旧行**：旧行 `status` 改成 `superseded`、`superseded_by_id` 指向新行——这样旧版本依然是一条完整的、可以重新激活的 `UserMemory` 记录，代价是每次按 `canonical_key`/`scope` 查"当前有效版本"都要多加一个 `status != 'superseded'` 的过滤条件。
+- 用户点"拒绝"某条记忆 → 直接 `status = "rejected"`
+- 用户点"确认"某条记忆 → 该记忆变 `active`，**同时反查所有 `scope` + `canonical_key` 相同、当前也是 `active` 的其他记忆**，把它们标记为 `superseded`、`superseded_by_id` 指向刚确认的这条（[repositories.py:138-157](../../backend/app/services/repositories.py#L138)）——**旧行完整保留，不是覆写**，这才是真正意义上的多版本链：旧版本依然是一条可查询、理论上可以再次被"确认"重新激活的 `UserMemory` 记录。
+
+也就是说：
+- `superseded`/`rejected` **不是没人用**，是只被路径 B 使用，路径 A 从不使用。
+- `pending`/`expired` 才是真正从未被写入 `UserMemory.status` 的两个值：`pending` 因为自动创建走的是 `status="active"`（[persistence.py:188](../../backend/app/services/memory_tasks/persistence.py#L188)），从不经过 `pending`；`expired` 因为过期判断在查询时用 `expires_at` 时间戳现算（[repositories.py:77](../../backend/app/services/repositories.py#L77)），不会被物化成一个 `status` 取值。
+
+这带来一个值得留意的不一致：**同样是"这条新事实覆盖了旧事实"，走自动路径就是原地覆写、旧内容只剩流水表里一段文本；走手动路径就是旧行完整保留、可查询、可回滚**。两条路径的实现哲学不同，而且互不知晓——自动路径产生的替换不会被路径 B 的"反查同 `canonical_key` 记忆"逻辑感知到（因为路径 A 根本没有留下多余的行可供反查），路径 B 产生的 `superseded` 记忆在自动路径的目标查询里也会被正确排除（因为查询条件里有 `status == "active"`），不会读错，但"审计出来的变更历史"的完整程度取决于这条记忆最近一次是被哪条路径改的。
+
+### 3.7 比对逻辑的语义不稳定性：canonical_key 和 content 都由模型输出
+
+§3.4 讲的"目标定位"依赖两个信号——`replaces_memory_id` 和 `canonical_key`——**这两个字段都是模型每次调用时现场生成的自由文本，没有任何固定词表或 schema 约束具体取什么值**（[memory_schemas.py:30](../../backend/app/services/memory_schemas.py#L30) 对 `canonical_key` 只限制了长度，没有限制取值集合），`_canonical_key` 的规范化也只在字符串层面做小写/合并空白/截断（[helpers.py:120-125](../../backend/app/services/memory_tasks/helpers.py#L120)），没有语义层面的归一化（没有同义词表、没有向量相似度）。这意味着落库时"这条新事实和哪条旧事实是同一件事"这个判断，完全依赖模型每次给出语义一致的 key，没有任何确定性代码能纠正模型的不稳定：
+
+- **同一件事，两次抽取给出不同 `canonical_key` 字符串** → 按 `canonical_key` 相等做的回退匹配（[persistence.py:125](../../backend/app/services/memory_tasks/persistence.py#L125)）会判定"这是两个不同槽位"，不触发替换——结果是插入了第二条本该替换第一条、实际却和它并存的记忆，下次组装 Prompt 时两条矛盾的记忆会被一起塞给模型。
+- **`replaces_memory_id` 同样不是确定性兜底**：它比 `canonical_key` 回退更可靠一点（服务端会核验 ID 确实存在、归属和作用域正确，见 §3.4③），但"要不要填这个字段"本身也是模型的判断——模型如果没能从 `existing_memories` 里认出冲突，就不会填，`canonical_key` 又恰好漂移了的话，两道信号同时失效，脏数据会静默累积成多条互相矛盾但都是 `active` 的记忆。
+- **`content` 的漂移影响较小，但会制造噪音**：`target.content == candidate.content` 是精确字符串比较（[persistence.py:144](../../backend/app/services/memory_tasks/persistence.py#L144)），不是语义比较——同一事实两次总结的措辞如果不完全一样，即使事实没变，也会被判定为"内容不同"触发一次没必要的替换，多写一条 `MemoryRevision`。
+
+服务端的确定性代码（原子 UPDATE、乐观锁、所有权校验）解决的是"确认要替换时，并发/越权层面不出错"，但"这两条是不是同一件事"这个语义判断本身，目前完全没有确定性兜底——这是整套记忆系统里最容易被面试追问到、也最值得诚实承认的一个薄弱环节。
 
 ## 4. 设计取舍
 
@@ -157,14 +173,15 @@ if not result.rowcount:
 
 **为什么记忆抽取用独立的模型配置，而不是复用主 Agent 的模型调用？** `LLMProvider.get_memory_model()` 是一个独立的、非流式、非 Thinking 的模型配置，和主对话链路的模型调用完全分开——这样记忆整理这个后台任务的输出格式要求、超时策略变化，不会影响主对话链路的行为，两者可以独立演进。
 
-**为什么记忆替换选择"原地覆写 + 独立流水表"，而不是"新增行 + `superseded` 状态链"（见 §3.6）？** 前者实现更简单：一次 `UPDATE` 就能同时完成内容替换和乐观锁校验，读取时也不用关心"这个 `canonical_key` 下可能有多行，只有一行是当前有效版本"；后者需要在所有按 `scope`/`canonical_key` 查询"当前有效记忆"的地方都加上过滤条件，查询逻辑更复杂，但换来的是旧版本本身仍是一条可独立查询、可重新激活的记忆记录。这是一个**用能力换简单性**的取舍——本项目目前的场景只需要"看到变更历史用于审计/调试"，不需要"回滚到某个历史版本"，前者够用；如果后续要支持回滚，这里需要重新设计。
+**为什么自动替换选择"原地覆写 + 独立流水表"，手动确认却选择"保留旧行 + `superseded` 状态链"（见 §3.6）？** 这更像是两个子功能各自独立演进、没有回头统一的结果，而不是一次深思熟虑的整体取舍：自动路径的优化目标是"高频后台任务尽量简单快"，一次 `UPDATE` 就能同时完成内容替换和乐观锁校验；手动确认路径的优化目标是"用户操作要可追溯、可反悔"，所以选了保留旧行的实现。两者都自洽，但放在一起看就是一个**没有被显式承认的不一致**——诚实的说法是"这是渐进式开发留下的结构性差异，如果要统一，需要选定一种模式并把另一边的读写路径都迁移过去"，而不是包装成"有意为之的分层设计"。
 
 ## 5. 易错点
 
 - **以为 `MemoryService.consolidate()` 只是被废弃的旧文档说法，实际还能调用**：这个方法已经被显式改成调用直接 `raise RuntimeError`（[memory.py:187-191](../../backend/app/services/memory.py#L187)）——这是一种"用代码强制淘汰旧接口"的做法，不只是文档说"别用这个了"，而是让旧入口物理上无法被误用。如果看到还有代码路径调用它，那是一个需要立刻修的 Bug，不是"遗留但还能跑"。
 - **改了预算分配比例常量却没有验证效果**：token 估算本身是近似值，预算分配比例是硬编码常量，改动前后需要实际观察某一层是否经常被过度截断（`truncated=True`），而不是凭直觉调整数字。
 - **混淆"案件级记忆"和"用户级偏好"的隔离边界**：案件级记忆只属于发起它的那个会话，如果在查询时误用了跨会话的查询条件，会导致案件 A 的具体事实泄露进案件 B——这个隔离是在 SQL 层面做的，业务代码不应该在应用层"再过滤一次"来兜底，那样反而掩盖了本该在数据层拦住的错误。
-- **误以为 `MemoryStatus` 定义的 `superseded`/`rejected`/`expired` 在数据库里真的会出现**：这几个状态值目前从未被任何写路径赋值过（见 §3.6）——如果按这些状态写监控指标或查询过滤条件，永远查不到结果；这不是查询写错了，是这套状态机在当前实现里根本没有被启用到那个程度，看类型定义容易误判实现完整度。
+- **只查了一条代码路径就断言某个状态值"从未被使用"**：`UserMemory.status` 有 `superseded`/`rejected` 两个值，如果只看自动抽取管道（`memory_tasks/persistence.py`）会得出"这两个状态从未被写入"的错误结论——它们其实被另一条独立的手动确认/拒绝路径（`repositories.py::set_memory_status`）真实写入，见 §3.6。**这是一个通用的踩坑模式，不只是记忆系统的特例**：一个字段/状态在某个模块里看起来没用到，不代表它在全仓库范围内没用到，下结论前要搜完整个代码库，而不是只搜自己正在看的那个文件或那条调用链——这条踩坑本身就是我写这篇文档时真实犯过的错误。真正从未被写入 `UserMemory.status` 的只有 `pending`（自动创建直接给 `active`）和 `expired`（过期判断在查询时用 `expires_at` 现算，不物化成 `status`）。
+- **误以为 `canonical_key` 相同就一定是模型可靠地识别出了"同一件事"**：`canonical_key` 是模型每次现场生成的自由文本，没有词表约束，两次抽取给出不一致的 key 是完全可能发生的（见 §3.7）——这不是一个理论上的边界情况，而是"结构化抽取"这条技术路线本身固有的弱点：结构化字段的可解释性是靠模型的语义判断力换来的，判断力不稳定，字段的一致性就跟着不稳定，代码层面没有兜底手段。
 
 ## 6. 生产化差距与面试应对
 
@@ -177,19 +194,26 @@ if not result.rowcount:
 | 记忆抽取质量监控 | 抽取失败分类记录（`empty_response`/`invalid_json`/`schema_validation_error`），但没有持续的抽取质量评测 | 生产级记忆系统通常会持续采样评测"抽取的记忆是否准确、是否遗漏关键信息"，形成质量回归基线 | "当前只监控抽取失败率，还没有对'抽取内容准确性'做持续评测；这块可以接入 [08-agent-rag-eval-methodology.md](08-agent-rag-eval-methodology.md) 讲的评测方法论" |
 | 存储规模 | 单机 SQLite，记忆条目和摘要都在业务库里 | 记忆条目量级大之后，通常会拆分成独立的存储服务，甚至引入向量索引做混合检索（结构化字段 + 语义相似度） | "当前规模下结构化字段查询足够快；如果单用户记忆条目数量级上升，可能需要引入检索索引辅助召回相关记忆，而不是每次全量拉取" |
 | 记忆治理 UI | 有前端"管理我的记忆"面板支持确认/拒绝，但主要服务历史/兼容场景 | 生产系统通常会有更完整的用户数据控制能力（导出、批量删除、按类型/时间范围管理），配合数据合规要求 | "当前的治理能力覆盖了基本场景，如果要满足更严格的数据合规要求（比如用户要求彻底删除某类记忆），还需要补充批量管理能力" |
-| 记忆版本链 | `status` 字段预留了 `superseded`/`rejected`/`expired`，但替换只做原地覆写 + `MemoryRevision` 流水表，这三个状态从未被写入（见 §3.6） | 生产级记忆系统通常需要支持"查看/回滚到历史版本"，这要求旧版本本身是一条可查询、可重新激活的记录，而不只是流水表里的一段文本 | "当前的原地覆写模式能满足审计诉求，但不支持回滚；如果要支持回滚，需要改成'新增行 + 状态链'模式，旧行标记 `superseded` 而不是被覆写，查询逻辑也要相应加上状态过滤" |
+| 记忆版本链不统一 | 自动替换走"原地覆写 + `MemoryRevision` 流水表"，手动确认/拒绝走"保留旧行 + `superseded`/`rejected` 状态链"，两条路径行为不一致（见 §3.6） | 生产级系统通常只保留一种版本历史模型，并且所有写路径都遵守它，便于审计和回滚逻辑统一 | "这是两个子功能独立演进留下的结构性差异，不是有意为之的分层设计；要收敛，需要选定一种模式（更可能是保留旧行的 `superseded` 链，因为它信息更完整），把自动路径也迁移过去" |
+| 记忆比对缺少确定性兜底 | "这条新事实是否等同于某条旧事实"完全由模型现场判断（`canonical_key` 字符串匹配 + `replaces_memory_id`），没有语义相似度等确定性/半确定性手段兜底（见 §3.7） | 生产级记忆系统通常会加一层语义去重/合并（embedding 相似度、聚类，或至少对 key 做受控词表/枚举约束），减少"同一事实因为措辞不同被判定成不同槽位"的概率 | "当前的设计原则是'模型输出只是建议、写库前重新校验'，但校验的是所有权和并发安全，没有校验语义一致性；如果要补，可以在落库前加一层基于 embedding 的相似记忆召回，辅助模型或替代 `canonical_key` 精确匹配" |
 
 ## 7. 动手验证方式
 
-1. 在对话里明确提一个事实（比如"我是房东"），再在后续消息里修正它（"抱歉说错了，我是租客"），通过前端"管理我的记忆"面板观察这条记忆是否被原位替换而不是新增一条。
-2. 查一下 `memory_revisions` 表，看修订历史是否被完整保留：
+1. 在对话里明确提一个事实（比如"我是房东"），再在后续消息里修正它（"抱歉说错了，我是租客"），观察自动抽取管道是否原位替换了这条记忆（内容变了，但 `select count(*)` 不变、`status` 仍是 `active`）。
+2. 查一下 `memory_revisions` 表，看步骤 1 的修订历史是否被完整保留：
    ```bash
-   sqlite3 data/runtime/lawstation.db "select action, previous_content, new_content from memory_revisions order by created_at desc limit 5;"
+   sqlite3 data/runtime/lawstation.db "select action, previous_content, new_content, previous_status, new_status from memory_revisions order by created_at desc limit 5;"
    ```
-3. 读一遍 [memory_schemas.py](../../backend/app/services/memory_schemas.py) 里 `MemorySnapshot` 的字段定义，对照 `MemoryService.snapshot()` 的返回值，确认自己能说清楚每个字段是从哪一步计算出来的。
+3. 通过前端"管理我的记忆"面板，对两条 `canonical_key` 相同的 `active` 记忆之一点"确认"，然后查表观察和步骤 1 的区别：
+   ```bash
+   sqlite3 data/runtime/lawstation.db "select id, status, superseded_by_id, version from user_memories where canonical_key = '<替换成实际的 key>';"
+   ```
+   应该能看到未被确认的那一条 `status` 变成了 `superseded`、`superseded_by_id` 指向被确认的那条——这条行本身还在，和步骤 1/2 的"原地覆写、旧内容只剩流水表文本"形成对照。
+4. 读一遍 [memory_schemas.py](../../backend/app/services/memory_schemas.py) 里 `MemorySnapshot` 的字段定义，对照 `MemoryService.snapshot()` 的返回值，确认自己能说清楚每个字段是从哪一步计算出来的。
 
 **自测题：**
 
 - 如果两个并发的记忆整理任务同时试图替换同一条记忆，`_replace_memory` 是怎么保证不会有一个任务的更新被另一个悄悄覆盖的？（提示：想想乐观锁版本号在 `WHERE` 子句里的作用）
 - 为什么案件级记忆的隔离要做在 SQL 查询条件里，而不是查出来之后在 Python 代码里过滤掉不属于当前会话的记忆？两种做法在"漏改一处代码"时的后果有什么区别？
-- 如果要让 `UserMemory.status` 里的 `superseded` 状态真正生效（支持"回滚到某个历史版本"），`_replace_memory` 的实现需要怎么改？现在的"原地覆写"为什么做不到这一点？
+- 自动抽取的 `_replace_memory`（路径 A）和手动确认的 `set_memory_status`（路径 B）对"旧记忆去哪了"给出了不同答案——如果要把两条路径统一成一种版本历史模型，你会选哪一种？统一之后，读侧（`MemoryService.snapshot()`/`context_memories()`）的查询条件需要跟着改吗？
+- 设想一个场景：用户在两条不同消息里分别说了"我月薪 2 万"和"我税前月薪 2 万"，模型两次抽取给的 `canonical_key` 恰好不一样。这会导致系统状态变成什么样？现在的代码里，有没有任何一步能自动发现并修正这种情况？
