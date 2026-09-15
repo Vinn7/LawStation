@@ -47,6 +47,7 @@ LawStation 是一个单进程、单端口的多用户法律咨询 Agent：React 
 20. [配置、测试与部署](config-test-deploy.md)：环境、构建、Docker 和测试矩阵。
 21. [多轮对话样例与场景观察手册](conversation-scenario-generation-guide.md)：四阶段生成/冻结、断点续跑、前端逐步观察和安全清理。
 22. [Review 发现](review-findings.md)：亮点、偏差、风险和改进优先级。
+23. [高级后端面试命题与评分规范](interview-answer-rubric.md)：按题型选择最小充分回答结构，并统一概念型命题、分层评分与单题讨论流程。
 
 ## 一句话主链路
 
