@@ -197,14 +197,68 @@ rrf(chunk) = Σ 1 / (61 + zero_based_rank_in_source)
 
 ### 3.6 证据链闭环：检索结果不能直接变成引用
 
-**功能**：确保最终回答里出现的每一条法条引用，都能追溯到这一轮真实检索到的证据，不会被模型凭空编造或张冠李戴——检索只负责"找出候选"，模型有编造正文、引用错误 chunk 的可能，这一层专门堵这个缺口。
+**功能**：确保最终回答里出现的每一条法条引用，都能追溯到这一轮真实检索到的证据，不会被模型凭空编造或张冠李戴——检索只负责"找出候选"，模型自己写正文时依然有编造内容、引用错误 chunk、声称用了证据但其实没用这几种失败可能。这一层不是一道关卡，而是**四道独立的关卡**，各自堵住其中一种失败模式，任何一道单独失效，后面的还能兜住——这也是它被称为"闭环"而不是"一次校验"的原因。
 
-**代码实现**：四层独立收敛：
+**第一道关：Research 节点权威映射——模型只能"选"，不能"写"**
 
-1. **Research 节点第一次权威映射**：[nodes/research.py:141](../../backend/app/agent/graph/nodes/research.py#L141) 调用 [`_authoritative_evidence`（graph/evidence.py:83-125）](../../backend/app/agent/graph/evidence.py#L83)，按模型选的 `chunk_id` 回填真实候选的 `law_name`/`article_number`/`content`，模型自己写的正文不会进入 `EvidenceItem`。
-2. **兜底 Selector**：候选存在但模型既未接受也未拒绝时，[research.py:142-187](../../backend/app/agent/graph/nodes/research.py#L142) 发起一次不带工具的受限选择，只能从已有 `chunk_id` 里选。
-3. **Review 节点的确定性引用校验**：[nodes/review.py:47](../../backend/app/agent/graph/nodes/review.py#L47) 调用 [`_citation_errors`](../../backend/app/agent/graph/evidence.py#L211)，检查草稿引用的 ID 是否都能在证据包里找到，只产出错误列表，不生成最终引用。
-4. **Finalize 节点的真正交集**：[`FinalizeNode.finalize`（graph/nodes/finalize.py:14-105）](../../backend/app/agent/graph/nodes/finalize.py#L14) 取"草稿实际引用的 ID"和"证据包里已核验的 ID"的交集，才构造最终 `Citation`。检索找到但回答没用到的候选，不会出现在引用列表里。
+模型在 `EvidencePacket.evidence_items` 里选中一个 `chunk_id` 之后，[nodes/research.py:141](../../backend/app/agent/graph/nodes/research.py#L141) 立即调用 [`_authoritative_evidence`（graph/evidence.py:83-125）](../../backend/app/agent/graph/evidence.py#L83)：
+
+```python
+by_chunk: dict[str, dict] = {}      # chunk_id -> 本轮真实候选
+by_document: dict[str, list] = {}   # document_id -> 该法条本轮命中的全部 chunk
+for candidate in candidates: ...    # 从真实 ToolMessage 里收集，不是模型说了算
+
+for selected in packet.evidence_items:
+    source = by_chunk.get(selected.chunk_id) if selected.chunk_id else None
+    if source is None and not selected.chunk_id:
+        legacy_matches = by_document.get(selected.document_id, [])
+        if len(legacy_matches) == 1:          # 只有唯一匹配才允许旧格式兼容
+            source = legacy_matches[0]
+    if source is None:
+        continue                              # 伪造/歧义/本轮不存在的 ID：静默丢弃
+    accepted.append(EvidenceItem(
+        document_id=..., chunk_id=..., law_name=..., article_number=..., content=...,
+    ))  # law_name/article_number/content 全部来自 source（真实候选），不是 selected（模型输出）
+```
+
+**关键在最后一步的字段来源**：新构造的 `EvidenceItem` 里，`law_name`/`article_number`/`content` 全部取自 `source`（本轮 MCP 工具真实返回的候选对象），模型自己在 `selected` 里写的任何正文/法名/条号都被**直接丢弃、从不采用**——模型能做的只有"用 `chunk_id` 指向哪一个真实候选"这一个动作，指向之后具体内容是什么，由服务端重新查真实数据回填。这就是为什么就算模型在这一步"编"了一段听起来很像的法条正文，也不可能进入 `EvidenceItem`：它写的正文根本没有被读取。`chunk_id` 找不到对应候选（伪造 ID、拼错、指向别的会话）时，`source is None`，这条证据被整条丢弃，不会有"部分采信"的中间状态。
+
+**第二道关：兜底 Selector——候选存在但模型没表态时，换一次更受限的调用**
+
+如果模型既没在 `evidence_items` 里接受任何候选，也没在 `rejected_candidates` 里明确拒绝（[research.py:142](../../backend/app/agent/graph/nodes/research.py#L142) 的 `if candidates and not accepted and not raw_packet.rejected_candidates`），说明模型很可能是"看漏了"而不是"确认没有相关的"——这时会追加一次**不带任何工具**的 Evidence Selector 子调用，输入只有候选的 `chunk_id`/`law_name`/`article_number`/`content`，模型只能在这个封闭列表里选 `accepted_chunk_ids`。选完之后 [research.py:163-165](../../backend/app/agent/graph/nodes/research.py#L163) 还要用候选 ID 集合把 Selector 的输出再裁剪一遍（`accepted_ids = {item for item in selection.accepted_chunk_ids if item in valid_ids}`）——防止这次子调用自己也编出一个不存在的 ID；裁剪完的结果重新走一遍第一道关的 `_authoritative_evidence`，不会跳过权威映射这一步。
+
+**第三道关：Review 节点的确定性引用校验——能强制推翻模型自己给出的"通过"结论**
+
+这一道关最容易被低估。[nodes/review.py:47](../../backend/app/agent/graph/nodes/review.py#L47) 调用 [`_citation_errors`（graph/evidence.py:211-239）](../../backend/app/agent/graph/evidence.py#L211)，它做两件事：(1) 草稿 `claims` 里声明引用的每个 ID，是否都在证据包的 `known_chunk_ids` 里，或者满足"该 `document_id` 本轮只对应一个 chunk"这个兼容旧格式的条件；(2) 用正则 `《([^》]+)》\s*(第[...]条)` **扫描回答正文本身**，把每一处"《法律名称》第 N 条"这样的表述提取出来，检查是否真的能在证据包里找到法名/条号都匹配的条目——**这一步和第一步不一样：它不看草稿声明了什么，只看正文实际写了什么**，能拦住"claims 字段里老老实实没多写，但正文里偷偷多编了一条"这种情况。
+
+真正关键的是这两类错误产生之后发生的事——[review.py:62-67](../../backend/app/agent/graph/nodes/review.py#L62)：
+
+```python
+deterministic_errors = _citation_errors(...)
+deterministic_errors.extend(_no_match_violations(...))     # no_match 时额外检查
+deterministic_errors.extend(_fact_boundary_errors(...))    # 是否还在用已被替换的旧事实
+if deterministic_errors:
+    review.approved = False                # 不管 LLM Reviewer 自己判了 approved=True 还是 False，
+    review.next_action = "revise_draft"     # 只要确定性检查发现问题，强制改成不通过、要求改稿
+```
+
+也就是说，**Reviewer 这个 LLM Agent 自己给出的 `approved` 结论，从来不是最终结论**——它上面永远盖着一层确定性代码检查，任何一条硬错误命中，都会不由分说地把 `approved` 强制改成 `False`，模型的判断在这里只是"建议"，服务端代码才是最终裁决者。这三类确定性检查（引用归属、`no_match` 幻觉、事实边界）共用同一套"命中就否决"的机制，不是三个各自独立生效的小功能。
+
+**第四道关：Finalize 节点——先决定"这段回答能不能原样输出"，再决定"引用列表里放什么"**
+
+[`FinalizeNode.finalize`（graph/nodes/finalize.py:14-105）](../../backend/app/agent/graph/nodes/finalize.py#L14) 其实做了两件独立的事，现有版本的文档只讲了第二件，第一件同样重要：
+
+- **步骤 3A/3B：整段回答的安全替换**（[finalize.py:33-55](../../backend/app/agent/graph/nodes/finalize.py#L33)）——如果 `retrieval_status == "no_match"`，还要再跑一遍 `_no_match_violations`（正则查有没有偷偷出现法名/条号、有没有披露"未检索到可引用法条"），只要有一条没通过，或者 Reviewer 没批准，整段 `answer` 直接被替换成固定安全模板（`_no_match_safe_answer`），不输出模型写的任何内容；如果不是 `no_match`，但 Reviewer 明确指出了无依据论断、遗漏争议点、引用错误或自相矛盾，也不输出原草稿，只列出"已核验到的材料"这份确定性摘要加一句"建议重新咨询"。这一步发生在 Citation 收集**之前**——先确保正文本身没有越界内容，再考虑给它配哪些引用。
+- **步骤 5-7：草稿实际引用和证据包已核验证据的真正交集**（[finalize.py:64-91](../../backend/app/agent/graph/nodes/finalize.py#L64)）——先收集 `counsel_draft.claims` 里实际用到的全部 `chunk_id`/`document_id`（`referenced_ids`），再统计每个 `document_id` 本轮对应几个 chunk（`document_counts`），只遍历 `retrieval_status == "matched"` 的证据条目（`no_match` 恒产出零条引用，呼应上面 3A 的模板替换逻辑），对其中被草稿引用、或满足"该 `document_id` 本轮只有一个 chunk"这一兼容旧格式条件的条目去重（`seen_documents`）后，才构造最终 `Citation`，摘录截断到 240 字。**检索找到但回答没有真正用到的候选，不会出现在引用列表里**——"检索到"和"被引用"是两件独立的事，只有真正被用上、且通过了上面三道关的，才走到这一步。
+
+**四道关各自堵住的失败模式**：
+
+| 关卡 | 堵住什么 |
+|---|---|
+| ① Research 权威映射 | 模型编造正文、引用伪造/不存在的 chunk_id |
+| ② 兜底 Selector | 模型看到候选但没有明确表态，导致证据被遗漏 |
+| ③ Review 确定性校验 | 草稿声明之外，正文里偷偷多编的引用；Reviewer 自己误判"通过" |
+| ④ Finalize 双重收敛 | 整体回答内容越界（no_match 幻觉/无依据论断）；检索到但没真正用上的候选混进引用列表 |
 
 **相关参数**：这一层没有配置参数——是纯代码逻辑约束，不受任何环境变量控制。
 
